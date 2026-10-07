@@ -43,7 +43,6 @@ from config import load_config, save_config, load_window_state, save_window_stat
 from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
-from visual_editor import VisualCensorDialog
 from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads
 
 DARK_STYLE = """
