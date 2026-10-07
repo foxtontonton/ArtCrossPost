@@ -141,8 +141,8 @@ class XTwitterDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://x.com/compose/post", timeout=25000)
                 try:
                     page.wait_for_selector("div[data-testid='tweetTextarea_0'], input[data-testid='fileInput']", timeout=15000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[X] 发帖页关键选择器等待超时，体检将标记为 unknown: {e}")
 
                 manifest = self.get_selector_manifest()
                 for key, sel in manifest.items():
@@ -526,6 +526,7 @@ class XTwitterDispatcher(BaseDispatcher):
                                         tweet_btn = b
                                         break
                             except Exception:
+                                # 轮询期间 DOM 刷新导致元素句柄失效属预期情况，跳过该按钮继续轮询
                                 pass
                         if tweet_btn:
                             break
