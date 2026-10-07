@@ -160,8 +160,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://www.deviantart.com/submit", timeout=35000)
                 try:
                     page.wait_for_selector("input[type='file']", timeout=15000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[DA] 投稿页上传入口等待超时，体检将标记为 unknown: {e}")
 
                 manifest = self.get_selector_manifest()
                 upload_el = page.query_selector(manifest["upload_input"])
@@ -269,7 +269,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                             break
                     except Exception as e:
                         logger.debug(f"[DeviantArt] 轮询等待登录异常: {e}")
-                    time.sleep(1.5)
+                    time.sleep(1.5)  # 登录轮询间隔，避免高频查询触发平台风控
 
                 # 确保主页面引用为 DeviantArt 页面而不是已关闭的 OAuth 弹窗
                 for pg in context.pages:

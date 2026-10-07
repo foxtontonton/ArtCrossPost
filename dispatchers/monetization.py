@@ -139,8 +139,8 @@ class PatreonDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://www.patreon.com/posts/new", timeout=30000)
                 try:
                     page.wait_for_selector("button:has-text('Images'), div[role='button']:has-text('Images')", timeout=10000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[Patreon] 图片发布类型按钮等待超时，体检将标记为 unknown: {e}")
 
                 manifest = self.get_selector_manifest()
                 img_btn = page.query_selector(manifest["images_post_type"])
@@ -155,7 +155,10 @@ class PatreonDispatcher(BaseDispatcher):
 
                 if img_btn:
                     img_btn.click()
-                    time.sleep(1)
+                    try:
+                        page.wait_for_selector(manifest["title_input"], timeout=8000)
+                    except Exception as e:
+                        logger.debug(f"[Patreon] 切换图片发布类型后表单未渲染: {e}")
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("adult_checkbox", manifest["adult_checkbox"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
@@ -221,7 +224,7 @@ class PatreonDispatcher(BaseDispatcher):
                                 break
                         except Exception as e:
                             logger.debug(f"[Patreon] 轮询登录状态异常: {e}")
-                        time.sleep(1.5)
+                        time.sleep(1.5)  # 登录轮询间隔，避免高频查询触发平台风控
 
                     if not logged_in and not is_patreon_logged_in(page):
                         if not page.is_closed():
@@ -505,8 +508,8 @@ class KofiDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://ko-fi.com/manage/posts/new", timeout=30000)
                 try:
                     page.wait_for_selector("button:has-text('Image'), div:has-text('Image Post')", timeout=10000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[Ko-fi] 图片发布选项卡等待超时，体检将标记为 unknown: {e}")
 
                 manifest = self.get_selector_manifest()
                 tab_btn = page.query_selector(manifest["image_tab"])
@@ -521,7 +524,10 @@ class KofiDispatcher(BaseDispatcher):
 
                 if tab_btn:
                     tab_btn.click()
-                    time.sleep(1)
+                    try:
+                        page.wait_for_selector(manifest["title_input"], timeout=8000)
+                    except Exception as e:
+                        logger.debug(f"[Ko-fi] 切换图片发布选项卡后表单未渲染: {e}")
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
@@ -588,7 +594,7 @@ class KofiDispatcher(BaseDispatcher):
                                 break
                         except Exception as e:
                             logger.debug(f"[Ko-fi] 轮询登录状态异常: {e}")
-                        time.sleep(1.5)
+                        time.sleep(1.5)  # 登录轮询间隔，避免高频查询触发平台风控
 
                     if not logged_in and not is_kofi_logged_in(page):
                         if not page.is_closed():
