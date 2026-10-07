@@ -2584,11 +2584,13 @@ class MainWindow(QMainWindow):
                     new_w = max(320, int(cur_w * scale))
                     new_h = max(240, int(cur_h * scale))
                     if new_w >= cur_w or new_h >= cur_h:
-                        logger.warning(f"[GIF Optimizer] 已达最小安全分辨率，体积锁定在 {cur_size_mb:.2f}MB")
-                        break
+                        raise RuntimeError(
+                            f"GIF 体积无法压缩至 13.8MB 以内（当前 {cur_size_mb:.2f}MB，"
+                            f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，X 限制 GIF ≤ 15MB。"
+                        )
                     logger.info(f"[GIF Optimizer] 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
                     current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-                    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=128) for f in current_frames]
+                    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
 
                 p_frames[0].save(
                     str(out_p),
@@ -2654,8 +2656,12 @@ class MainWindow(QMainWindow):
                             "stroke": self.watermark_stroke_cb.isChecked()
                         }
 
-                    self._generate_composite_gif(current_file, save_path, censor_params, wm_params)
-                    self.notify(f"✅ GIF 动图已成功导出至: {Path(save_path).name}", level="success")
+                    try:
+                        self._generate_composite_gif(current_file, save_path, censor_params, wm_params)
+                        self.notify(f"✅ GIF 动图已成功导出至: {Path(save_path).name}", level="success")
+                    except RuntimeError as e:
+                        self.notify(f"❌ GIF 压缩失败，导出中止: {e}", level="error")
+                        logger.error(f"[导出中止] {e}")
         else:
             if self._current_rendered_pixmap is None:
                 self.notify("当前无渲染合成图可供导出！", level="warning")
@@ -2837,7 +2843,12 @@ class MainWindow(QMainWindow):
                         user_customized=bool(custom_boxes))
                     c_params = {"enabled": True, "style": style, "boxes": final_boxes}
 
-                self._generate_composite_gif(p, pub_out_path, censor_params=c_params, wm_params=wm_info)
+                try:
+                    self._generate_composite_gif(p, pub_out_path, censor_params=c_params, wm_params=wm_info)
+                except RuntimeError as e:
+                    self.notify(f"GIF 压缩失败，发布已中止: {e}", level="error")
+                    logger.error(f"[发布准备] {e}")
+                    return
                 public_images.append(str(pub_out_path))
             else:
                 if censor_enabled:
