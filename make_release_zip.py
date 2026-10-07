@@ -18,7 +18,6 @@ INCLUDE_FILES = [
     "config.py",
     "diagnostics.py",
     "logger.py",
-    "visual_editor.py",
     "watermark_engine.py",
     "x_text_utils.py",
     "requirements.txt",

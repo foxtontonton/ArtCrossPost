@@ -58,7 +58,6 @@ art_crosspost/
 ├── app.py                     # [核心] PyQt5 客户端主入口、三栏布局、UnifiedPreviewCanvas 画布组件、LoginThread 与 PublishThread
 ├── censor_engine.py           # [核心] AI 敏感部位检测与遮挡合成引擎 (黑条/马赛克/模糊、比例缩放)
 ├── watermark_engine.py        # [核心] 文字防盗印与排版引擎 (Windows 字体索引、子像素边界修正、平铺/定位覆盖)
-├── visual_editor.py           # 历史独立弹出式框选器 (已降级备用，核心能力已全面合流至 app.py 主画布)
 ├── config.py                  # 配置加载、窗口尺寸与分割条持久化、路径常量定义
 ├── diagnostics.py             # [核心] 全平台四维非侵入式自检与诊断引擎 (环境/连通/探针/选择器)
 │
