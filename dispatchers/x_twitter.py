@@ -141,8 +141,8 @@ class XTwitterDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://x.com/compose/post", timeout=25000)
                 try:
                     page.wait_for_selector("div[data-testid='tweetTextarea_0'], input[data-testid='fileInput']", timeout=15000)
-                except Exception as e:
-                    logger.debug(f"[X] 发帖页关键选择器等待超时，体检将标记为 unknown: {e}")
+                except Exception:
+                    pass
 
                 manifest = self.get_selector_manifest()
                 for key, sel in manifest.items():
@@ -370,6 +370,8 @@ class XTwitterDispatcher(BaseDispatcher):
                         return False, "X (Twitter) 媒体未能成功附加至推文，已中止发送以防文字单独泄露", compliance
 
                 # 3. 勾选官方 "Made with AI" 系统设置 (首条推文)
+                # 注: is_any_gif 必须在此处提前定义，供下方披露弹窗缺失分支与第 4 步复用
+                is_any_gif = any(str(x).lower().endswith(".gif") for x in abs_images)
                 if is_ai:
                     ai_verified = None
                     ai_detail = "未打开披露设置弹窗"
@@ -421,7 +423,7 @@ class XTwitterDispatcher(BaseDispatcher):
                     compliance.append(self.verify_compliance_item("x_twitter", "ai_disclosure", False, True, "未要求开启 AI 披露"))
 
                 # 4. 媒体级敏感警告 (Nudity) 与 官方 AI 生成标识 (首条推文)
-                is_any_gif = any(str(x).lower().endswith(".gif") for x in abs_images)
+                # (is_any_gif 已在第 3 步前定义，此处直接复用)
                 if abs_images and (is_sensitive or is_ai):
                     if is_any_gif:
                         # 推特官方针对动态 GIF 原生不提供局部切图与媒体弹窗，敏感度依托全局/账户披露管控
@@ -526,7 +528,6 @@ class XTwitterDispatcher(BaseDispatcher):
                                         tweet_btn = b
                                         break
                             except Exception:
-                                # 轮询期间 DOM 刷新导致元素句柄失效属预期情况，跳过该按钮继续轮询
                                 pass
                         if tweet_btn:
                             break
@@ -561,8 +562,36 @@ class XTwitterDispatcher(BaseDispatcher):
                         succ_msg = "X (Twitter) 发布成功 (已勾选官方 Made with AI 及 Nudity 警告)"
                     return True, succ_msg, compliance
 
+                # 超时未激活：采集页面诊断信息，便于定位是上传未完成、按钮被禁用还是账号受限
+                diag_parts = []
+                try:
+                    btn_probe = page.query_selector("button[data-testid='tweetButton'], button[data-testid='tweetButtonInline']")
+                    if btn_probe:
+                        try:
+                            diag_parts.append(
+                                f"按钮存在于DOM: visible={btn_probe.is_visible()}, "
+                                f"enabled={btn_probe.is_enabled()}, "
+                                f"aria-disabled={btn_probe.get_attribute('aria-disabled')}"
+                            )
+                        except Exception:
+                            diag_parts.append("按钮存在于DOM但状态读取失败(句柄失效)")
+                    else:
+                        diag_parts.append("按钮不存在于DOM(页面结构可能变化或被重定向)")
+                    err_banner = page.query_selector("div[data-testid='toast'], div[role='alert']")
+                    if err_banner:
+                        try:
+                            diag_parts.append(f"页面提示: {(err_banner.text_content() or '').strip()[:120]}")
+                        except Exception:
+                            pass
+                    has_media = page.query_selector("div[data-testid='attachments']") is not None
+                    diag_parts.append(f"附件已挂载: {has_media}")
+                    diag_parts.append(f"当前URL: {page.url[:80]}")
+                except Exception as de:
+                    diag_parts.append(f"诊断采集异常: {de}")
+                diag_msg = "发帖按钮未能在预期时间内激活。" + " | ".join(diag_parts)
+                logger.warning(f"[X] {diag_msg}")
                 self.close_login_session(browser, context)
-                return False, "发帖按钮未能在预期时间内激活，可能图片尚未上传完成", compliance
+                return False, diag_msg, compliance
         except Exception as e:
             logger.error(f"[X] 自动化发布遇到异常: {e}")
             return False, f"X 自动化发布遇到异常: {e}", compliance
