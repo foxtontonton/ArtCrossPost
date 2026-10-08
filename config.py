@@ -17,8 +17,11 @@ CACHE_DIR = DATA_DIR / "cache"
 for d in [DATA_DIR, COOKIES_DIR, CACHE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+import copy
+
 DEFAULT_CONFIG = {
     "censor": {
+        "enabled": True,
         "style": "black_bar",  # "black_bar", "mosaic", "blur"
         "coverage_mode": "moderate", # "slender", "moderate", "full"
         "coverage_scale": 0.55, # 55% moderate scale
@@ -28,15 +31,16 @@ DEFAULT_CONFIG = {
     },
     "watermark": {
         "enabled": False,
+        "apply_to_publish": True,
         "text": "@FOXTONTONTON",
         "font_family": "微软雅黑 (Microsoft YaHei)",
         "font_size": 38,
         "opacity": 0.65,
         "position": "bottom_right",
         "color": "#ffffff",
-        "stroke": True,
-        "apply_to_publish": True
+        "stroke": True
     },
+    "selected_platforms": ["x_twitter", "deviantart"],  # 记录上次选中的发布平台
     "defaults": {
         "is_ai_generated": True,
         "x_sensitive": True,
@@ -54,7 +58,7 @@ def load_config():
         try:
             with open(PRESETS_FILE, "r", encoding="utf-8") as f:
                 user_conf = json.load(f)
-                merged = dict(DEFAULT_CONFIG)
+                merged = copy.deepcopy(DEFAULT_CONFIG)
                 for k, v in user_conf.items():
                     if isinstance(v, dict) and k in merged and isinstance(merged[k], dict):
                         merged[k] = {**merged[k], **v}
@@ -62,8 +66,8 @@ def load_config():
                         merged[k] = v
                 return merged
         except Exception:
-            return DEFAULT_CONFIG
-    return DEFAULT_CONFIG
+            return copy.deepcopy(DEFAULT_CONFIG)
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 def save_config(config_data):
     try:
