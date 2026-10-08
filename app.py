@@ -1251,6 +1251,12 @@ class MainWindow(QMainWindow):
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.timeout.connect(self._save_window_layout)
 
+        # 界面配置与控件参数自动持久化防抖定时器 (400ms，控件值变更时即时防抖持久化)
+        self._config_save_timer = QTimer(self)
+        self._config_save_timer.setSingleShot(True)
+        self._config_save_timer.setInterval(400)
+        self._config_save_timer.timeout.connect(self._sync_config_from_ui)
+
         # 草稿自动保存防抖定时器 (1000ms，输入停止 1 秒后自动持久化，P1-6)
         self._draft_save_timer = QTimer(self)
         self._draft_save_timer.setSingleShot(True)
@@ -1261,13 +1267,16 @@ class MainWindow(QMainWindow):
         app_inst = QApplication.instance()
         if app_inst:
             app_inst.aboutToQuit.connect(self._save_window_layout)
+            app_inst.aboutToQuit.connect(self._sync_config_from_ui)
             self._wheel_filter = NoWheelEventFilter(self)
             app_inst.installEventFilter(self._wheel_filter)
 
+        self._is_restoring_config = True
         self._is_restoring_layout = True
         self._build_ui()
         self._restore_window_layout()
         self._is_restoring_layout = False
+        self._is_restoring_config = False
         self._load_draft()
 
     def _save_draft(self):
@@ -1473,18 +1482,51 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def closeEvent(self, event):
+        if hasattr(self, "_config_save_timer") and self._config_save_timer.isActive():
+            self._config_save_timer.stop()
         if hasattr(self, "_layout_save_timer"):
             self._layout_save_timer.stop()
         self._save_window_layout()
         self._sync_config_from_ui()
         super().closeEvent(event)
 
+    def _schedule_config_save(self):
+        """调度配置防抖保存，在UI初始化完成后生效"""
+        if getattr(self, "_is_restoring_config", False):
+            return
+        if hasattr(self, "_config_save_timer"):
+            self._config_save_timer.start(400)
+
     def _sync_config_from_ui(self):
         """将界面当前的常用开关与设置回写至 presets.json，保证下次启动继承偏好"""
+        if getattr(self, "_is_restoring_config", False):
+            return
         try:
-            # 1. 水印参数
+            # 1. 打码参数
+            if "censor" not in self.config:
+                self.config["censor"] = {}
+            if hasattr(self, "auto_censor_cb"):
+                self.config["censor"]["enabled"] = self.auto_censor_cb.isChecked()
+            if hasattr(self, "censor_style_combo"):
+                style_keys = ["black_bar", "mosaic", "blur"]
+                idx = self.censor_style_combo.currentIndex()
+                if 0 <= idx < len(style_keys):
+                    self.config["censor"]["style"] = style_keys[idx]
+            if hasattr(self, "censor_mode_combo"):
+                mode_keys = ["moderate", "slender", "full"]
+                idx = self.censor_mode_combo.currentIndex()
+                if 0 <= idx < len(mode_keys):
+                    self.config["censor"]["coverage_mode"] = mode_keys[idx]
+            if hasattr(self, "censor_slider"):
+                self.config["censor"]["coverage_scale"] = round(self.censor_slider.value() / 100.0, 2)
+
+            # 2. 水印参数
+            if "watermark" not in self.config:
+                self.config["watermark"] = {}
             if hasattr(self, "watermark_enabled_cb"):
                 self.config["watermark"]["enabled"] = self.watermark_enabled_cb.isChecked()
+            if hasattr(self, "watermark_apply_publish_cb"):
+                self.config["watermark"]["apply_to_publish"] = self.watermark_apply_publish_cb.isChecked()
             if hasattr(self, "watermark_text_input"):
                 self.config["watermark"]["text"] = self.watermark_text_input.text()
             if hasattr(self, "watermark_font_combo"):
@@ -1492,7 +1534,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "watermark_size_slider"):
                 self.config["watermark"]["font_size"] = self.watermark_size_slider.value()
             if hasattr(self, "watermark_opacity_slider"):
-                self.config["watermark"]["opacity"] = self.watermark_opacity_slider.value() / 100.0
+                self.config["watermark"]["opacity"] = round(self.watermark_opacity_slider.value() / 100.0, 2)
             if hasattr(self, "watermark_pos_combo"):
                 self.config["watermark"]["position"] = self.watermark_pos_combo.currentData() or "bottom_right"
             if hasattr(self, "watermark_color_combo"):
@@ -1500,27 +1542,58 @@ class MainWindow(QMainWindow):
             if hasattr(self, "watermark_stroke_cb"):
                 self.config["watermark"]["stroke"] = self.watermark_stroke_cb.isChecked()
 
-            # 2. 打码参数
-            if hasattr(self, "censor_style_combo"):
-                style_keys = ["black_bar", "mosaic", "blur"]
-                idx = self.censor_style_combo.currentIndex()
-                if 0 <= idx < len(style_keys):
-                    self.config["censor"]["style"] = style_keys[idx]
-            if hasattr(self, "censor_mode_combo"):
-                mode_keys = ["slender", "moderate", "full"]
-                idx = self.censor_mode_combo.currentIndex()
-                if 0 <= idx < len(mode_keys):
-                    self.config["censor"]["coverage_mode"] = mode_keys[idx]
-            if hasattr(self, "censor_slider"):
-                self.config["censor"]["coverage_scale"] = self.censor_slider.value() / 100.0
+            # 3. 记录上次选中的发布平台
+            if hasattr(self, "platform_controls"):
+                self.config["selected_platforms"] = [
+                    name for name, ctrl in self.platform_controls.items()
+                    if ctrl["checkbox"].isChecked()
+                ]
 
-            # 3. 基础默认开关
+            # 4. 平台默认合规项与可见度
+            if "defaults" not in self.config:
+                self.config["defaults"] = {}
             if hasattr(self, "ai_checkbox"):
                 self.config["defaults"]["is_ai_generated"] = self.ai_checkbox.isChecked()
             if hasattr(self, "nsfw_checkbox"):
                 self.config["defaults"]["x_sensitive"] = self.nsfw_checkbox.isChecked()
 
+            if hasattr(self, "platform_controls"):
+                # X (Twitter)
+                if "x_twitter" in self.platform_controls:
+                    x_opts = self.platform_controls["x_twitter"]["options"]
+                    if "sensitive" in x_opts:
+                        self.config["defaults"]["x_sensitive"] = x_opts["sensitive"].isChecked()
+                    if "premium" in x_opts:
+                        self.config["defaults"]["x_premium"] = x_opts["premium"].isChecked()
+                    if "policy" in x_opts:
+                        self.config["defaults"]["x_over_limit_policy"] = x_opts["policy"].currentData() or "ask"
+
+                # DeviantArt
+                if "deviantart" in self.platform_controls:
+                    da_opts = self.platform_controls["deviantart"]["options"]
+                    if "mature" in da_opts:
+                        da_map = {0: "strict", 1: "moderate", 2: "none"}
+                        idx = da_opts["mature"].currentIndex()
+                        self.config["defaults"]["deviantart_mature"] = da_map.get(idx, "strict")
+
+                # Patreon
+                if "patreon" in self.platform_controls:
+                    pat_opts = self.platform_controls["patreon"]["options"]
+                    if "visibility" in pat_opts:
+                        pat_map = {0: "patrons", 1: "public", 2: "tiers"}
+                        idx = pat_opts["visibility"].currentIndex()
+                        self.config["defaults"]["patreon_visibility"] = pat_map.get(idx, "patrons")
+
+                # Ko-fi
+                if "kofi" in self.platform_controls:
+                    kofi_opts = self.platform_controls["kofi"]["options"]
+                    if "visibility" in kofi_opts:
+                        kofi_map = {0: "supporters", 1: "everyone", 2: "tier"}
+                        idx = kofi_opts["visibility"].currentIndex()
+                        self.config["defaults"]["kofi_visibility"] = kofi_map.get(idx, "supporters")
+
             save_config(self.config)
+            logger.debug("[Config] 界面配置已成功持久化至 presets.json")
         except Exception as e:
             logger.warning(f"[Config] 同步界面配置失败: {e}")
 
@@ -1562,12 +1635,15 @@ class MainWindow(QMainWindow):
         # 全局开关：NSFW 与 AI 创作
         toggle_layout = QVBoxLayout()
         self.nsfw_checkbox = QCheckBox("🔥 包含成人/敏感内容 (NSFW - 自动配置各平台分级)")
+        self.nsfw_checkbox.setChecked(self.config["defaults"].get("x_sensitive", True))
         self.nsfw_checkbox.stateChanged.connect(self._on_nsfw_toggled)
+        self.nsfw_checkbox.stateChanged.connect(lambda: self._schedule_config_save())
         toggle_layout.addWidget(self.nsfw_checkbox)
 
         self.ai_checkbox = QCheckBox("🤖 本作为 AI 工具创作 (严防封号，各平台自动同步勾选 AI 标识)")
-        self.ai_checkbox.setChecked(self.config["defaults"]["is_ai_generated"])
+        self.ai_checkbox.setChecked(self.config["defaults"].get("is_ai_generated", True))
         self.ai_checkbox.stateChanged.connect(self._on_master_ai_toggled)
+        self.ai_checkbox.stateChanged.connect(lambda: self._schedule_config_save())
         toggle_layout.addWidget(self.ai_checkbox)
         meta_layout.addLayout(toggle_layout)
         left_layout.addWidget(meta_group)
@@ -1634,15 +1710,21 @@ class MainWindow(QMainWindow):
 
         # 行 1: 打码开关 + 样式
         c_row1 = QHBoxLayout()
+        censor_cfg = self.config.get("censor", {})
         self.auto_censor_cb = QCheckBox("🛡️ 启用敏感部位打码 (公开发布端生效)")
-        self.auto_censor_cb.setChecked(True)
+        self.auto_censor_cb.setChecked(censor_cfg.get("enabled", True))
         self.auto_censor_cb.stateChanged.connect(self._schedule_preview_refresh)
+        self.auto_censor_cb.stateChanged.connect(lambda: self._schedule_config_save())
         c_row1.addWidget(self.auto_censor_cb)
 
         c_row1.addWidget(QLabel("样式:"))
         self.censor_style_combo = QComboBox()
         self.censor_style_combo.addItems(["纯黑条 (Black Bar)", "经典马赛克 (Mosaic)", "高斯模糊 (Blur)"])
+        c_style = censor_cfg.get("style", "black_bar")
+        style_map = {"black_bar": 0, "mosaic": 1, "blur": 2}
+        self.censor_style_combo.setCurrentIndex(style_map.get(c_style, 0))
         self.censor_style_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+        self.censor_style_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
         c_row1.addWidget(self.censor_style_combo)
         censor_vlayout.addLayout(c_row1)
 
@@ -1655,17 +1737,23 @@ class MainWindow(QMainWindow):
             "轻量细条 (极简保留90%)",
             "严实全遮 (100%覆盖)"
         ])
+        c_mode = censor_cfg.get("coverage_mode", "moderate")
+        mode_map = {"moderate": 0, "slender": 1, "full": 2}
+        self.censor_mode_combo.setCurrentIndex(mode_map.get(c_mode, 0))
         self.censor_mode_combo.currentIndexChanged.connect(self._on_censor_mode_changed)
+        self.censor_mode_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
         c_row2.addWidget(self.censor_mode_combo)
 
         c_row2.addWidget(QLabel("尺寸:"))
         self.censor_slider = QSlider(Qt.Horizontal)
         self.censor_slider.setRange(20, 120)
-        self.censor_slider.setValue(55)
+        init_scale = int(censor_cfg.get("coverage_scale", 0.55) * 100)
+        self.censor_slider.setValue(max(20, min(120, init_scale)))
         self.censor_slider.valueChanged.connect(self._on_censor_slider_changed)
+        self.censor_slider.valueChanged.connect(lambda: self._schedule_config_save())
         c_row2.addWidget(self.censor_slider)
 
-        self.censor_ratio_label = QLabel("55%")
+        self.censor_ratio_label = QLabel(f"{self.censor_slider.value()}%")
         self.censor_ratio_label.setMinimumWidth(38)
         self.censor_ratio_label.setStyleSheet("color: #818cf8; font-weight: bold;")
         c_row2.addWidget(self.censor_ratio_label)
@@ -1701,10 +1789,12 @@ class MainWindow(QMainWindow):
         self.watermark_enabled_cb = QCheckBox("💧 启用文字水印 (Watermark)")
         self.watermark_enabled_cb.setChecked(wm_config.get("enabled", False))
         self.watermark_enabled_cb.stateChanged.connect(self._schedule_preview_refresh)
+        self.watermark_enabled_cb.stateChanged.connect(lambda: self._schedule_config_save())
         w_row1.addWidget(self.watermark_enabled_cb)
 
         self.watermark_apply_publish_cb = QCheckBox("发布时自动应用水印")
         self.watermark_apply_publish_cb.setChecked(wm_config.get("apply_to_publish", True))
+        self.watermark_apply_publish_cb.stateChanged.connect(lambda: self._schedule_config_save())
         w_row1.addWidget(self.watermark_apply_publish_cb)
         wm_vlayout.addLayout(w_row1)
 
@@ -1715,6 +1805,7 @@ class MainWindow(QMainWindow):
         self.watermark_text_input.setText(wm_config.get("text", "@FOXTONTONTON"))
         self.watermark_text_input.setPlaceholderText("输入水印签名，如 @FOXTONTONTON ...")
         self.watermark_text_input.textChanged.connect(self._schedule_preview_refresh)
+        self.watermark_text_input.textChanged.connect(lambda: self._schedule_config_save())
         w_row2.addWidget(self.watermark_text_input)
         wm_vlayout.addLayout(w_row2)
 
@@ -1729,6 +1820,7 @@ class MainWindow(QMainWindow):
         if font_idx >= 0:
             self.watermark_font_combo.setCurrentIndex(font_idx)
         self.watermark_font_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+        self.watermark_font_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
         w_row3.addWidget(self.watermark_font_combo)
         wm_vlayout.addLayout(w_row3)
 
@@ -1739,6 +1831,7 @@ class MainWindow(QMainWindow):
         self.watermark_size_slider.setRange(1, 120)
         self.watermark_size_slider.setValue(wm_config.get("font_size", 38))
         self.watermark_size_slider.valueChanged.connect(self._on_watermark_size_changed)
+        self.watermark_size_slider.valueChanged.connect(lambda: self._schedule_config_save())
         w_row4.addWidget(self.watermark_size_slider)
 
         self.watermark_size_lbl = QLabel(f"{self.watermark_size_slider.value()}px")
@@ -1751,6 +1844,7 @@ class MainWindow(QMainWindow):
         self.watermark_opacity_slider.setRange(10, 100)
         self.watermark_opacity_slider.setValue(int(wm_config.get("opacity", 0.65) * 100))
         self.watermark_opacity_slider.valueChanged.connect(self._on_watermark_opacity_changed)
+        self.watermark_opacity_slider.valueChanged.connect(lambda: self._schedule_config_save())
         w_row4.addWidget(self.watermark_opacity_slider)
 
         self.watermark_opacity_lbl = QLabel(f"{self.watermark_opacity_slider.value()}%")
@@ -1776,6 +1870,7 @@ class MainWindow(QMainWindow):
                 self.watermark_pos_combo.setCurrentIndex(i)
                 break
         self.watermark_pos_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+        self.watermark_pos_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
         w_row5.addWidget(self.watermark_pos_combo)
 
         w_row5.addWidget(QLabel("颜色:"))
@@ -1791,11 +1886,13 @@ class MainWindow(QMainWindow):
                 self.watermark_color_combo.setCurrentIndex(i)
                 break
         self.watermark_color_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+        self.watermark_color_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
         w_row5.addWidget(self.watermark_color_combo)
 
         self.watermark_stroke_cb = QCheckBox("高对比防混色描边")
         self.watermark_stroke_cb.setChecked(wm_config.get("stroke", True))
         self.watermark_stroke_cb.stateChanged.connect(self._schedule_preview_refresh)
+        self.watermark_stroke_cb.stateChanged.connect(lambda: self._schedule_config_save())
         w_row5.addWidget(self.watermark_stroke_cb)
         wm_vlayout.addLayout(w_row5)
 
@@ -2062,8 +2159,10 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
 
         cb = QCheckBox(disp.display_name)
-        cb.setChecked(True)
+        selected_plats = self.config.get("selected_platforms", ["x_twitter", "deviantart"])
+        cb.setChecked(disp.name in selected_plats)
         cb.setStyleSheet("font-weight: bold; font-size: 15px;")
+        cb.stateChanged.connect(lambda: self._schedule_config_save())
         header.addWidget(cb)
 
         avatar_lbl = QLabel()
@@ -2108,17 +2207,20 @@ class MainWindow(QMainWindow):
 
             x_sens = QCheckBox("原生敏感警告 (Nudity 打标)")
             x_sens.setChecked(self.config["defaults"].get("x_sensitive", True))
+            x_sens.stateChanged.connect(lambda: self._schedule_config_save())
             x_row1.addWidget(x_sens)
             opts["sensitive"] = x_sens
 
             x_ai = QCheckBox("官方「Made with AI」披露勾选")
-            x_ai.setChecked(True)
+            x_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
+            x_ai.stateChanged.connect(lambda: self._schedule_config_save())
             x_row1.addWidget(x_ai)
             opts["ai"] = x_ai
 
             x_prem = QCheckBox("✨ X Premium 账号 (上限 25,000 字符)")
             x_prem.setChecked(self.config["defaults"].get("x_premium", False))
             x_prem.stateChanged.connect(self._on_x_premium_toggled)
+            x_prem.stateChanged.connect(lambda: self._schedule_config_save())
             x_row2.addWidget(x_prem)
             opts["premium"] = x_prem
 
@@ -2132,6 +2234,7 @@ class MainWindow(QMainWindow):
                     x_policy_combo.setCurrentIndex(p_idx)
                     break
             x_policy_combo.currentIndexChanged.connect(self._on_x_policy_changed)
+            x_policy_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
             x_row2.addWidget(x_policy_combo)
             opts["policy"] = x_policy_combo
 
@@ -2143,11 +2246,16 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(QLabel("Mature:"))
             da_combo = QComboBox()
             da_combo.addItems(["Strict (严格成人)", "Moderate (轻度)", "None (全年龄)"])
+            da_mature = self.config["defaults"].get("deviantart_mature", "strict")
+            da_map = {"strict": 0, "moderate": 1, "none": 2}
+            da_combo.setCurrentIndex(da_map.get(da_mature, 0))
+            da_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(da_combo)
             opts["mature"] = da_combo
 
             da_ai = QCheckBox("Created using AI tools")
-            da_ai.setChecked(True)
+            da_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
+            da_ai.stateChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(da_ai)
             opts["ai"] = da_ai
 
@@ -2155,11 +2263,16 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(QLabel("可见范围:"))
             pat_combo = QComboBox()
             pat_combo.addItems(["仅赞助者 (Patrons Only)", "公开 (Public)", "指定档位 (Tiers)"])
+            pat_vis = self.config["defaults"].get("patreon_visibility", "patrons")
+            pat_map = {"patrons": 0, "public": 1, "tiers": 2}
+            pat_combo.setCurrentIndex(pat_map.get(pat_vis, 0))
+            pat_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(pat_combo)
             opts["visibility"] = pat_combo
 
             pat_ai = QCheckBox("AI 内容披露")
-            pat_ai.setChecked(True)
+            pat_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
+            pat_ai.stateChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(pat_ai)
             opts["ai"] = pat_ai
 
@@ -2167,11 +2280,16 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(QLabel("可见范围:"))
             kofi_combo = QComboBox()
             kofi_combo.addItems(["仅打赏/会员 (Supporters)", "所有人公开 (Everyone)", "会员专属档位"])
+            kofi_vis = self.config["defaults"].get("kofi_visibility", "supporters")
+            kofi_map = {"supporters": 0, "everyone": 1, "tier": 2}
+            kofi_combo.setCurrentIndex(kofi_map.get(kofi_vis, 0))
+            kofi_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(kofi_combo)
             opts["visibility"] = kofi_combo
 
             kofi_ai = QCheckBox("AI 创作成品说明")
-            kofi_ai.setChecked(True)
+            kofi_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
+            kofi_ai.stateChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(kofi_ai)
             opts["ai"] = kofi_ai
 
@@ -2197,19 +2315,25 @@ class MainWindow(QMainWindow):
         label.setStyleSheet("border-radius: 18px; background-color: #374151; font-size: 16px;")
 
     def _on_master_ai_toggled(self, state):
+        if getattr(self, "_is_restoring_config", False):
+            return
         is_ai = (state == Qt.Checked)
         for ctrl in self.platform_controls.values():
             if "ai" in ctrl["options"]:
                 ctrl["options"]["ai"].setChecked(is_ai)
         self.notify(f"已同步更新全平台 AI 创作标识为: {'启用' if is_ai else '禁用'}", level="info")
+        self._schedule_config_save()
 
     def _on_nsfw_toggled(self, state):
+        if getattr(self, "_is_restoring_config", False):
+            return
         is_nsfw = (state == Qt.Checked)
         if "x_twitter" in self.platform_controls and "sensitive" in self.platform_controls["x_twitter"]["options"]:
             self.platform_controls["x_twitter"]["options"]["sensitive"].setChecked(is_nsfw)
         if "deviantart" in self.platform_controls and "mature" in self.platform_controls["deviantart"]["options"]:
             self.platform_controls["deviantart"]["options"]["mature"].setCurrentIndex(0 if is_nsfw else 2)
         self.notify(f"已同步更新各平台敏感/分级设定为: {'成人/敏感' if is_nsfw else '全年龄'}", level="info")
+        self._schedule_config_save()
 
     def _get_x_char_limit(self):
         if hasattr(self, "platform_controls") and "x_twitter" in self.platform_controls:
@@ -2246,18 +2370,22 @@ class MainWindow(QMainWindow):
             self.publish_btn.setEnabled(True)
 
     def _on_x_premium_toggled(self, state):
+        if getattr(self, "_is_restoring_config", False):
+            return
         is_prem = (state == Qt.Checked)
         self.config["defaults"]["x_premium"] = is_prem
-        save_config(self.config)
+        self._schedule_config_save()
         self._update_x_char_counter()
         desc = "25,000 字符 (✨ Premium)" if is_prem else "280 字符 (普通)"
         self.notify(f"X (Twitter) 字符上限已设置为: {desc}", level="info")
 
     def _on_x_policy_changed(self, idx):
+        if getattr(self, "_is_restoring_config", False):
+            return
         if "x_twitter" in self.platform_controls and "policy" in self.platform_controls["x_twitter"]["options"]:
             policy = self.platform_controls["x_twitter"]["options"]["policy"].currentData()
             self.config["defaults"]["x_over_limit_policy"] = policy
-            save_config(self.config)
+            self._schedule_config_save()
             p_map = {"ask": "每次询问", "truncate": "自动截断", "thread": "自动串推"}
             self.notify(f"已保存 X 默认超限策略为: {p_map.get(policy, policy)}", level="info")
 
@@ -2290,6 +2418,8 @@ class MainWindow(QMainWindow):
             self.notify("已取消本次发布，请在正文框精简文本后再试。", level="info")
 
     def _on_censor_mode_changed(self, idx):
+        if getattr(self, "_is_restoring_config", False):
+            return
         if idx == 0:
             self.censor_slider.setValue(55)
         elif idx == 1:
@@ -2297,18 +2427,22 @@ class MainWindow(QMainWindow):
         elif idx == 2:
             self.censor_slider.setValue(100)
         self._schedule_preview_refresh()
+        self._schedule_config_save()
 
     def _on_censor_slider_changed(self, val):
         self.censor_ratio_label.setText(f"{val}%")
         self._schedule_preview_refresh()
+        self._schedule_config_save()
 
     def _on_watermark_size_changed(self, val):
         self.watermark_size_lbl.setText(f"{val}px")
         self._schedule_preview_refresh()
+        self._schedule_config_save()
 
     def _on_watermark_opacity_changed(self, val):
         self.watermark_opacity_lbl.setText(f"{val}%")
         self._schedule_preview_refresh()
+        self._schedule_config_save()
 
     def _get_current_censor_params(self):
         styles = ["black_bar", "mosaic", "blur"]
