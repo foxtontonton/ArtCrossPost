@@ -1042,7 +1042,14 @@ class PublishThread(QThread):
 
         gate_skipped_count = 0
         for disp in self.dispatchers:
-            disp_images = raw_images if disp.name in ("patreon", "kofi") else images
+            if disp.name in ("patreon", "kofi"):
+                disp_images = raw_images
+            elif disp.name == "x_twitter":
+                disp_images = self.payload.get("x_images") or images
+            elif disp.name == "deviantart":
+                disp_images = self.payload.get("da_images") or images
+            else:
+                disp_images = images
 
             # 1.1 登录态轻量探针 (probe_login: 不唤起浏览器)
             if hasattr(disp, "probe_login"):
@@ -1079,6 +1086,10 @@ class PublishThread(QThread):
                             break
                         elif p_obj.suffix.lower() in [".png", ".jpg", ".jpeg"] and f_size > 5 * 1024 * 1024:
                             asset_err = f"X (Twitter) 限制单张静态图 ≤ 5MB (当前 {f_size / 1024 / 1024:.2f}MB)"
+                            break
+                    elif disp.name == "deviantart":
+                        if p_obj.suffix.lower() == ".gif" and f_size > 200 * 1024 * 1024:
+                            asset_err = f"DeviantArt 限制 GIF ≤ 200MB (当前 {f_size / 1024 / 1024:.2f}MB)"
                             break
 
             if asset_err:
@@ -2525,10 +2536,12 @@ class MainWindow(QMainWindow):
             self.current_preview_index = row
             self._schedule_preview_refresh(instant=True)
 
-    def _generate_composite_gif(self, input_gif_path, output_gif_path, censor_params=None, wm_params=None):
+    def _generate_composite_gif(self, input_gif_path, output_gif_path, censor_params=None, wm_params=None, max_limit_mb=None):
         """
         单通道高能效 GIF 动图全帧合成生成器：
         在单次遍历中一并完成打码与水印压制，避免双重 I/O 与重复内存编码，性能提升 200%+
+        - max_limit_mb 为 None 时：保留 100% 原始高质量与 256 色调色板 (适用于 DeviantArt 等支持大图的平台)
+        - max_limit_mb 有值时：自适应渐进式压缩至指定限制内 (如 X/Twitter 的 13.8MB 限制)
         """
         from PIL import ImageSequence
         import cv2
@@ -2606,41 +2619,42 @@ class MainWindow(QMainWindow):
                 loop=loop,
                 optimize=True
             )
-            # 针对超大尺寸/超多帧动图，严格把控在 13.8MB 内，彻底杜绝 X (Twitter) 15MB 强校验拒收与海外平台长耗时
-            target_limit_bytes = int(13.8 * 1024 * 1024)
-            current_frames = out_frames
-            color_steps = [192, 128, 96]
-            step_idx = 0
+            # 若指定了 max_limit_mb (如针对 X/Twitter 13.8MB 门禁)，则自适应压缩；否则保留 100% 原始高质量
+            if max_limit_mb is not None:
+                target_limit_bytes = int(max_limit_mb * 1024 * 1024)
+                current_frames = out_frames
+                color_steps = [192, 128, 96]
+                step_idx = 0
 
-            while out_p.stat().st_size > target_limit_bytes:
-                cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-                if step_idx < len(color_steps):
-                    colors = color_steps[step_idx]
-                    step_idx += 1
-                    logger.info(f"[GIF Optimizer] 动图体积 {cur_size_mb:.2f}MB 超出 13.8MB 限制，自适应降级至 {colors} 色调色板...")
-                    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=colors) for f in current_frames]
-                else:
-                    cur_w, cur_h = current_frames[0].size
-                    scale = min(0.85, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
-                    new_w = max(320, int(cur_w * scale))
-                    new_h = max(240, int(cur_h * scale))
-                    if new_w >= cur_w or new_h >= cur_h:
-                        raise RuntimeError(
-                            f"GIF 体积无法压缩至 13.8MB 以内（当前 {cur_size_mb:.2f}MB，"
-                            f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，X 限制 GIF ≤ 15MB。"
-                        )
-                    logger.info(f"[GIF Optimizer] 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
-                    current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-                    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
+                while out_p.stat().st_size > target_limit_bytes:
+                    cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+                    if step_idx < len(color_steps):
+                        colors = color_steps[step_idx]
+                        step_idx += 1
+                        logger.info(f"[GIF Optimizer] 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
+                        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=colors) for f in current_frames]
+                    else:
+                        cur_w, cur_h = current_frames[0].size
+                        scale = min(0.85, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
+                        new_w = max(320, int(cur_w * scale))
+                        new_h = max(240, int(cur_h * scale))
+                        if new_w >= cur_w or new_h >= cur_h:
+                            raise RuntimeError(
+                                f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {cur_size_mb:.2f}MB，"
+                                f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，X 限制 GIF ≤ 15MB。"
+                            )
+                        logger.info(f"[GIF Optimizer] 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
+                        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
+                        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
 
-                p_frames[0].save(
-                    str(out_p),
-                    save_all=True,
-                    append_images=p_frames[1:],
-                    duration=duration,
-                    loop=loop,
-                    optimize=True
-                )
+                    p_frames[0].save(
+                        str(out_p),
+                        save_all=True,
+                        append_images=p_frames[1:],
+                        duration=duration,
+                        loop=loop,
+                        optimize=True
+                    )
         return str(out_p)
 
     def _export_preview_image(self):
@@ -2834,6 +2848,7 @@ class MainWindow(QMainWindow):
         # 准备分发图片资源
         raw_images = [str(p) for p in self.image_paths]
         public_images = []
+        x_images = []
 
         censor_enabled = self.auto_censor_cb.isChecked()
         wm_enabled = self.watermark_enabled_cb.isChecked()
@@ -2847,6 +2862,14 @@ class MainWindow(QMainWindow):
         wm_pos = self.watermark_pos_combo.currentData() or "bottom_right"
         wm_color = self.watermark_color_combo.currentData() or "#ffffff"
         wm_stroke = self.watermark_stroke_cb.isChecked()
+
+        # 生成安全文件名 (避免 DeviantArt 等平台直接以文件名覆盖标题为 public_send_0)
+        import re
+        title_str = self.title_input.text().strip()
+        safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
+        safe_title = safe_title[:40]
+
+        is_x_selected = any(d.name == "x_twitter" for d in selected)
 
         self.notify("正在准备全平台素材 (公开发布端打码/水印处理，赞助端高清原图)...", level="info")
 
@@ -2866,9 +2889,9 @@ class MainWindow(QMainWindow):
                 "stroke": wm_stroke
             } if (wm_enabled and apply_wm_publish and wm_text) else None
 
-            # 公开发布端图片处理 (X / DeviantArt: 敏感部位打码 + 创作者水印)
+            # 1. 公开发布端高清素材生成 (DeviantArt 原生支持高达 200MB，保持原分辨率与 256 色完整调色板)
             if is_gif:
-                pub_out_path = CACHE_DIR / f"public_send_{idx}.gif"
+                pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.gif"
                 c_params = None
                 if censor_enabled:
                     orig_w, orig_h = 800, 600
@@ -2885,12 +2908,25 @@ class MainWindow(QMainWindow):
                     c_params = {"enabled": True, "style": style, "boxes": final_boxes}
 
                 try:
-                    self._generate_composite_gif(p, pub_out_path, censor_params=c_params, wm_params=wm_info)
+                    self._generate_composite_gif(p, pub_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                 except RuntimeError as e:
-                    self.notify(f"GIF 压缩失败，发布已中止: {e}", level="error")
+                    self.notify(f"高清 GIF 合成失败: {e}", level="error")
                     logger.error(f"[发布准备] {e}")
                     return
                 public_images.append(str(pub_out_path))
+
+                # 2. X (Twitter) 平台专属压缩素材 (若选中 X，严格压缩至 13.8MB)
+                if is_x_selected:
+                    x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
+                    try:
+                        self._generate_composite_gif(p, x_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=13.8)
+                    except RuntimeError as e:
+                        self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
+                        logger.error(f"[发布准备] {e}")
+                        return
+                    x_images.append(str(x_out_path))
+                else:
+                    x_images.append(str(pub_out_path))
             else:
                 if censor_enabled:
                     custom_boxes = self.custom_censor_boxes.get(p)
@@ -2902,7 +2938,7 @@ class MainWindow(QMainWindow):
                         custom_ratio=ratio,
                         custom_boxes=custom_boxes
                     )
-                    pub_out_path = CACHE_DIR / f"public_send_{idx}.{ext}"
+                    pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.{ext}"
                     if wm_info:
                         self.watermark_engine.apply_watermark(
                             censored_bgr,
@@ -2919,7 +2955,7 @@ class MainWindow(QMainWindow):
                         cv2.imwrite(str(pub_out_path), censored_bgr)
                     public_images.append(str(pub_out_path))
                 elif wm_info:
-                    pub_out_path = CACHE_DIR / f"public_send_{idx}.{ext}"
+                    pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.{ext}"
                     self.watermark_engine.apply_watermark(
                         p,
                         text=wm_text,
@@ -2935,17 +2971,20 @@ class MainWindow(QMainWindow):
                 else:
                     public_images.append(str(p))
 
-            # 对公开发布端静态图片进行 4.8MB 安全体积校验 (针对 X/Twitter 5MB 门禁自适应压缩)
-            if not is_gif and Path(public_images[-1]).exists() and Path(public_images[-1]).stat().st_size > 4.8 * 1024 * 1024:
-                big_p = Path(public_images[-1])
-                opt_jpg = CACHE_DIR / f"public_send_{idx}_opt.jpg"
-                try:
-                    with Image.open(str(big_p)) as im_big:
-                        im_big.convert("RGB").save(str(opt_jpg), "JPEG", quality=88, optimize=True)
-                    public_images[-1] = str(opt_jpg)
-                    logger.info(f"[Image Optimizer] 静态图超限，已自动高质量转码 JPEG: {big_p.stat().st_size / 1024 / 1024:.2f}MB -> {opt_jpg.stat().st_size / 1024 / 1024:.2f}MB")
-                except Exception as e:
-                    logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
+                # X 专属体积门禁 (单图 ≤ 5MB，超过 4.8MB 自动转码优化 JPEG)
+                if is_x_selected and Path(public_images[-1]).exists() and Path(public_images[-1]).stat().st_size > 4.8 * 1024 * 1024:
+                    big_p = Path(public_images[-1])
+                    opt_jpg = CACHE_DIR / f"{safe_title}_{idx}_xopt.jpg"
+                    try:
+                        with Image.open(str(big_p)) as im_big:
+                            im_big.convert("RGB").save(str(opt_jpg), "JPEG", quality=88, optimize=True)
+                        x_images.append(str(opt_jpg))
+                        logger.info(f"[Image Optimizer] X 静态图超限，已自动高质量转码 JPEG: {big_p.stat().st_size / 1024 / 1024:.2f}MB -> {opt_jpg.stat().st_size / 1024 / 1024:.2f}MB")
+                    except Exception as e:
+                        logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
+                        x_images.append(public_images[-1])
+                else:
+                    x_images.append(public_images[-1])
 
         tags = [t.strip() for t in self.tags_input.text().replace("，", ",").split(",") if t.strip()]
 
@@ -3038,7 +3077,9 @@ class MainWindow(QMainWindow):
             "title": self.title_input.text().strip(),
             "description": self.desc_input.toPlainText().strip(),
             "tags": tags,
-            "images": public_images,            # 打码/水印图发给公开发布平台 (X, DeviantArt)
+            "images": public_images,            # 打码/水印高清图 (DeviantArt 平台)
+            "da_images": public_images,         # DeviantArt 平台专属高质量图 (原分辨率, 256色)
+            "x_images": x_images,               # X (Twitter) 专属优化压缩图 (≤ 13.8MB)
             "raw_images": raw_images,           # 无码高清原图发给赞助平台 (Patreon, Ko-fi)
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
