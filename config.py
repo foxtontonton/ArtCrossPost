@@ -51,6 +51,13 @@ DEFAULT_CONFIG = {
         "stroke": True
     },
     "selected_platforms": ["x_twitter", "deviantart"],  # 记录上次选中的发布平台
+    "deviantart_known_galleries": [
+        "Featured",
+        "NSFW - Ai Training Clip",
+        "Cast of Characters",
+        "Cage - A muscle growth story",
+        "Film set"
+    ],
     "defaults": {
         "is_ai_generated": True,
         "x_sensitive": True,

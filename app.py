@@ -1758,15 +1758,40 @@ class SettingsDialog(QDialog):
         dg_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
         dg_layout.addWidget(dg_title)
 
-        dg_desc = QLabel("配置日常同步到 DeviantArt 时的缺省相册（留空则发布到默认相册）：")
+        dg_desc = QLabel("配置日常同步到 DeviantArt 时的缺省相册（支持下拉选择或直接输入）：")
         dg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
         dg_layout.addWidget(dg_desc)
 
-        self.def_da_gallery_edit = QLineEdit()
-        self.def_da_gallery_edit.setPlaceholderText("例如: Featured, Anime, Illustrations (留空使用默认)")
-        self.def_da_gallery_edit.setText(self.config.get("defaults", {}).get("deviantart_default_gallery", ""))
-        self.def_da_gallery_edit.textChanged.connect(self._on_def_da_gallery_changed)
-        dg_layout.addWidget(self.def_da_gallery_edit)
+        self.def_da_gallery_combo = QComboBox()
+        make_responsive_combo(self.def_da_gallery_combo)
+        self.def_da_gallery_combo.setEditable(True)
+        self.def_da_gallery_combo.addItem("默认相册 (Featured)", "")
+        known_galleries = self.config.get("deviantart_known_galleries", [
+            "Featured",
+            "NSFW - Ai Training Clip",
+            "Cast of Characters",
+            "Cage - A muscle growth story",
+            "Film set"
+        ])
+        for g in known_galleries:
+            if g.lower() != "featured":
+                self.def_da_gallery_combo.addItem(g, g)
+
+        cur_def = self.config.get("defaults", {}).get("deviantart_default_gallery", "")
+        f_idx = -1
+        for i in range(self.def_da_gallery_combo.count()):
+            if self.def_da_gallery_combo.itemData(i) == cur_def or self.def_da_gallery_combo.itemText(i) == cur_def:
+                f_idx = i
+                break
+        if f_idx >= 0:
+            self.def_da_gallery_combo.setCurrentIndex(f_idx)
+        elif cur_def:
+            self.def_da_gallery_combo.setEditText(cur_def)
+        else:
+            self.def_da_gallery_combo.setCurrentIndex(0)
+
+        self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
+        dg_layout.addWidget(self.def_da_gallery_combo)
         layout.addWidget(da_gal_card)
 
         layout.addStretch()
@@ -1789,16 +1814,43 @@ class SettingsDialog(QDialog):
     def _on_def_da_gallery_changed(self):
         if "defaults" not in self.config:
             self.config["defaults"] = {}
-        gal_val = self.def_da_gallery_edit.text().strip()
+        gal_val = get_da_gallery_from_widget(self.def_da_gallery_combo)
         self.config["defaults"]["deviantart_default_gallery"] = gal_val
         if self.main_window:
             if "deviantart" in self.main_window.platform_controls and "gallery" in self.main_window.platform_controls["deviantart"]["options"]:
-                self.main_window.platform_controls["deviantart"]["options"]["gallery"].setText(gal_val)
+                w = self.main_window.platform_controls["deviantart"]["options"]["gallery"]
+                if isinstance(w, QComboBox):
+                    f_idx = -1
+                    for i in range(w.count()):
+                        if w.itemData(i) == gal_val or w.itemText(i) == gal_val:
+                            f_idx = i
+                            break
+                    if f_idx >= 0:
+                        w.setCurrentIndex(f_idx)
+                    elif gal_val:
+                        w.setEditText(gal_val)
+                    else:
+                        w.setCurrentIndex(0)
+                else:
+                    w.setText(gal_val)
             self.main_window._schedule_config_save()
 
     def _on_close_clicked(self):
         save_config(self.config)
         self.accept()
+
+
+def get_da_gallery_from_widget(widget):
+    """从相册控件中提取目标相册字符串 (若是默认相册则返回空字符串)"""
+    if isinstance(widget, QComboBox):
+        txt = widget.currentText().strip()
+        data = widget.currentData()
+        if data == "" or "默认相册" in txt:
+            return ""
+        return data if (data and data == txt) else txt
+    elif isinstance(widget, QLineEdit):
+        return widget.text().strip()
+    return ""
 
 
 class MainWindow(QMainWindow):
@@ -2171,7 +2223,7 @@ class MainWindow(QMainWindow):
                         idx = da_opts["mature"].currentIndex()
                         self.config["defaults"]["deviantart_mature"] = da_map.get(idx, "strict")
                     if "gallery" in da_opts:
-                        self.config["defaults"]["deviantart_default_gallery"] = da_opts["gallery"].text().strip()
+                        self.config["defaults"]["deviantart_default_gallery"] = get_da_gallery_from_widget(da_opts["gallery"])
 
                 # Patreon
                 if "patreon" in self.platform_controls:
@@ -2942,14 +2994,39 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(da_combo)
             opts["mature"] = da_combo
 
-            # 发布相册 (Gallery)
+            # 发布相册 (Gallery: 包含真实相册列表，支持下拉选择或直接输入)
             opts_layout.addWidget(QLabel("相册 (Gallery):"))
-            da_gallery_input = QLineEdit()
-            da_gallery_input.setPlaceholderText("留空使用默认相册")
-            da_gallery_input.setText(self.config["defaults"].get("deviantart_default_gallery", ""))
-            da_gallery_input.textChanged.connect(lambda: self._schedule_config_save())
-            opts_layout.addWidget(da_gallery_input)
-            opts["gallery"] = da_gallery_input
+            da_gallery_combo = QComboBox()
+            make_responsive_combo(da_gallery_combo)
+            da_gallery_combo.setEditable(True)
+            da_gallery_combo.addItem("默认相册 (Featured)", "")
+            known_galleries = self.config.get("deviantart_known_galleries", [
+                "Featured",
+                "NSFW - Ai Training Clip",
+                "Cast of Characters",
+                "Cage - A muscle growth story",
+                "Film set"
+            ])
+            for g in known_galleries:
+                if g.lower() != "featured":
+                    da_gallery_combo.addItem(g, g)
+
+            def_gal = self.config["defaults"].get("deviantart_default_gallery", "")
+            f_idx = -1
+            for i in range(da_gallery_combo.count()):
+                if da_gallery_combo.itemData(i) == def_gal or da_gallery_combo.itemText(i) == def_gal:
+                    f_idx = i
+                    break
+            if f_idx >= 0:
+                da_gallery_combo.setCurrentIndex(f_idx)
+            elif def_gal:
+                da_gallery_combo.setEditText(def_gal)
+            else:
+                da_gallery_combo.setCurrentIndex(0)
+
+            da_gallery_combo.currentTextChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(da_gallery_combo)
+            opts["gallery"] = da_gallery_combo
 
             da_ai = QCheckBox("Created using AI tools")
             da_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
@@ -3895,7 +3972,7 @@ class MainWindow(QMainWindow):
                 else:
                     platform_options["deviantart_mature"] = "strict"
             if "gallery" in opts:
-                platform_options["deviantart_gallery"] = opts["gallery"].text().strip()
+                platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
             if "ai" in opts:
                 platform_options["deviantart_ai"] = opts["ai"].isChecked()
 
