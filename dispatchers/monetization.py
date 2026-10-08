@@ -620,7 +620,7 @@ class KofiDispatcher(BaseDispatcher):
                         if "/account/login" in url or "/login" in url or "/signup" in url or "/register" in url:
                             return False
                         has_login_btn = p.query_selector("a[href*='/account/login'], a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
-                        has_user_indicator = p.query_selector("a[href*='/manage'], a[href*='/settings'], a[href*='/account/logout'], div[data-testid='user-avatar'], a[href*='/dashboard']") is not None
+                        has_user_indicator = p.query_selector("a[href*='/manage'], a[href*='/settings'], a[href*='/account/logout'], div[data-testid='user-avatar'], .avatar-circle, a[href*='/dashboard']") is not None
                         if has_user_indicator:
                             return True
                         cks = context.cookies()
