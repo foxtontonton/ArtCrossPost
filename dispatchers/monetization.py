@@ -450,8 +450,24 @@ class KofiDispatcher(BaseDispatcher):
                 "suggestion": "请点击 Ko-fi 卡片登录按钮完成登录"
             }
 
-        auth_cookie_names = [".AspNet.ApplicationCookie", "ASP.NET_SessionId", ".AspNetCore.Cookies", "ko-fi.auth", "user_id"]
+        # Ko-fi 鉴权 Cookie 名（2024+ 起逐步迁移至 ASP.NET Core Identity，
+        # 默认 Cookie 名为 .AspNetCore.Identity.Application；旧名单缺失会导致
+        # “登录成功但门禁误判为未登录”）
+        auth_cookie_names = [
+            ".AspNet.ApplicationCookie", "ASP.NET_SessionId",
+            ".AspNetCore.Cookies", ".AspNetCore.Identity.Application",
+            "ko-fi.auth", "user_id",
+        ]
         has_auth_cookie = any(any(ak.lower() in c.get("name", "").lower() for ak in auth_cookie_names) for c in cookies)
+        if not has_auth_cookie:
+            # 兜底：HttpOnly + Secure 且值较长的 Cookie 几乎必为会话/鉴权令牌
+            # （追踪类 Cookie 如 _ga/_gid 通常非 HttpOnly），避免名单过期再次误判
+            has_auth_cookie = any(
+                c.get("httpOnly") and c.get("secure") and len(str(c.get("value", ""))) > 40
+                for c in cookies
+            )
+            if has_auth_cookie:
+                logger.info("[Ko-fi] 未命中鉴权 Cookie 名单，但发现 HttpOnly 会话 Cookie，视为已登录")
         if not has_auth_cookie:
             return {
                 "platform": "kofi",
