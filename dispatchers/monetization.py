@@ -155,7 +155,10 @@ class PatreonDispatcher(BaseDispatcher):
 
                 if img_btn:
                     img_btn.click()
-                    time.sleep(1)
+                    try:
+                        page.wait_for_selector(manifest["title_input"], timeout=8000)
+                    except Exception as e:
+                        logger.debug(f"[Patreon] 切换图片发布类型后表单未渲染: {e}")
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("adult_checkbox", manifest["adult_checkbox"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
@@ -552,7 +555,10 @@ class KofiDispatcher(BaseDispatcher):
 
                 if tab_btn:
                     tab_btn.click()
-                    time.sleep(1)
+                    try:
+                        page.wait_for_selector(manifest["title_input"], timeout=8000)
+                    except Exception as e:
+                        logger.debug(f"[Ko-fi] 切换图片发布选项卡后表单未渲染: {e}")
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
