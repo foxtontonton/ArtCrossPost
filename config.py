@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
         "x_premium": False,
         "x_over_limit_policy": "ask",     # "ask", "truncate", "thread"
         "deviantart_mature": "strict",
+        "deviantart_default_gallery": "", # 默认发布相册 (留空使用默认)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "kofi_visibility": "supporters"   # "everyone", "supporters", "tier"
     }
