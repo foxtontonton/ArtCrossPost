@@ -479,16 +479,20 @@ class DeviantArtDispatcher(BaseDispatcher):
                 # 8. 勾选官方 Mature Content 成人内容设置 (对齐 DA 原生表单规范，补全二级分类必选)
                 def is_element_checked(el):
                     try:
+                        aria_chk = el.get_attribute("aria-checked")
+                        if aria_chk == "true":
+                            return True
+                        if aria_chk == "false":
+                            return False
                         tag = (el.evaluate("e => e.tagName") or "").lower()
                         if tag == "input":
                             return el.is_checked()
                         return el.evaluate("""e => {
-                            const inp = e.querySelector("input");
-                            if (inp) return inp.checked;
-                            return e.getAttribute("aria-checked") === "true" || 
-                                   e.classList.contains("checked") || 
-                                   e.classList.contains("selected") ||
-                                   e.getAttribute("data-checked") === "true";
+                            if (e.getAttribute('aria-checked') === 'true') return true;
+                            if (e.classList.contains('active') || e.classList.contains('selected') || e.classList.contains('checked')) return true;
+                            const inp = e.querySelector('input');
+                            if (inp && inp.checked) return true;
+                            return false;
                         }""")
                     except Exception:
                         return False
@@ -503,52 +507,73 @@ class DeviantArtDispatcher(BaseDispatcher):
                     except Exception:
                         el.evaluate("e => e.click()")
 
-                mature_selector = "input[type='checkbox'][name='matureContent'], input[name='matureContent'], label:has-text('Mature') input, label:has-text('Mature')"
+                mature_selector = "input[type='checkbox'][name='matureContent'], input[name='matureContent'], [role='checkbox']:has-text('Mature'), label:has-text('Mature') input, label:has-text('Mature'), button:has-text('Mature')"
                 try:
                     mature_elem = page.query_selector(mature_selector)
                     if not mature_elem:
-                        mature_elem = page.query_selector("label:has-text('Mature')")
+                        mature_elem = page.query_selector("label:has-text('Mature'), button:has-text('Mature')")
                     if mature_elem:
                         is_chk = is_element_checked(mature_elem)
                         if is_mature and not is_chk:
                             click_safely(mature_elem)
                         elif not is_mature and is_chk:
                             click_safely(mature_elem)
-                        page.wait_for_timeout(400)
+                        page.wait_for_timeout(500)
 
                     # 8.1 若开启 Mature，必须补全二级分类与级别（否则 Submit Now 按钮处于 disabled 状态无法正式提交）
                     if is_mature:
-                        page.wait_for_timeout(400)
+                        page.wait_for_timeout(500)
                         # 选定分级: Strict 或 Moderate
                         try:
                             lvl_text = "Strict" if mature_level == "strict" else "Moderate"
-                            lvl_elem = page.query_selector(f"input[value='{mature_level}'], label:has-text('{lvl_text}') input, label:has-text('{lvl_text}')")
-                            if lvl_elem and not is_element_checked(lvl_elem):
-                                click_safely(lvl_elem)
-                                page.wait_for_timeout(200)
-                                logger.info(f"[DeviantArt] 已选定 Mature 分级: {lvl_text}")
+                            lvl_candidates = [
+                                f"[role='radio']:has-text('{lvl_text}')",
+                                f"button:has-text('{lvl_text}')",
+                                f"label:has-text('{lvl_text}')",
+                                f"input[value='{mature_level}']"
+                            ]
+                            for l_sel in lvl_candidates:
+                                l_elem = page.query_selector(l_sel)
+                                if l_elem:
+                                    if not is_element_checked(l_elem):
+                                        click_safely(l_elem)
+                                        page.wait_for_timeout(200)
+                                        logger.info(f"[DeviantArt] 已选定 Mature 分级: {lvl_text}")
+                                    break
                         except Exception as le:
                             logger.debug(f"[DeviantArt] 勾选 Mature 分级选项提示: {le}")
 
-                        # 勾选二级具体分类必选项: Nudity (裸体) 与 Sexual themes (性暗示/内容)
-                        sub_tags = page.query_selector_all(
-                            "label:has-text('Nudity'), label:has-text('Sexual themes'), label:has-text('Sexual Themes'), "
-                            "label:has-text('Sexual') input, label:has-text('Nudity') input, "
-                            "input[name*='sexual'], input[name*='nudity']"
-                        )
-                        sub_checked_count = 0
-                        for st in sub_tags:
-                            try:
-                                if not is_element_checked(st):
-                                    click_safely(st)
-                                    page.wait_for_timeout(200)
-                                    sub_checked_count += 1
-                                    logger.info(f"[DeviantArt] 成功勾选 Mature 二级分类项")
-                                else:
-                                    sub_checked_count += 1
-                            except Exception as se:
-                                logger.debug(f"[DeviantArt] 勾选 Mature 二级分类异常: {se}")
-                        logger.info(f"[DeviantArt] Mature 二级分类已确认 ({sub_checked_count} 项)")
+                        # 勾选二级具体分类必选项: Nudity (裸体) 与 Sexual themes (性暗示/内容)，全标签广谱穿透
+                        sub_selectors = [
+                            "[role='checkbox']:has-text('Nudity')",
+                            "[role='checkbox']:has-text('Sexual')",
+                            "button:has-text('Nudity')",
+                            "button:has-text('Sexual themes')",
+                            "button:has-text('Sexual Themes')",
+                            "button:has-text('Sexual')",
+                            "label:has-text('Nudity')",
+                            "label:has-text('Sexual themes')",
+                            "label:has-text('Sexual Themes')",
+                            "label:has-text('Sexual')",
+                            "input[name*='nudity']",
+                            "input[name*='sexual']"
+                        ]
+                        checked_count = 0
+                        for sel in sub_selectors:
+                            elements = page.query_selector_all(sel)
+                            for el in elements:
+                                try:
+                                    if not is_element_checked(el):
+                                        click_safely(el)
+                                        page.wait_for_timeout(300)
+                                    checked_count += 1
+                                    logger.info(f"[DeviantArt] 成功勾选 Mature 二级分类: {sel}")
+                                    break
+                                except Exception as se:
+                                    logger.debug(f"[DeviantArt] 勾选 {sel} 异常: {se}")
+                            if checked_count > 0:
+                                break
+                        logger.info(f"[DeviantArt] Mature 二级分类已确认 ({checked_count} 项)")
                 except Exception as e:
                     logger.warning(f"[DeviantArt] 设置 Mature Content 异常: {e}")
 
@@ -681,19 +706,35 @@ class DeviantArtDispatcher(BaseDispatcher):
                     logger.warning("[DeviantArt] 首次点击 5 秒内未离开投稿页 (/submit)，触发自动二次补全与挽救提交...")
                     # 1. 检查是否存在未勾选的 Mature 二级分类 (Nudity/Sexual themes)，若未选则补选
                     if is_mature:
-                        sub_tags = page.query_selector_all(
-                            "label:has-text('Nudity'), label:has-text('Sexual themes'), label:has-text('Sexual Themes'), "
-                            "label:has-text('Sexual') input, label:has-text('Nudity') input, "
-                            "input[name*='sexual'], input[name*='nudity']"
-                        )
-                        for st in sub_tags:
-                            try:
-                                if not is_element_checked(st):
-                                    click_safely(st)
-                                    page.wait_for_timeout(200)
-                                    logger.info("[DeviantArt] 自愈阶段成功补勾选 Mature 二级分类")
-                            except Exception:
-                                pass
+                        sub_selectors = [
+                            "[role='checkbox']:has-text('Nudity')",
+                            "[role='checkbox']:has-text('Sexual')",
+                            "button:has-text('Nudity')",
+                            "button:has-text('Sexual themes')",
+                            "button:has-text('Sexual Themes')",
+                            "button:has-text('Sexual')",
+                            "label:has-text('Nudity')",
+                            "label:has-text('Sexual themes')",
+                            "label:has-text('Sexual Themes')",
+                            "label:has-text('Sexual')",
+                            "input[name*='nudity']",
+                            "input[name*='sexual']"
+                        ]
+                        re_checked = 0
+                        for sel in sub_selectors:
+                            elements = page.query_selector_all(sel)
+                            for el in elements:
+                                try:
+                                    if not is_element_checked(el):
+                                        click_safely(el)
+                                        page.wait_for_timeout(300)
+                                    re_checked += 1
+                                    logger.info(f"[DeviantArt] 自愈阶段成功补勾选 Mature 二级分类: {sel}")
+                                    break
+                                except Exception:
+                                    pass
+                            if re_checked > 0:
+                                break
 
                     # 2. 重新聚焦标题输入框，强制重新填入用户设置的正确作品标题
                     try:
