@@ -223,15 +223,31 @@ class BaseDispatcher(ABC):
 
         return browser, context
 
-    def close_login_session(self, browser, context):
-        """安全关闭登录会话：持久化上下文只关 context，普通模式关 browser"""
-        try:
-            if browser is not None:
-                browser.close()
-            elif context is not None:
+    def close_login_session(self, browser, context, page=None):
+        """安全关闭会话：先关 page 斩断长连接与事件通道，再安全关闭 context/browser，防止 Windows 线程死锁"""
+        if page is not None:
+            try:
+                if hasattr(page, "is_closed") and not page.is_closed():
+                    page.close()
+            except Exception as pe:
+                logger.debug(f"[{self.name}] 关闭 page 提示: {pe}")
+        if context is not None:
+            try:
+                if hasattr(context, "pages"):
+                    for p in list(context.pages):
+                        try:
+                            if not p.is_closed():
+                                p.close()
+                        except Exception:
+                            pass
                 context.close()
-        except Exception as e:
-            logger.debug(f"[{self.name}] 关闭登录会话资源: {e}")
+            except Exception as ce:
+                logger.debug(f"[{self.name}] 关闭 context 提示: {ce}")
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception as be:
+                logger.debug(f"[{self.name}] 关闭 browser 提示: {be}")
 
     def apply_stealth(self, target):
         """

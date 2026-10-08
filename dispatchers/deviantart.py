@@ -575,10 +575,24 @@ class DeviantArtDispatcher(BaseDispatcher):
 
                 logger.info("[DeviantArt] 发布按钮就绪，正在点击提交正式发布...")
                 try:
+                    submit_btn.scroll_into_view_if_needed()
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+
+                try:
                     submit_btn.click()
                 except Exception as e:
                     logger.debug(f"[DeviantArt] 普通点击提交失败，切换 evaluate 点击: {e}")
                     submit_btn.evaluate("el => el.click()")
+
+                # 点击后等待 1 秒并检查是否有立即弹出的表单错误提示 (如分类未选或受限)
+                time.sleep(1.0)
+                err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+                if err_box:
+                    err_txt = (err_box.inner_text() or "").strip()
+                    if err_txt:
+                        logger.warning(f"[DeviantArt] 点击提交后捕获到表单拦截提示: {err_txt}")
 
                 # 真正的成功判定条件 (彻底删除假断言 dialog is None)
                 def is_da_submitted(p):
@@ -600,16 +614,16 @@ class DeviantArtDispatcher(BaseDispatcher):
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     is_da_submitted,
-                    timeout=45000,
+                    timeout=35000,
                     error_msg="DeviantArt 提交超时未离开投稿页 (/submit)，作品可能仅存为草稿箱，请前往网页确认发布"
                 )
 
-                # 成功确认后必须安全缓冲 4 秒，确保底层异步流完全 flush，严禁秒关浏览器
+                # 成功确认后使用纯净 time.sleep 缓冲 3 秒，严禁使用 networkidle 避免挂起死锁
                 if sub_ok:
-                    logger.info("[DeviantArt] 作品正式上架确认！执行安全网络缓冲等待 (4秒)...")
-                    page.wait_for_timeout(4000)
+                    logger.info("[DeviantArt] 作品正式上架确认！执行安全网络缓冲等待 (3秒)...")
+                    time.sleep(3)
 
-                self.close_login_session(browser, context)
+                self.close_login_session(browser, context, page)
                 if not sub_ok:
                     return False, sub_msg, compliance
 

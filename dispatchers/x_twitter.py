@@ -545,26 +545,19 @@ class XTwitterDispatcher(BaseDispatcher):
                         else:
                             logger.warning(f"[X] 提示: 未能定位到 Thread 加号按钮，将在主推文发送后由备用链处理")
 
-                # 5. 等待发帖/全部发推按钮激活并提交 (对于较大 GIF/图片，Twitter 需要 20~50 秒进行服务器端转码与校验)
-                logger.info("[X] 等待发帖按钮激活 (等待媒体上传及服务端转码就绪)...")
+                # 5. 等待发帖按钮激活并提交 (直接信任就绪按钮，严禁在推特主页全局检测通用的 progressbar/spinner)
+                logger.info("[X] 等待发帖按钮激活...")
                 tweet_btn = None
                 wait_start = time.time()
                 candidate_selectors = [
-                    "button[data-testid='tweetButton']",
                     "button[data-testid='tweetButtonInline']",
+                    "button[data-testid='tweetButton']",
                     "button:has-text('Post')",
                     "button:has-text('发帖')",
                     "button:has-text('全部发推')"
                 ]
 
-                # 轮询最多 60 秒，等待上传进度条消失且发帖按钮解除禁用且无 aria-disabled="true"
-                while time.time() - wait_start < 60:
-                    # 检查是否有正在上传的进度条 (进度条存在说明媒体仍在转码/上传，严禁点发帖)
-                    progress_bar = page.query_selector("div[role='progressbar']")
-                    if progress_bar:
-                        time.sleep(1.0)
-                        continue
-
+                while time.time() - wait_start < 45:
                     for sel in candidate_selectors:
                         found_btns = page.query_selector_all(sel)
                         for b in reversed(found_btns):
@@ -580,7 +573,7 @@ class XTwitterDispatcher(BaseDispatcher):
                             break
                     if tweet_btn:
                         break
-                    time.sleep(1.2)
+                    time.sleep(1.0)
 
                 if tweet_btn and tweet_btn.is_enabled():
                     logger.info("[X] 发帖按钮已激活，正在点击发推...")
@@ -614,16 +607,16 @@ class XTwitterDispatcher(BaseDispatcher):
                     sub_ok, sub_msg = self.assert_submitted(
                         page,
                         is_tweet_submitted,
-                        timeout=30000,
+                        timeout=25000,
                         error_msg="X (Twitter) 发推提交未确认 (附件或正文仍未出海)，可能网络超时或已存为草稿"
                     )
 
-                    # 成功后严禁秒关浏览器！必须安全等待 4 秒确保异步网络请求完全出海 flush
+                    # 成功后严禁秒关浏览器！必须安全等待 3 秒确保异步网络请求完全出海 flush
                     if sub_ok:
-                        logger.info("[X] 发推成功确认！正在执行安全网络缓冲等待 (4秒)...")
-                        page.wait_for_timeout(4000)
+                        logger.info("[X] 发推成功确认！正在执行安全网络缓冲等待 (3秒)...")
+                        time.sleep(3)
 
-                    self.close_login_session(browser, context)
+                    self.close_login_session(browser, context, page)
                     if not sub_ok:
                         return False, sub_msg, compliance
 
