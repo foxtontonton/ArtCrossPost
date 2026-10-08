@@ -1748,6 +1748,27 @@ class SettingsDialog(QDialog):
         sc_layout.addWidget(self.sig_edit)
         layout.addWidget(sig_card)
 
+        # 3. DeviantArt 默认相册偏好
+        da_gal_card = QFrame()
+        da_gal_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
+        dg_layout = QVBoxLayout(da_gal_card)
+        dg_layout.setSpacing(6)
+
+        dg_title = QLabel("🎨 DeviantArt 默认相册")
+        dg_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
+        dg_layout.addWidget(dg_title)
+
+        dg_desc = QLabel("配置日常同步到 DeviantArt 时的缺省相册（留空则发布到默认相册）：")
+        dg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        dg_layout.addWidget(dg_desc)
+
+        self.def_da_gallery_edit = QLineEdit()
+        self.def_da_gallery_edit.setPlaceholderText("例如: Featured, Anime, Illustrations (留空使用默认)")
+        self.def_da_gallery_edit.setText(self.config.get("defaults", {}).get("deviantart_default_gallery", ""))
+        self.def_da_gallery_edit.textChanged.connect(self._on_def_da_gallery_changed)
+        dg_layout.addWidget(self.def_da_gallery_edit)
+        layout.addWidget(da_gal_card)
+
         layout.addStretch()
 
     def _on_def_tags_changed(self):
@@ -1763,6 +1784,16 @@ class SettingsDialog(QDialog):
     def _on_sig_changed(self):
         self.config["signature_template"] = self.sig_edit.toPlainText()
         if self.main_window:
+            self.main_window._schedule_config_save()
+
+    def _on_def_da_gallery_changed(self):
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        gal_val = self.def_da_gallery_edit.text().strip()
+        self.config["defaults"]["deviantart_default_gallery"] = gal_val
+        if self.main_window:
+            if "deviantart" in self.main_window.platform_controls and "gallery" in self.main_window.platform_controls["deviantart"]["options"]:
+                self.main_window.platform_controls["deviantart"]["options"]["gallery"].setText(gal_val)
             self.main_window._schedule_config_save()
 
     def _on_close_clicked(self):
@@ -2139,6 +2170,8 @@ class MainWindow(QMainWindow):
                         da_map = {0: "strict", 1: "moderate", 2: "none"}
                         idx = da_opts["mature"].currentIndex()
                         self.config["defaults"]["deviantart_mature"] = da_map.get(idx, "strict")
+                    if "gallery" in da_opts:
+                        self.config["defaults"]["deviantart_default_gallery"] = da_opts["gallery"].text().strip()
 
                 # Patreon
                 if "patreon" in self.platform_controls:
@@ -2908,6 +2941,15 @@ class MainWindow(QMainWindow):
             da_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(da_combo)
             opts["mature"] = da_combo
+
+            # 发布相册 (Gallery)
+            opts_layout.addWidget(QLabel("相册 (Gallery):"))
+            da_gallery_input = QLineEdit()
+            da_gallery_input.setPlaceholderText("留空使用默认相册")
+            da_gallery_input.setText(self.config["defaults"].get("deviantart_default_gallery", ""))
+            da_gallery_input.textChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(da_gallery_input)
+            opts["gallery"] = da_gallery_input
 
             da_ai = QCheckBox("Created using AI tools")
             da_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
@@ -3852,6 +3894,8 @@ class MainWindow(QMainWindow):
                     platform_options["deviantart_mature"] = "none"
                 else:
                     platform_options["deviantart_mature"] = "strict"
+            if "gallery" in opts:
+                platform_options["deviantart_gallery"] = opts["gallery"].text().strip()
             if "ai" in opts:
                 platform_options["deviantart_ai"] = opts["ai"].isChecked()
 

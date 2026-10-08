@@ -527,6 +527,107 @@ class DeviantArtDispatcher(BaseDispatcher):
                 v_mat_res, v_mat_det = self.check_selector_state(page, mature_selector, expected=is_mature)
                 compliance.append(self.verify_compliance_item("deviantart", "mature_content", is_mature, v_mat_res if is_mature else True, v_mat_det))
 
+                # 8.5 相册选择 (Gallery Selection: 为空跳过，非空时在 Submit 前设置相册)
+                gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
+                if gallery:
+                    logger.info(f"[DeviantArt] 正在定位相册选择器并选择相册: '{gallery}'...")
+                    gallery_matched = False
+                    try:
+                        # 1. <select> 模糊匹配与选择
+                        select_els = page.query_selector_all(".ReactModal__Content select, form select, select")
+                        for s_el in select_els:
+                            try:
+                                options = s_el.query_selector_all("option")
+                                opt_map = {}
+                                for opt in options:
+                                    t = (opt.inner_text() or "").strip()
+                                    v = opt.get_attribute("value") or t
+                                    if t:
+                                        opt_map[t] = v
+                                matched_val = None
+                                for t, v in opt_map.items():
+                                    if gallery.lower() in t.lower() or t.lower() in gallery.lower():
+                                        matched_val = v
+                                        break
+                                if matched_val is not None:
+                                    s_el.select_option(value=matched_val)
+                                    gallery_matched = True
+                                    logger.info(f"[DeviantArt] 通过 <select> 成功匹配并选择相册: '{gallery}'")
+                                    break
+                            except Exception as e_sel:
+                                logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
+
+                        # 2. 按钮/弹窗式选择器定位与匹配
+                        if not gallery_matched:
+                            gallery_triggers = [
+                                ".ReactModal__Content button:has-text('Gallery')",
+                                ".ReactModal__Content button:has-text('Galleries')",
+                                "button:has-text('Add to Gallery')",
+                                "button:has-text('Choose gallery')",
+                                "button:has-text('Featured')",
+                                "[data-testid*='gallery' i]",
+                                "[aria-label*='gallery' i]",
+                                "div[role='combobox']:has-text('Gallery')",
+                                ".ReactModal__Content div[role='button']:has-text('Gallery')"
+                            ]
+                            for g_sel in gallery_triggers:
+                                g_btn = page.query_selector(g_sel)
+                                if g_btn and g_btn.is_visible():
+                                    try:
+                                        click_safely(g_btn)
+                                        page.wait_for_timeout(600)
+                                        item_sels = [
+                                            f"[role='option']:has-text('{gallery}')",
+                                            f"[role='menuitem']:has-text('{gallery}')",
+                                            f"[role='checkbox']:has-text('{gallery}')",
+                                            f"li:has-text('{gallery}')",
+                                            f"button:has-text('{gallery}')",
+                                            f"label:has-text('{gallery}')",
+                                            f"div:has-text('{gallery}')"
+                                        ]
+                                        for it_sel in item_sels:
+                                            items = page.query_selector_all(it_sel)
+                                            for it in reversed(items):
+                                                it_txt = (it.inner_text() or "").strip()
+                                                if gallery.lower() in it_txt.lower():
+                                                    click_safely(it)
+                                                    page.wait_for_timeout(400)
+                                                    gallery_matched = True
+                                                    logger.info(f"[DeviantArt] 通过列表项成功匹配并点击相册: '{gallery}'")
+                                                    break
+                                            if gallery_matched:
+                                                break
+
+                                        # 检查并点击确认/完成按钮 (Done / Select)
+                                        confirm_btn = page.query_selector(".ReactModal__Content button:has-text('Done'), button:has-text('Done'), button:has-text('Select')")
+                                        if confirm_btn and confirm_btn.is_visible():
+                                            click_safely(confirm_btn)
+                                            page.wait_for_timeout(300)
+
+                                        if gallery_matched:
+                                            break
+                                    except Exception as e_click:
+                                        logger.debug(f"[DeviantArt] 尝试相册触发器 {g_sel} 异常: {e_click}")
+
+                        if not gallery_matched:
+                            logger.warning(f"[DeviantArt] 未找到相册 '{gallery}'，使用默认相册继续")
+                        else:
+                            # 3. 选择后回读确认选中项文本 (失败只记 warning，不计入合规项)
+                            try:
+                                page.wait_for_timeout(300)
+                                confirmed = page.evaluate(f"""(g) => {{
+                                    const modal = document.querySelector('.ReactModal__Content') || document.body;
+                                    return modal.innerText.toLowerCase().includes(g.toLowerCase());
+                                }}""", gallery)
+                                if confirmed:
+                                    logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
+                                else:
+                                    logger.warning(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，使用默认/当前相册继续")
+                            except Exception as e_verify:
+                                logger.warning(f"[DeviantArt] 回读确认相册文本异常: {e_verify}")
+                    except Exception as e_gallery:
+                        logger.warning(f"[DeviantArt] 设置相册过程发生异常: {e_gallery}，使用默认相册继续")
+
                 # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
                 logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
                 submit_btn = None
