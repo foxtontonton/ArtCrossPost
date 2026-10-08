@@ -606,19 +606,13 @@ class DeviantArtDispatcher(BaseDispatcher):
                     if err_txt:
                         logger.warning(f"[DeviantArt] 点击提交后捕获到表单拦截提示: {err_txt}")
 
-                # 真正的成功判定条件 (彻底删除假断言 dialog is None)
+                # 真正的成功判定条件 (严格要求进入 /art/ 展示页或官方 Success 提示，严禁将模态框关闭误判为成功)
                 def is_da_submitted(p):
                     curr_u = p.url.lower()
-                    # 判定 1: 页面 URL 离开投稿模式，或进入具体作品展示页
-                    if "/submit" not in curr_u and "new=1" not in curr_u and ("deviantart.com" in curr_u or "deviation" in curr_u or "/art/" in curr_u):
+                    # 核心成功判定 1: 页面 URL 成功跳转至正式作品展示页 (/art/ 或 /deviation/)
+                    if "/art/" in curr_u or "/deviation/" in curr_u:
                         return True
-                    if "/art/" in curr_u or "deviation" in curr_u:
-                        return True
-                    # 判定 2: 模态框已关闭退场
-                    modal_el = p.query_selector(".ReactModal__Content")
-                    if not modal_el:
-                        return True
-                    # 判定 3: 官方提交成功提示标识
+                    # 核心成功判定 2: 官方发布成功提示标识 (Toast 或 成功展示页)
                     success_indicator = p.query_selector(
                         "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
                     )
@@ -626,17 +620,20 @@ class DeviantArtDispatcher(BaseDispatcher):
                         return True
                     return False
 
-                # 阶段 1：首轮提交后 5 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
-                logger.info("[DeviantArt] 正在等待提交响应 (5秒首轮窗口)...")
+                # 阶段 1：首轮提交后 8 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
+                logger.info("[DeviantArt] 正在等待提交响应并跳转至作品页 (/art/)...")
                 first_submit_passed = False
-                for _ in range(5):
+                for _ in range(8):
                     time.sleep(1.0)
                     if is_da_submitted(page):
                         first_submit_passed = True
                         break
 
                 if not first_submit_passed:
-                    logger.warning("[DeviantArt] 首次点击 5 秒内未完成提交，触发自动二次补全与挽救提交...")
+                    err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+                    if err_box:
+                        logger.warning(f"[DeviantArt] 首次点击未完成跳转，页面显示提示: {err_box.inner_text().strip()}")
+                    logger.warning("[DeviantArt] 首次点击 8 秒内未离开投稿页或跳转作品页，触发自动二次补全与挽救提交...")
                     # 1. 确保 Mature Content 保持选中
                     if is_mature:
                         try:
@@ -680,12 +677,12 @@ class DeviantArtDispatcher(BaseDispatcher):
                             logger.debug(f"[DeviantArt] 自愈阶段点击异常: {e}")
                         logger.info("[DeviantArt] 自愈补全完毕，已执行第二次挽救提交！")
 
-                logger.info("[DeviantArt] 等待发布结果确认 (等待离开 /submit 或展示页渲染)...")
+                logger.info("[DeviantArt] 等待发布结果确认 (等待跳转至 /art/ 作品页或官方提示)...")
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     is_da_submitted,
-                    timeout=35000,
-                    error_msg="DeviantArt 提交超时未离开投稿页 (/submit)，作品可能仅存为草稿箱，请前往网页确认发布"
+                    timeout=45000,
+                    error_msg="DeviantArt 提交超时未跳转至作品展示页 (/art/)，作品可能仅存为草稿箱，请前往网页确认发布"
                 )
 
                 if not sub_ok:
@@ -698,6 +695,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                         pass
                     self.close_login_session(browser, context, page)
                     return False, f"{sub_msg}{err_detail}", compliance
+
+                # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
+                logger.info("[DeviantArt] 投稿主页已确认跳转作品页！等待 10 秒供 DA 后台完成数据库索引与草稿销毁...")
+                time.sleep(10)
 
                 # 成功离开 /submit 后的最终真发布核验：访问 Studio Drafts 验证草稿彻底销毁与出库
                 logger.info("[DeviantArt] 正在对 DeviantArt Studio 草稿箱执行反向核验 (验证草稿是否彻底销毁/出库)...")
@@ -729,9 +730,9 @@ class DeviantArtDispatcher(BaseDispatcher):
                     title_in_drafts = any(kw.lower() in studio_text.lower() for kw in keywords_to_check if kw)
 
                     if title_in_drafts:
-                        # 缓冲 3 秒刷新复核 (防止 DA 异步数据库索引毫秒级微小延迟)
-                        logger.info("[DeviantArt] 探测到草稿暂存，等待 3 秒后执行最终状态复核...")
-                        time.sleep(3)
+                        # 缓冲 5 秒刷新复核 (防止 DA 异步数据库索引毫秒级微小延迟，总缓冲达 15+ 秒)
+                        logger.info("[DeviantArt] 探测到草稿暂存，等待 5 秒后执行最终状态复核...")
+                        time.sleep(5)
                         studio_page.reload()
                         studio_page.wait_for_timeout(2000)
                         try:
