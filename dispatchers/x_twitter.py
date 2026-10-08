@@ -557,8 +557,14 @@ class XTwitterDispatcher(BaseDispatcher):
                     "button:has-text('全部发推')"
                 ]
 
-                # 轮询最多 60 秒，直到发帖按钮解除禁用且无 aria-disabled="true"
+                # 轮询最多 60 秒，等待上传进度条消失且发帖按钮解除禁用且无 aria-disabled="true"
                 while time.time() - wait_start < 60:
+                    # 检查是否有正在上传的进度条 (进度条存在说明媒体仍在转码/上传，严禁点发帖)
+                    progress_bar = page.query_selector("div[role='progressbar']")
+                    if progress_bar:
+                        time.sleep(1.0)
+                        continue
+
                     for sel in candidate_selectors:
                         found_btns = page.query_selector_all(sel)
                         for b in reversed(found_btns):
@@ -569,7 +575,6 @@ class XTwitterDispatcher(BaseDispatcher):
                                         tweet_btn = b
                                         break
                             except Exception:
-                                # 轮询期间 DOM 刷新导致元素句柄失效属预期情况，跳过该按钮继续轮询
                                 pass
                         if tweet_btn:
                             break
@@ -578,19 +583,46 @@ class XTwitterDispatcher(BaseDispatcher):
                     time.sleep(1.2)
 
                 if tweet_btn and tweet_btn.is_enabled():
+                    logger.info("[X] 发帖按钮已激活，正在点击发推...")
                     try:
                         tweet_btn.click()
                     except Exception as e:
                         logger.debug(f"[X] 普通点击失败，切换 evaluate 点击: {e}")
                         tweet_btn.evaluate("el => el.click()")
 
-                    # 断言 2.3: 提交后验证通知出现或离开输入框
+                    # 真正的成功判定条件 (严禁使用 not tweetButton 假阳性短路断言)
+                    def is_tweet_submitted(p):
+                        # 判定 1: 弹出官方发送成功提示 toast (包含"发送"/"Sent")
+                        toast = p.query_selector("div[data-testid='toast']")
+                        if toast:
+                            t_text = (toast.text_content() or "").strip().lower()
+                            if any(k in t_text for k in ["发送", "sent", "your post was sent", "已发送"]):
+                                return True
+                        # 判定 2: 主页发帖框内容清空且附件预览消失
+                        has_attachments = p.query_selector("div[data-testid='attachments']") is not None
+                        ed = p.query_selector("div[data-testid='tweetTextarea_0']")
+                        ed_empty = True
+                        if ed:
+                            txt = ed.inner_text().strip().replace("\u200b", "").replace("\n", "").strip()
+                            if len(txt) > 0:
+                                ed_empty = False
+                        if not has_attachments and ed_empty:
+                            return True
+                        return False
+
+                    logger.info("[X] 等待发推提交确认 (等待官方 Sent 提示或输入框与附件清空)...")
                     sub_ok, sub_msg = self.assert_submitted(
                         page,
-                        lambda p: p.query_selector("div[data-testid='toast']") or not p.query_selector("button[data-testid='tweetButton']"),
-                        timeout=20000,
-                        error_msg="X (Twitter) 发推提交未确认，可能网络响应超时或已存为草稿，请在网页确认"
+                        is_tweet_submitted,
+                        timeout=30000,
+                        error_msg="X (Twitter) 发推提交未确认 (附件或正文仍未出海)，可能网络超时或已存为草稿"
                     )
+
+                    # 成功后严禁秒关浏览器！必须安全等待 4 秒确保异步网络请求完全出海 flush
+                    if sub_ok:
+                        logger.info("[X] 发推成功确认！正在执行安全网络缓冲等待 (4秒)...")
+                        page.wait_for_timeout(4000)
+
                     self.close_login_session(browser, context)
                     if not sub_ok:
                         return False, sub_msg, compliance
