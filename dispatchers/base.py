@@ -94,6 +94,22 @@ class BaseDispatcher(ABC):
             except Exception as e:
                 logger.warning(f"[{self.name}] 下载头像失败: {e}")
 
+    def clear_session(self):
+        """清除本地保存的 cookies、用户画像与头像凭据"""
+        try:
+            if self.cookies_file.exists():
+                self.cookies_file.unlink()
+            if self.profile_file.exists():
+                self.profile_file.unlink()
+            if self.avatar_file.exists():
+                self.avatar_file.unlink()
+            self.status = "未连接"
+            logger.info(f"[{self.name}] 本地 Session 凭据已清除")
+            return True
+        except Exception as e:
+            logger.warning(f"[{self.name}] 清除 session 异常: {e}")
+            return False
+
     def safe_goto(self, page, url, wait_until="domcontentloaded", timeout=45000, max_retries=1):
         """
         统一健壮页面导航 (所有分发器通用导航入口):
