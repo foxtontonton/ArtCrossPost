@@ -345,7 +345,7 @@ class DeviantArtDispatcher(BaseDispatcher):
         """
         通过 Playwright 执行 DeviantArt 原生发布后台操作
         """
-        images = payload.get("images", [])
+        images = payload.get("da_images") or payload.get("images", [])
         if not images:
             return False, "DeviantArt 发布失败: 未选择图片", []
 
@@ -476,20 +476,45 @@ class DeviantArtDispatcher(BaseDispatcher):
                 v_res, v_det = self.check_selector_state(page, ai_selector, expected=is_ai)
                 compliance.append(self.verify_compliance_item("deviantart", "ai_generated", is_ai, v_res if is_ai else True, v_det))
 
-                # 8. 勾选官方 Mature Content 成人内容设置
                 # 8. 勾选官方 Mature Content 成人内容设置 (对齐 DA 原生表单规范，补全二级分类必选)
-                mature_selector = "input[type='checkbox'][name='matureContent'], input[name='matureContent'], label:has-text('Mature') input"
+                def is_element_checked(el):
+                    try:
+                        tag = (el.evaluate("e => e.tagName") or "").lower()
+                        if tag == "input":
+                            return el.is_checked()
+                        return el.evaluate("""e => {
+                            const inp = e.querySelector("input");
+                            if (inp) return inp.checked;
+                            return e.getAttribute("aria-checked") === "true" || 
+                                   e.classList.contains("checked") || 
+                                   e.classList.contains("selected") ||
+                                   e.getAttribute("data-checked") === "true";
+                        }""")
+                    except Exception:
+                        return False
+
+                def click_safely(el):
+                    try:
+                        el.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
+                    try:
+                        el.click()
+                    except Exception:
+                        el.evaluate("e => e.click()")
+
+                mature_selector = "input[type='checkbox'][name='matureContent'], input[name='matureContent'], label:has-text('Mature') input, label:has-text('Mature')"
                 try:
-                    mature_checkbox = page.query_selector(mature_selector)
-                    if not mature_checkbox:
-                        mature_checkbox = page.query_selector("label:has-text('Mature')")
-                    if mature_checkbox:
-                        is_chk = mature_checkbox.is_checked() if hasattr(mature_checkbox, "is_checked") else False
+                    mature_elem = page.query_selector(mature_selector)
+                    if not mature_elem:
+                        mature_elem = page.query_selector("label:has-text('Mature')")
+                    if mature_elem:
+                        is_chk = is_element_checked(mature_elem)
                         if is_mature and not is_chk:
-                            mature_checkbox.evaluate("el => el.click()")
+                            click_safely(mature_elem)
                         elif not is_mature and is_chk:
-                            mature_checkbox.evaluate("el => el.click()")
-                        page.wait_for_timeout(300)
+                            click_safely(mature_elem)
+                        page.wait_for_timeout(400)
 
                     # 8.1 若开启 Mature，必须补全二级分类与级别（否则 Submit Now 按钮处于 disabled 状态无法正式提交）
                     if is_mature:
@@ -498,29 +523,32 @@ class DeviantArtDispatcher(BaseDispatcher):
                         try:
                             lvl_text = "Strict" if mature_level == "strict" else "Moderate"
                             lvl_elem = page.query_selector(f"input[value='{mature_level}'], label:has-text('{lvl_text}') input, label:has-text('{lvl_text}')")
-                            if lvl_elem:
-                                lvl_elem.evaluate("el => el.click()")
+                            if lvl_elem and not is_element_checked(lvl_elem):
+                                click_safely(lvl_elem)
                                 page.wait_for_timeout(200)
                                 logger.info(f"[DeviantArt] 已选定 Mature 分级: {lvl_text}")
                         except Exception as le:
                             logger.debug(f"[DeviantArt] 勾选 Mature 分级选项提示: {le}")
 
-                        # 勾选具体类别必选项: Nudity (裸体) 与 Sexual themes (性暗示/内容)
-                        sub_cat_sels = [
-                            "input[name*='nudity'], input[id*='nudity'], label:has-text('Nudity') input, label:has-text('Nudity')",
-                            "input[name*='sexual'], input[id*='sexual'], label:has-text('Sexual') input, label:has-text('Sexual themes') input, label:has-text('Sexual themes')"
-                        ]
-                        for sub_sel in sub_cat_sels:
+                        # 勾选二级具体分类必选项: Nudity (裸体) 与 Sexual themes (性暗示/内容)
+                        sub_tags = page.query_selector_all(
+                            "label:has-text('Nudity'), label:has-text('Sexual themes'), label:has-text('Sexual Themes'), "
+                            "label:has-text('Sexual') input, label:has-text('Nudity') input, "
+                            "input[name*='sexual'], input[name*='nudity']"
+                        )
+                        sub_checked_count = 0
+                        for st in sub_tags:
                             try:
-                                sub_el = page.query_selector(sub_sel)
-                                if sub_el:
-                                    is_sub_c = sub_el.is_checked() if hasattr(sub_el, "is_checked") else False
-                                    if not is_sub_c:
-                                        sub_el.evaluate("el => el.click()")
-                                        page.wait_for_timeout(200)
-                                        logger.info(f"[DeviantArt] 成功勾选 Mature 二级分类: {sub_sel}")
+                                if not is_element_checked(st):
+                                    click_safely(st)
+                                    page.wait_for_timeout(200)
+                                    sub_checked_count += 1
+                                    logger.info(f"[DeviantArt] 成功勾选 Mature 二级分类项")
+                                else:
+                                    sub_checked_count += 1
                             except Exception as se:
-                                logger.debug(f"[DeviantArt] 勾选 Mature 二级分类提示: {se}")
+                                logger.debug(f"[DeviantArt] 勾选 Mature 二级分类异常: {se}")
+                        logger.info(f"[DeviantArt] Mature 二级分类已确认 ({sub_checked_count} 项)")
                 except Exception as e:
                     logger.warning(f"[DeviantArt] 设置 Mature Content 异常: {e}")
 
@@ -555,23 +583,53 @@ class DeviantArtDispatcher(BaseDispatcher):
                     self.close_login_session(browser, context)
                     return False, "DeviantArt 未定位到发布提交按钮 (Submit Now)，已保留在草稿中未发布", compliance
 
-                # 必须轮询等待按钮解禁 (解除 disabled / aria-disabled="true")
+                # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
                 btn_ready = False
                 wait_btn_start = time.time()
-                while time.time() - wait_btn_start < 15:
+                while time.time() - wait_btn_start < 60:
                     if submit_btn.is_enabled() and submit_btn.get_attribute("aria-disabled") != "true":
                         btn_ready = True
                         break
-                    time.sleep(0.8)
+                    elapsed = int(time.time() - wait_btn_start)
+                    if elapsed > 0 and elapsed % 10 == 0:
+                        logger.info(f"[DeviantArt] 正在等待素材转码完成与发布按钮激活 ({elapsed}s)...")
+                    time.sleep(1.0)
 
                 if not btn_ready:
                     # 采集页面是否有未满足的必填校验错误
                     err_hint = ""
-                    err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error']")
+                    err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
                     if err_elem:
                         err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
                     self.close_login_session(browser, context)
                     return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止以防存为半成品草稿", compliance
+
+                # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
+                try:
+                    re_title_input = page.query_selector(title_sel)
+                    if re_title_input:
+                        re_title_input.scroll_into_view_if_needed()
+                        re_title_input.click()
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Backspace")
+                        re_title_input.fill(title)
+                        page.wait_for_timeout(300)
+                        page.keyboard.press("Tab")
+                        page.wait_for_timeout(200)
+
+                        # 进一步通过 DOM 校验并强制同步 (防止 React 受控组件延迟)
+                        import json as _json
+                        page.evaluate(f"""() => {{
+                            const el = document.querySelector("{title_sel}");
+                            if (el && el.value !== {_json.dumps(title)}) {{
+                                el.value = {_json.dumps(title)};
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        }}""")
+                        logger.info(f"[DeviantArt] 提交前二次强行回填真实标题完成: {title}")
+                except Exception as te:
+                    logger.warning(f"[DeviantArt] 提交前二次回填标题提示: {te}")
 
                 logger.info("[DeviantArt] 发布按钮就绪，正在点击提交正式发布...")
                 try:
@@ -614,9 +672,19 @@ class DeviantArtDispatcher(BaseDispatcher):
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     is_da_submitted,
-                    timeout=35000,
+                    timeout=40000,
                     error_msg="DeviantArt 提交超时未离开投稿页 (/submit)，作品可能仅存为草稿箱，请前往网页确认发布"
                 )
+
+                if not sub_ok:
+                    err_detail = ""
+                    try:
+                        err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+                        if err_elem:
+                            err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
+                    except Exception:
+                        pass
+                    sub_msg = f"{sub_msg}{err_detail}"
 
                 # 成功确认后使用纯净 time.sleep 缓冲 3 秒，严禁使用 networkidle 避免挂起死锁
                 if sub_ok:

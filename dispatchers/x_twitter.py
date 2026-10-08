@@ -257,7 +257,7 @@ class XTwitterDispatcher(BaseDispatcher):
         - 点击编辑媒体 -> 勾选官方 Nudity (裸露) 内容警告
         - 点击官方发帖按钮 (tweetButton) 提交
         """
-        raw_images = payload.get("images", [])
+        raw_images = payload.get("x_images") or payload.get("images", [])
         abs_images = [str(Path(x).resolve()) for x in raw_images if Path(x).exists()]
         if not abs_images:
             return False, "X 发布失败: 未找到可上传的图片文件", []
