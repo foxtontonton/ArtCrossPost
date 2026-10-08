@@ -41,7 +41,7 @@ class PatreonDispatcher(BaseDispatcher):
                 "suggestion": "请点击 Patreon 卡片登录按钮完成登录"
             }
 
-        has_session = any(c.get("name") in ("session_id", "patreon_device_id") for c in cookies)
+        has_session = any(c.get("name") == "session_id" and c.get("value") for c in cookies)
         if not has_session:
             return {
                 "platform": "patreon",
@@ -204,15 +204,21 @@ class PatreonDispatcher(BaseDispatcher):
 
                 def is_patreon_logged_in(p):
                     try:
+                        if not p or p.is_closed():
+                            return False
                         url = p.url.lower()
+                        if "about:blank" in url or "chrome:" in url or "accounts.google." in url:
+                            return False
+                        if "patreon.com" not in url:
+                            return False
                         if "/login" in url or "/signup" in url or "/join" in url:
                             return False
                         has_login_btn = p.query_selector("a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
-                        has_user_indicator = p.query_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu'], button[aria-label*='user menu' i], a[href*='/dashboard']") is not None
+                        has_user_indicator = p.query_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu'], button[aria-label*='user menu' i], a[href*='/dashboard'], a[href*='/settings']") is not None
                         if has_user_indicator:
                             return True
                         cks = context.cookies()
-                        has_session = any(c.get("name") in ("session_id", "patreon_device_id") for c in cks)
+                        has_session = any(c.get("name") == "session_id" and c.get("value") for c in cks)
                         if has_session and not has_login_btn:
                             return True
                         return False
@@ -461,7 +467,7 @@ class KofiDispatcher(BaseDispatcher):
                 "suggestion": "请点击 Ko-fi 卡片登录按钮完成登录"
             }
 
-        auth_cookie_names = [".AspNet.ApplicationCookie", "ASP.NET_SessionId", ".AspNetCore.Cookies", "ko-fi.auth", "user_id"]
+        auth_cookie_names = [".AspNet.ApplicationCookie", "ASP.NET_SessionId", ".AspNetCore.Cookies", "ko-fi.auth", "user_id", "kofi_identity_cookie", "kofiweb.session"]
         has_auth_cookie = any(any(ak.lower() in c.get("name", "").lower() for ak in auth_cookie_names) for c in cookies)
         if not has_auth_cookie:
             return {
@@ -473,7 +479,7 @@ class KofiDispatcher(BaseDispatcher):
                 "suggestion": "请点击 Ko-fi 卡片登录按钮完成登录"
             }
 
-        probe = self.http_probe_session("https://ko-fi.com/manage/posts/new", timeout=8)
+        probe = self.http_probe_session("https://ko-fi.com/home", timeout=8)
         if probe.get("error"):
             return {
                 "platform": "kofi",
@@ -500,7 +506,7 @@ class KofiDispatcher(BaseDispatcher):
             "category": "login",
             "item": "login_probe",
             "status": "pass",
-            "detail": f"Ko-fi 发帖端点鉴权成功 (会话存活, HTTP {probe.get('status_code')})",
+            "detail": f"Ko-fi 账号鉴权成功 (会话存活, HTTP {probe.get('status_code')}, 包含鉴权 Cookie)",
             "suggestion": ""
         }
 
@@ -616,15 +622,21 @@ class KofiDispatcher(BaseDispatcher):
 
                 def is_kofi_logged_in(p):
                     try:
+                        if not p or p.is_closed():
+                            return False
                         url = p.url.lower()
+                        if "about:blank" in url or "chrome:" in url or "accounts.google." in url:
+                            return False
+                        if "ko-fi.com" not in url:
+                            return False
                         if "/account/login" in url or "/login" in url or "/signup" in url or "/register" in url:
                             return False
                         has_login_btn = p.query_selector("a[href*='/account/login'], a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
-                        has_user_indicator = p.query_selector("a[href*='/manage'], a[href*='/settings'], a[href*='/account/logout'], div[data-testid='user-avatar'], .avatar-circle, a[href*='/dashboard']") is not None
+                        has_user_indicator = p.query_selector("a[href*='/manage'], a[href*='/settings'], a[href*='/account/logout'], div[data-testid='user-avatar'], .avatar-circle, a[href*='/dashboard'], a[href*='/mypage']") is not None
                         if has_user_indicator:
                             return True
                         cks = context.cookies()
-                        auth_cookie_names = [".aspnet.applicationcookie", "asp.net_sessionid", ".aspnetcore.cookies", "ko-fi.auth", "user_id"]
+                        auth_cookie_names = [".aspnet.applicationcookie", "asp.net_sessionid", ".aspnetcore.cookies", "ko-fi.auth", "user_id", "kofi_identity_cookie", "kofiweb.session"]
                         has_auth_cookie = any(any(ak in c.get("name", "").lower() for ak in auth_cookie_names) for c in cks)
                         if has_auth_cookie and not has_login_btn:
                             return True
@@ -759,36 +771,51 @@ class KofiDispatcher(BaseDispatcher):
 
                 page = context.pages[0] if context.pages else context.new_page()
                 self.apply_stealth(page)
-                self.safe_goto(page, "https://ko-fi.com/manage/posts/new", timeout=40000)
+                # 直达创作者个人主页 (Ko-fi 原生图片发布由主页 Gallery 模态框驱动)
+                self.safe_goto(page, "https://ko-fi.com/manage/mypage", timeout=40000)
+                page.wait_for_timeout(2000)
+
+                # 1. 打开 Add Image 弹窗 (优先调用官方前端 JS 实例，若无则点击 Add image 按钮)
+                opened = page.evaluate("""() => {
+                    if (window.galleryItemUploadApp && typeof window.galleryItemUploadApp.openAddImage === 'function') {
+                        window.galleryItemUploadApp.openAddImage();
+                        return true;
+                    }
+                    return false;
+                }""")
+                if not opened:
+                    add_btn = page.query_selector("a[onclick*='openAddImage'], button[onclick*='openAddImage'], button:has-text('Add image'), a:has-text('Add something')")
+                    if add_btn:
+                        add_btn.click()
+                        time.sleep(1)
+                        img_opt = page.query_selector("a[onclick*='openAddImage'], a:has-text('Image')")
+                        if img_opt:
+                            img_opt.click()
+
                 try:
-                    page.wait_for_selector("button:has-text('Image'), div:has-text('Image Post')", timeout=15000)
+                    page.wait_for_selector("#postImageTitle, #uploadModal", timeout=15000)
                 except Exception as e:
-                    logger.debug(f"[Ko-fi] 等待帖子类型选择按钮超时: {e}")
+                    logger.debug(f"[Ko-fi] 等待上传弹窗渲染超时: {e}")
 
-                # 1. 选择 Image 帖子类型
-                img_tab = page.query_selector("button:has-text('Image'), div:has-text('Image Post')")
-                if img_tab:
-                    img_tab.click()
-                    time.sleep(0.5)  # 等待发布类型切换
-
-                # 2. 上传无码原图
-                file_input = page.query_selector("input[type='file']")
+                # 2. 上传无码原图至 Dropzone
+                file_input = page.query_selector("#uploadModal input[type='file'], #multi-image-uploader-wrapper input[type='file'], input[type='file'][accept*='jpeg'], input[type='file'][accept*='gif']")
+                if not file_input:
+                    file_input = page.query_selector("input[type='file']")
                 if file_input:
-                    file_input.set_input_files(images)
-                    title_sel = "input[placeholder*='Title'], input[name='title']"
+                    file_input.set_input_files(images[0])
                     att_ok, att_msg = self.assert_attached(
                         page,
-                        title_sel,
-                        timeout=20000,
+                        "#postImageTitle",
+                        timeout=25000,
                         error_msg="Ko-fi 图片上传未完成或标题框未渲染，已中止发布"
                     )
                     if not att_ok:
                         self.close_login_session(browser, context)
                         return False, att_msg, compliance
-                    time.sleep(1)  # 等待图片上传与表单渲染
+                    time.sleep(2)  # 等待图片在 Dropzone 挂载与缩略图生成
 
                 # 3. 填写标题与描述
-                title_sel = "input[placeholder*='Title'], input[name='title']"
+                title_sel = "#postImageTitle"
                 title_input = page.query_selector(title_sel)
                 if title_input:
                     title_input.fill(title)
@@ -799,27 +826,35 @@ class KofiDispatcher(BaseDispatcher):
                     self.close_login_session(browser, context)
                     return False, f"Ko-fi 标题填写断言失败: {f_msg}", compliance
 
-                desc_area = page.query_selector("div[contenteditable='true'], textarea")
-                if desc_area:
+                desc_area = page.query_selector("#postImageDescription")
+                if desc_area and desc:
                     desc_area.fill(desc)
 
-                # 4. 设置 Audience
+                # 4. 设置 Audience (Everyone / Supporters)
                 try:
-                    if visibility == "everyone":
-                        every_btn = page.query_selector("label:has-text('Everyone') input, button:has-text('Everyone')")
-                        if every_btn: every_btn.click()
-                    else:
-                        supp_btn = page.query_selector("label:has-text('Supporters') input, button:has-text('Supporters Only')")
-                        if supp_btn: supp_btn.click()
-                    time.sleep(0.3)  # 等待受众单选生效
+                    target_aud = "recurringSupporter" if visibility != "everyone" else "public"
+                    aud_select = page.query_selector("#postImageAudience")
+                    if aud_select:
+                        page.select_option("#postImageAudience", target_aud)
+                        time.sleep(0.3)
                 except Exception as e:
                     logger.warning(f"[Ko-fi] 设置受众异常: {e}")
 
                 # 5. 发布
-                publish_btn = page.query_selector("button:has-text('Publish'), button[type='submit']")
+                publish_btn = page.query_selector("#imageUploadSubmit")
+                if not publish_btn:
+                    publish_btn = page.query_selector("button:has-text('Post image'), input[value*='Post image'], button[type='submit']")
                 if not publish_btn:
                     self.close_login_session(browser, context)
                     return False, "Ko-fi 未定位到发布按钮，已保留未提交", compliance
+
+                # 轮询等待按钮启用 (等待 Dropzone 异步转码/上传完成)
+                wait_btn_start = time.time()
+                while time.time() - wait_btn_start < 25:
+                    is_dis = publish_btn.is_disabled() or "disabled" in (publish_btn.get_attribute("class") or "")
+                    if not is_dis:
+                        break
+                    time.sleep(0.5)
 
                 try:
                     publish_btn.click()
@@ -828,15 +863,15 @@ class KofiDispatcher(BaseDispatcher):
 
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
-                    lambda p: "/manage/posts/new" not in p.url.lower(),
-                    timeout=20000,
-                    error_msg="Ko-fi 提交未确认，作品可能已存为草稿，请前往网页确认"
+                    lambda p: p.query_selector("#uploadModal[style*='display: none']") is not None or p.query_selector("#uploadModal") is None or p.query_selector("div.toast, div.alert-success") is not None,
+                    timeout=25000,
+                    error_msg="Ko-fi 提交超时未关闭发布窗口，作品可能已存为草稿，请前往网页确认"
                 )
                 self.close_login_session(browser, context)
                 if not sub_ok:
                     return False, sub_msg, compliance
 
-                return True, "Ko-fi 发布成功 (已对齐无码原图分发与 Supporters Only 受众权限)", compliance
+                return True, "Ko-fi 发布成功 (已对齐无码原图分发与受众权限)", compliance
         except Exception as e:
             logger.error(f"[Ko-fi] 自动化发布异常: {e}")
             return False, f"Ko-fi 自动化发布异常: {e}", compliance

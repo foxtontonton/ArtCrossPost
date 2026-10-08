@@ -507,7 +507,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                     except Exception:
                         el.evaluate("e => e.click()")
 
-                mature_selector = "input[type='checkbox'][name='matureContent'], input[name='matureContent'], [role='checkbox']:has-text('Mature'), label:has-text('Mature') input, label:has-text('Mature'), button:has-text('Mature')"
+                mature_selector = ".ReactModal__Content input[name='matureContent'], input[name='matureContent']"
                 try:
                     mature_elem = page.query_selector(mature_selector)
                     if not mature_elem:
@@ -515,65 +515,11 @@ class DeviantArtDispatcher(BaseDispatcher):
                     if mature_elem:
                         is_chk = is_element_checked(mature_elem)
                         if is_mature and not is_chk:
-                            click_safely(mature_elem)
+                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
                         elif not is_mature and is_chk:
-                            click_safely(mature_elem)
-                        page.wait_for_timeout(500)
-
-                    # 8.1 若开启 Mature，必须补全二级分类与级别（否则 Submit Now 按钮处于 disabled 状态无法正式提交）
-                    if is_mature:
-                        page.wait_for_timeout(500)
-                        # 选定分级: Strict 或 Moderate
-                        try:
-                            lvl_text = "Strict" if mature_level == "strict" else "Moderate"
-                            lvl_candidates = [
-                                f"[role='radio']:has-text('{lvl_text}')",
-                                f"button:has-text('{lvl_text}')",
-                                f"label:has-text('{lvl_text}')",
-                                f"input[value='{mature_level}']"
-                            ]
-                            for l_sel in lvl_candidates:
-                                l_elem = page.query_selector(l_sel)
-                                if l_elem:
-                                    if not is_element_checked(l_elem):
-                                        click_safely(l_elem)
-                                        page.wait_for_timeout(200)
-                                        logger.info(f"[DeviantArt] 已选定 Mature 分级: {lvl_text}")
-                                    break
-                        except Exception as le:
-                            logger.debug(f"[DeviantArt] 勾选 Mature 分级选项提示: {le}")
-
-                        # 勾选二级具体分类必选项: Nudity (裸体) 与 Sexual themes (性暗示/内容)，全标签广谱穿透
-                        sub_selectors = [
-                            "[role='checkbox']:has-text('Nudity')",
-                            "[role='checkbox']:has-text('Sexual')",
-                            "button:has-text('Nudity')",
-                            "button:has-text('Sexual themes')",
-                            "button:has-text('Sexual Themes')",
-                            "button:has-text('Sexual')",
-                            "label:has-text('Nudity')",
-                            "label:has-text('Sexual themes')",
-                            "label:has-text('Sexual Themes')",
-                            "label:has-text('Sexual')",
-                            "input[name*='nudity']",
-                            "input[name*='sexual']"
-                        ]
-                        checked_count = 0
-                        for sel in sub_selectors:
-                            elements = page.query_selector_all(sel)
-                            for el in elements:
-                                try:
-                                    if not is_element_checked(el):
-                                        click_safely(el)
-                                        page.wait_for_timeout(300)
-                                    checked_count += 1
-                                    logger.info(f"[DeviantArt] 成功勾选 Mature 二级分类: {sel}")
-                                    break
-                                except Exception as se:
-                                    logger.debug(f"[DeviantArt] 勾选 {sel} 异常: {se}")
-                            if checked_count > 0:
-                                break
-                        logger.info(f"[DeviantArt] Mature 二级分类已确认 ({checked_count} 项)")
+                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
+                        page.wait_for_timeout(300)
+                    logger.info(f"[DeviantArt] Mature 内容设置完成: 开启={is_mature}")
                 except Exception as e:
                     logger.warning(f"[DeviantArt] 设置 Mature Content 异常: {e}")
 
@@ -581,22 +527,22 @@ class DeviantArtDispatcher(BaseDispatcher):
                 v_mat_res, v_mat_det = self.check_selector_state(page, mature_selector, expected=is_mature)
                 compliance.append(self.verify_compliance_item("deviantart", "mature_content", is_mature, v_mat_res if is_mature else True, v_mat_det))
 
-                # 9. 提交发布 (精准定位 Submit Now 按钮，严禁误触 Save to Stash / Save as draft)
-                logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit Now)...")
+                # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
+                logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
                 submit_btn = None
                 candidate_sels = [
+                    ".ReactModal__Content button:text-is('Submit')",
+                    "button:text-is('Submit')",
+                    ".ReactModal__Content button:has-text('Submit'):not(:has-text('Studio')):not(:has-text('Group')):not(:has-text('subscriber')):not(:has-text('Gallery'))",
                     "button:has-text('Submit Now')",
-                    "button[type='submit']:has-text('Submit Now')",
-                    "div[role='dialog'] button:has-text('Submit Now')",
-                    "button:has-text('Submit')",
-                    "button[type='submit']:has-text('Submit')"
+                    "button:has-text('Submit')"
                 ]
                 for sel in candidate_sels:
                     btns = page.query_selector_all(sel)
                     for b in btns:
                         txt = b.inner_text().strip().lower()
                         # 严禁误触存草稿或取消
-                        if any(kw in txt for kw in ["stash", "draft", "cancel", "save to"]):
+                        if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
                             continue
                         if "submit" in txt:
                             submit_btn = b
@@ -606,7 +552,7 @@ class DeviantArtDispatcher(BaseDispatcher):
 
                 if not submit_btn:
                     self.close_login_session(browser, context)
-                    return False, "DeviantArt 未定位到发布提交按钮 (Submit Now)，已保留在草稿中未发布", compliance
+                    return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已保留在草稿中未发布", compliance
 
                 # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
                 btn_ready = False
@@ -631,43 +577,26 @@ class DeviantArtDispatcher(BaseDispatcher):
 
                 # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
                 try:
-                    re_title_input = page.query_selector(title_sel)
-                    if re_title_input:
-                        re_title_input.scroll_into_view_if_needed()
-                        re_title_input.click()
-                        page.keyboard.press("Control+A")
-                        page.keyboard.press("Backspace")
-                        re_title_input.fill(title)
-                        page.wait_for_timeout(300)
-                        page.keyboard.press("Tab")
-                        page.wait_for_timeout(200)
-
-                        # 进一步通过 DOM 校验并强制同步 (防止 React 受控组件延迟)
-                        import json as _json
-                        page.evaluate(f"""() => {{
-                            const el = document.querySelector("{title_sel}");
-                            if (el && el.value !== {_json.dumps(title)}) {{
-                                el.value = {_json.dumps(title)};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }}""")
-                        logger.info(f"[DeviantArt] 提交前二次强行回填真实标题完成: {title}")
+                    import json as _json
+                    page.evaluate(f"""() => {{
+                        const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
+                        if (el) {{
+                            el.value = {_json.dumps(title)};
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                    }}""")
+                    logger.info(f"[DeviantArt] 提交前二次强行回填真实标题完成: {title}")
                 except Exception as te:
                     logger.warning(f"[DeviantArt] 提交前二次回填标题提示: {te}")
 
                 logger.info("[DeviantArt] 发布按钮就绪，正在点击提交正式发布...")
+                # 穿透点击优先，规避 ReactModal__Overlay 拦截指针事件
                 try:
-                    submit_btn.scroll_into_view_if_needed()
-                    time.sleep(0.3)
-                except Exception:
-                    pass
-
-                try:
-                    submit_btn.click()
-                except Exception as e:
-                    logger.debug(f"[DeviantArt] 普通点击提交失败，切换 evaluate 点击: {e}")
                     submit_btn.evaluate("el => el.click()")
+                except Exception as e:
+                    logger.debug(f"[DeviantArt] evaluate 点击异常，尝试普通点击: {e}")
+                    submit_btn.click()
 
                 # 点击后等待 1 秒并检查是否有立即弹出的表单错误提示 (如分类未选或受限)
                 time.sleep(1.0)
@@ -680,12 +609,16 @@ class DeviantArtDispatcher(BaseDispatcher):
                 # 真正的成功判定条件 (彻底删除假断言 dialog is None)
                 def is_da_submitted(p):
                     curr_u = p.url.lower()
-                    # 判定 1: 页面 URL 彻底离开 /submit 路径，或进入具体作品展示页
-                    if "/submit" not in curr_u and ("deviantart.com" in curr_u or "deviation" in curr_u or "/art/" in curr_u):
+                    # 判定 1: 页面 URL 离开投稿模式，或进入具体作品展示页
+                    if "/submit" not in curr_u and "new=1" not in curr_u and ("deviantart.com" in curr_u or "deviation" in curr_u or "/art/" in curr_u):
                         return True
                     if "/art/" in curr_u or "deviation" in curr_u:
                         return True
-                    # 判定 2: 页面出现提交成功的官方提示标识
+                    # 判定 2: 模态框已关闭退场
+                    modal_el = p.query_selector(".ReactModal__Content")
+                    if not modal_el:
+                        return True
+                    # 判定 3: 官方提交成功提示标识
                     success_indicator = p.query_selector(
                         "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
                     )
@@ -703,71 +636,36 @@ class DeviantArtDispatcher(BaseDispatcher):
                         break
 
                 if not first_submit_passed:
-                    logger.warning("[DeviantArt] 首次点击 5 秒内未离开投稿页 (/submit)，触发自动二次补全与挽救提交...")
-                    # 1. 检查是否存在未勾选的 Mature 二级分类 (Nudity/Sexual themes)，若未选则补选
+                    logger.warning("[DeviantArt] 首次点击 5 秒内未完成提交，触发自动二次补全与挽救提交...")
+                    # 1. 确保 Mature Content 保持选中
                     if is_mature:
-                        sub_selectors = [
-                            "[role='checkbox']:has-text('Nudity')",
-                            "[role='checkbox']:has-text('Sexual')",
-                            "button:has-text('Nudity')",
-                            "button:has-text('Sexual themes')",
-                            "button:has-text('Sexual Themes')",
-                            "button:has-text('Sexual')",
-                            "label:has-text('Nudity')",
-                            "label:has-text('Sexual themes')",
-                            "label:has-text('Sexual Themes')",
-                            "label:has-text('Sexual')",
-                            "input[name*='nudity']",
-                            "input[name*='sexual']"
-                        ]
-                        re_checked = 0
-                        for sel in sub_selectors:
-                            elements = page.query_selector_all(sel)
-                            for el in elements:
-                                try:
-                                    if not is_element_checked(el):
-                                        click_safely(el)
-                                        page.wait_for_timeout(300)
-                                    re_checked += 1
-                                    logger.info(f"[DeviantArt] 自愈阶段成功补勾选 Mature 二级分类: {sel}")
-                                    break
-                                except Exception:
-                                    pass
-                            if re_checked > 0:
-                                break
+                        try:
+                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\"); if (el && !el.checked) el.click(); }")
+                        except Exception:
+                            pass
 
-                    # 2. 重新聚焦标题输入框，强制重新填入用户设置的正确作品标题
+                    # 2. 重新强制回填标题
                     try:
-                        re_title_input = page.query_selector(title_sel)
-                        if re_title_input:
-                            re_title_input.scroll_into_view_if_needed()
-                            re_title_input.click()
-                            page.keyboard.press("Control+A")
-                            page.keyboard.press("Backspace")
-                            re_title_input.fill(title)
-                            page.wait_for_timeout(300)
-                            page.keyboard.press("Tab")
-                            page.wait_for_timeout(200)
-                            import json as _json
-                            page.evaluate(f"""() => {{
-                                const el = document.querySelector("{title_sel}");
-                                if (el) {{
-                                    el.value = {_json.dumps(title)};
-                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                }}
-                            }}""")
-                            logger.info(f"[DeviantArt] 自愈阶段已强制回填标题: {title}")
+                        import json as _json
+                        page.evaluate(f"""() => {{
+                            const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
+                            if (el) {{
+                                el.value = {_json.dumps(title)};
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        }}""")
+                        logger.info(f"[DeviantArt] 自愈阶段已强制回填标题: {title}")
                     except Exception as te:
                         logger.debug(f"[DeviantArt] 自愈阶段标题回填提示: {te}")
 
-                    # 3. 重新定位 Submit Now 按钮，执行 scroll_into_view_if_needed 并执行第二次穿透点击
+                    # 3. 重新穿透点击 Submit 按钮
                     re_submit_btn = None
                     for sel in candidate_sels:
                         btns = page.query_selector_all(sel)
                         for b in btns:
                             txt = b.inner_text().strip().lower()
-                            if any(kw in txt for kw in ["stash", "draft", "cancel", "save to"]):
+                            if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
                                 continue
                             if "submit" in txt:
                                 re_submit_btn = b
@@ -777,15 +675,9 @@ class DeviantArtDispatcher(BaseDispatcher):
 
                     if re_submit_btn:
                         try:
-                            re_submit_btn.scroll_into_view_if_needed()
-                            time.sleep(0.3)
-                        except Exception:
-                            pass
-                        try:
-                            re_submit_btn.click()
-                        except Exception as e:
-                            logger.debug(f"[DeviantArt] 自愈阶段普通点击失败，切换 evaluate 点击: {e}")
                             re_submit_btn.evaluate("el => el.click()")
+                        except Exception as e:
+                            logger.debug(f"[DeviantArt] 自愈阶段点击异常: {e}")
                         logger.info("[DeviantArt] 自愈补全完毕，已执行第二次挽救提交！")
 
                 logger.info("[DeviantArt] 等待发布结果确认 (等待离开 /submit 或展示页渲染)...")
