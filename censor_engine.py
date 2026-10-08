@@ -16,7 +16,7 @@ except Exception:
     logger = logging.getLogger("CensorEngine")
 
 try:
-    import onnxruntime
+    pass
 except Exception as e:
     logger.debug(f"预导入 onnxruntime 提示: {e}")
 

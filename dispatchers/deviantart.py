@@ -28,7 +28,8 @@ class DeviantArtDispatcher(BaseDispatcher):
 
     def _extract_userinfo(self, cookie_val):
         """从 userinfo cookie 中解析出 username 和 usericon"""
-        import urllib.parse, json
+        import urllib.parse
+        import json
         val = urllib.parse.unquote(cookie_val or "")
         username = None
         usericon = None
@@ -351,7 +352,7 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         title = payload.get("title", "") or "Untitled"
         desc = payload.get("description", "")
-        tags = payload.get("tags", [])
+        _tags = payload.get("tags", [])
         da_mature_opt = payload.get("platform_options", {}).get("deviantart_mature", "strict" if payload.get("is_nsfw", False) else "none")
         is_mature = (da_mature_opt != "none")
         mature_level = "moderate" if da_mature_opt == "moderate" else "strict"
@@ -615,10 +616,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                             # 3. 选择后回读确认选中项文本 (失败只记 warning，不计入合规项)
                             try:
                                 page.wait_for_timeout(300)
-                                confirmed = page.evaluate(f"""(g) => {{
+                                confirmed = page.evaluate("""(g) => {
                                     const modal = document.querySelector('.ReactModal__Content') || document.body;
                                     return modal.innerText.toLowerCase().includes(g.toLowerCase());
-                                }}""", gallery)
+                                }""", gallery)
                                 if confirmed:
                                     logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
                                 else:
@@ -852,7 +853,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                             logger.info("[DeviantArt] 复核通过：作品已从 Studio Drafts 彻底出库！")
                             draft_cleared = True
                     else:
-                        logger.info(f"[DeviantArt] 草稿箱反向核验通过：Studio Drafts 中已无同名草稿，作品已正式销毁草稿并出库！")
+                        logger.info("[DeviantArt] 草稿箱反向核验通过：Studio Drafts 中已无同名草稿，作品已正式销毁草稿并出库！")
                         draft_cleared = True
 
                 except Exception as se:

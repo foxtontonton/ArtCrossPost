@@ -8,8 +8,6 @@ ArtCrossPost - 诊断与自检系统 (Diagnostics Engine)
 4. 选择器健康检查 (只读 DOM，不触碰任何提交动作)
 5. 结构化 Markdown 报告生成与导出
 """
-import os
-import sys
 import time
 import shutil
 from pathlib import Path
@@ -227,12 +225,14 @@ class DiagnosticsEngine:
         all_items: List[Dict[str, Any]] = []
 
         # Step 1: 环境自检 (0% ~ 20%)
-        if progress_callback: progress_callback(5, "正在进行运行环境与依赖完整性自检...")
+        if progress_callback:
+            progress_callback(5, "正在进行运行环境与依赖完整性自检...")
         env_items = self.check_environment()
         all_items.extend(env_items)
 
         # Step 2: 网络连通性 (20% ~ 40%)
-        if progress_callback: progress_callback(25, "正在检测海外各平台网络连通性与延迟...")
+        if progress_callback:
+            progress_callback(25, "正在检测海外各平台网络连通性与延迟...")
         net_items = self.check_network()
         all_items.extend(net_items)
 
@@ -241,7 +241,8 @@ class DiagnosticsEngine:
         total_disp = len(self.dispatchers)
         for idx, disp in enumerate(self.dispatchers):
             step = 40 + int((idx / max(1, total_disp)) * 25)
-            if progress_callback: progress_callback(step, f"正在探测 [{disp.display_name}] 登录态有效性...")
+            if progress_callback:
+                progress_callback(step, f"正在探测 [{disp.display_name}] 登录态有效性...")
 
             try:
                 probe_res = disp.probe_login()
@@ -262,7 +263,8 @@ class DiagnosticsEngine:
         # Step 4: 选择器健康检查 (65% ~ 95%) - 只读 DOM，严禁点击提交
         for idx, disp in enumerate(self.dispatchers):
             step = 65 + int((idx / max(1, total_disp)) * 30)
-            if progress_callback: progress_callback(step, f"正在体检 [{disp.display_name}] 投稿页选择器健康度...")
+            if progress_callback:
+                progress_callback(step, f"正在体检 [{disp.display_name}] 投稿页选择器健康度...")
 
             # 若登录探针未通过，跳过投稿页浏览器体检，避免无意义的重定向与超时等待
             if login_statuses.get(disp.name) != "pass":
@@ -292,7 +294,8 @@ class DiagnosticsEngine:
                     "suggestion": "可稍后重试或检查该平台是否要求人机验证"
                 })
 
-        if progress_callback: progress_callback(98, "正在生成诊断报告汇总...")
+        if progress_callback:
+            progress_callback(98, "正在生成诊断报告汇总...")
 
         # 统计数据
         pass_count = sum(1 for it in all_items if it.get("status") == "pass")
@@ -315,7 +318,8 @@ class DiagnosticsEngine:
         # 导出为 Markdown 文件
         self._export_to_markdown(report)
 
-        if progress_callback: progress_callback(100, f"诊断完成: {pass_count} 项通过, {warn_count} 项可疑, {fail_count} 项失败")
+        if progress_callback:
+            progress_callback(100, f"诊断完成: {pass_count} 项通过, {warn_count} 项可疑, {fail_count} 项失败")
         return report
 
     def _export_to_markdown(self, report: Dict[str, Any]):

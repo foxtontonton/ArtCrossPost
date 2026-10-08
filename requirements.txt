@@ -1,5 +1,8 @@
-PyQt5>=5.15.0
-opencv-python>=4.8.0
-playwright>=1.40.0
-onnxruntime>=1.16.0
-Pillow>=10.0.0
+PyQt5==5.15.11
+opencv-python==5.0.0.93
+playwright==1.60.0
+onnxruntime==1.23.2
+Pillow==10.2.0
+nudenet==3.4.2
+requests==2.31.0
+ruff==0.16.10

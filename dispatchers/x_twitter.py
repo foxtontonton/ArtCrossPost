@@ -543,7 +543,7 @@ class XTwitterDispatcher(BaseDispatcher):
                                 next_editor.fill(chunk)
                                 time.sleep(0.3)  # 等待串推文本填入
                         else:
-                            logger.warning(f"[X] 提示: 未能定位到 Thread 加号按钮，将在主推文发送后由备用链处理")
+                            logger.warning("[X] 提示: 未能定位到 Thread 加号按钮，将在主推文发送后由备用链处理")
 
                 # 5. 等待发帖按钮激活并提交 (直接信任就绪按钮，严禁在推特主页全局检测通用的 progressbar/spinner)
                 logger.info("[X] 等待发帖按钮激活...")

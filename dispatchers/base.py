@@ -399,7 +399,7 @@ class BaseDispatcher(ABC):
         try:
             page.wait_for_selector(selector, timeout=timeout)
             return True, "附件已成功上传并就绪"
-        except Exception as e:
+        except Exception:
             err = error_msg or f"图片未能附加到投稿，已中止 (未发出空内容): 等待附件元素超时 ({selector})"
             logger.error(f"[断言失败: 上传未确认] {err}")
             return False, err
