@@ -102,16 +102,26 @@ class BaseDispatcher(ABC):
         """
         for attempt in range(max_retries + 1):
             try:
-                return page.goto(url, wait_until=wait_until, timeout=timeout)
+                res = page.goto(url, wait_until=wait_until, timeout=timeout)
+                if page.url.startswith("chrome-error://"):
+                    raise RuntimeError(f"[{self.display_name}] 页面访问被拦截/崩溃 (当前URL: {page.url})，已快速熔断")
+                return res
             except Exception as e:
                 msg = str(e)
+                if page.url.startswith("chrome-error://"):
+                    logger.error(f"[{self.name}] 导航触发 chrome-error 熔断: {url} -> {page.url}")
+                    raise RuntimeError(f"[{self.display_name}] 页面访问被拦截/崩溃 (当前URL: {page.url})，已快速熔断")
                 if "ERR_ABORTED" in msg or "net::ERR_HTTP_RESPONSE_CODE_FAILURE" in msg:
                     logger.warning(f"[{self.name}] 捕获导航重定向/切换 ({msg})，等待 DOM 就绪: {url}")
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        if page.url.startswith("chrome-error://"):
+                            raise RuntimeError(f"[{self.display_name}] 页面访问触发错误页 ({page.url})，已快速熔断")
                         return None
                     except Exception as wait_e:
                         logger.debug(f"[{self.name}] 等待 DOM 就绪超时/异常: {wait_e}")
+                        if page.url.startswith("chrome-error://"):
+                            raise RuntimeError(f"[{self.display_name}] 页面访问触发错误页 ({page.url})，已快速熔断")
                         if attempt == max_retries:
                             return None
                 elif "Timeout" in msg and attempt < max_retries:
@@ -152,6 +162,8 @@ class BaseDispatcher(ABC):
             user_data_dir,
             channel="msedge",
             headless=headless,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+            viewport={"width": 1280, "height": 800},
             ignore_default_args=["--enable-automation"],
             args=stealth_args
         )
