@@ -1419,6 +1419,81 @@ def make_responsive_combo(combo: QComboBox):
     combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
 
+class ThemeOptionCard(QFrame):
+    """主题快速切换视觉卡片控件"""
+    clicked = pyqtSignal(str)
+
+    def __init__(self, theme_key, name, bg_hex, card_hex, accent_hex, is_selected=False, parent=None):
+        super().__init__(parent)
+        self.theme_key = theme_key
+        self.accent_hex = accent_hex
+        self.is_selected = is_selected
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(68)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        # 顶行：主题名称 + 选中指示器
+        top_row = QHBoxLayout()
+        self.name_lbl = QLabel(name)
+        self.name_lbl.setStyleSheet("font-weight: 600; font-size: 13px; color: #f3f4f6;")
+        top_row.addWidget(self.name_lbl)
+        top_row.addStretch()
+
+        self.status_lbl = QLabel("● 当前" if is_selected else "")
+        self.status_lbl.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {accent_hex};")
+        top_row.addWidget(self.status_lbl)
+        layout.addLayout(top_row)
+
+        # 调色盘色块条
+        swatch_row = QHBoxLayout()
+        swatch_row.setSpacing(6)
+        for c in [bg_hex, card_hex, accent_hex]:
+            dot = QFrame()
+            dot.setFixedSize(22, 10)
+            dot.setStyleSheet(f"background-color: {c}; border-radius: 3px; border: 1px solid rgba(255,255,255,0.15);")
+            swatch_row.addWidget(dot)
+        swatch_row.addStretch()
+        layout.addLayout(swatch_row)
+
+        self._update_style()
+
+    def set_selected(self, selected: bool):
+        self.is_selected = selected
+        self.status_lbl.setText("● 当前" if selected else "")
+        self._update_style()
+
+    def _update_style(self):
+        if self.is_selected:
+            self.setStyleSheet(f"""
+                ThemeOptionCard {{
+                    background-color: rgba(255, 255, 255, 0.05);
+                    border: 2px solid {self.accent_hex};
+                    border-radius: 8px;
+                }}
+            """)
+        else:
+            self.setStyleSheet("""
+                ThemeOptionCard {{
+                    background-color: rgba(255, 255, 255, 0.02);
+                    border: 1px solid #27272a;
+                    border-radius: 8px;
+                }}
+                ThemeOptionCard:hover {{
+                    border-color: #4b5563;
+                    background-color: rgba(255, 255, 255, 0.035);
+                }}
+            """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.theme_key)
+        super().mousePressEvent(event)
+
+
 class SettingsDialog(QDialog):
     """系统设置中心对话框：集中承载外观主题、账号会话维护与固定标签/引流签名"""
     def __init__(self, parent=None, target_tab=0):
@@ -1427,30 +1502,63 @@ class SettingsDialog(QDialog):
         self.config = parent.config if parent else load_config()
         self.dispatchers = parent.dispatchers if parent else []
         self._login_threads = {}
+        self.theme_cards = {}
 
-        self.setWindowTitle("ArtCrossPost - 系统设置中心")
-        self.resize(680, 540)
+        self.setWindowTitle("⚙ 系统设置")
+        self.resize(700, 560)
         self.setMinimumSize(620, 480)
         self.setModal(True)
 
         self._build_ui(target_tab)
 
+    def _create_section_header(self, title_text, desc_text=None):
+        container = QVBoxLayout()
+        container.setSpacing(4)
+        t = QLabel(title_text)
+        t.setStyleSheet("font-size: 14px; font-weight: 600; color: #e5e7eb;")
+        container.addWidget(t)
+        if desc_text:
+            d = QLabel(desc_text)
+            d.setStyleSheet("font-size: 12px; color: #9ca3af;")
+            d.setWordWrap(True)
+            container.addWidget(d)
+        return container
+
+    def _create_separator(self):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Plain)
+        sep.setStyleSheet("color: #27272a; background-color: #27272a; border: none; height: 1px; margin: 4px 0;")
+        return sep
+
+    def _wrap_in_scroll(self, widget):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setWidget(widget)
+        return scroll
+
+    def _notify_saved(self):
+        self.auto_save_lbl.setText("● 已自动保存")
+        self.auto_save_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: 500;")
+        if self.main_window:
+            self.main_window._schedule_config_save()
+
     def _build_ui(self, target_tab=0):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(14)
 
         # 头部标题说明
-        header = QHBoxLayout()
-        header_vbox = QVBoxLayout()
-        title_lbl = QLabel("⚙️ 系统设置中心")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #f1f5f9;")
-        desc_lbl = QLabel("集中管理界面主题外观、平台登录凭据与常驻创作偏好")
+        header = QVBoxLayout()
+        header.setSpacing(4)
+        title_lbl = QLabel("⚙ 系统设置")
+        title_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #f3f4f6;")
+        desc_lbl = QLabel("管理应用外观、平台账号及默认发布行为")
         desc_lbl.setStyleSheet("font-size: 12px; color: #9ca3af;")
-        header_vbox.addWidget(title_lbl)
-        header_vbox.addWidget(desc_lbl)
-        header.addLayout(header_vbox)
-        header.addStretch()
+        header.addWidget(title_lbl)
+        header.addWidget(desc_lbl)
         layout.addLayout(header)
 
         # 主体选项卡
@@ -1458,191 +1566,307 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tabs, 1)
 
         # Tab 1: 界面外观
-        self.tab_appearance = QWidget()
-        self._build_tab_appearance()
-        self.tabs.addTab(self.tab_appearance, "🎨 界面外观")
+        self.tab_appearance = self._build_tab_appearance()
+        self.tabs.addTab(self.tab_appearance, "界面外观")
 
         # Tab 2: 平台账号集中管理
-        self.tab_accounts = QWidget()
-        self._build_tab_accounts()
-        self.tabs.addTab(self.tab_accounts, "👥 平台账号管理")
+        self.tab_accounts = self._build_tab_accounts()
+        self.tabs.addTab(self.tab_accounts, "平台账号")
 
         # Tab 3: 偏好设置与固定标签
-        self.tab_preferences = QWidget()
-        self._build_tab_preferences()
-        self.tabs.addTab(self.tab_preferences, "🏷️ 偏好与固定标签")
+        self.tab_preferences = self._build_tab_preferences()
+        self.tabs.addTab(self.tab_preferences, "发布偏好")
 
         if 0 <= target_tab < self.tabs.count():
             self.tabs.setCurrentIndex(target_tab)
 
-        # 底部按钮栏
+        # 底部栏：左侧自动保存状态，右侧完成按钮
         footer = QHBoxLayout()
+        self.auto_save_lbl = QLabel("● 设置会自动保存")
+        self.auto_save_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        footer.addWidget(self.auto_save_lbl)
         footer.addStretch()
-        self.save_btn = QPushButton("完成并关闭")
+
+        self.save_btn = QPushButton("完成")
         self.save_btn.setObjectName("accentBtn")
-        self.save_btn.setFixedHeight(34)
+        self.save_btn.setFixedSize(88, 32)
         self.save_btn.clicked.connect(self._on_close_clicked)
         footer.addWidget(self.save_btn)
         layout.addLayout(footer)
 
     def _build_tab_appearance(self):
-        t_layout = QVBoxLayout(self.tab_appearance)
-        t_layout.setContentsMargins(12, 12, 12, 12)
-        t_layout.setSpacing(14)
+        content = QWidget()
+        t_layout = QVBoxLayout(content)
+        t_layout.setContentsMargins(14, 14, 14, 14)
+        t_layout.setSpacing(16)
 
-        # 主题选择
-        theme_card = QFrame()
-        theme_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
-        tc_layout = QVBoxLayout(theme_card)
-        tc_layout.setSpacing(8)
+        # 1. 外观主题
+        theme_header = self._create_section_header("外观主题", "选择应用程序的整体视觉风格")
+        t_layout.addLayout(theme_header)
 
-        tc_title = QLabel("🎨 主题配色 (实时热切换)")
-        tc_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
-        tc_layout.addWidget(tc_title)
-
-        th_row = QHBoxLayout()
-        th_row.addWidget(QLabel("选择风格:"))
-        self.theme_combo = QComboBox()
-        make_responsive_combo(self.theme_combo)
-        self.theme_combo.addItem("纯净极黑 (Pure Dark)", "pure_dark")
-        self.theme_combo.addItem("深蓝夜色 (Deep Navy)", "deep_navy")
-        self.theme_combo.addItem("炭素暗灰 (Charcoal)", "charcoal")
+        # 视觉化主题卡片选择
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(10)
         cur_theme = self.config.get("ui_theme", "pure_dark")
-        for i in range(self.theme_combo.count()):
-            if self.theme_combo.itemData(i) == cur_theme:
-                self.theme_combo.setCurrentIndex(i)
-                break
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        th_row.addWidget(self.theme_combo, 1)
-        tc_layout.addLayout(th_row)
-        t_layout.addWidget(theme_card)
 
-        # 字号缩放
-        font_card = QFrame()
-        font_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
-        fc_layout = QVBoxLayout(font_card)
-        fc_layout.setSpacing(8)
+        theme_specs = [
+            ("pure_dark", "纯净极黑", "#121218", "#181822", "#4f46e5"),
+            ("deep_navy", "深蓝夜色", "#0b0f19", "#111827", "#2563eb"),
+            ("charcoal",  "炭素暗灰", "#18181b", "#27272a", "#059669"),
+        ]
 
-        fc_title = QLabel("🔤 全局文字字号缩放 (11px ~ 16px)")
-        fc_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
-        fc_layout.addWidget(fc_title)
+        # 维持对 self.theme_combo 的属性兼容
+        self.theme_combo = QComboBox()
+        self.theme_combo.setVisible(False)
+        for key, name, _, _, _ in theme_specs:
+            self.theme_combo.addItem(name, key)
 
-        fs_row = QHBoxLayout()
-        fs_row.addWidget(QLabel("尺寸:"))
+        for key, name, bg, card, accent in theme_specs:
+            card_widget = ThemeOptionCard(
+                theme_key=key,
+                name=name,
+                bg_hex=bg,
+                card_hex=card,
+                accent_hex=accent,
+                is_selected=(key == cur_theme)
+            )
+            card_widget.clicked.connect(self._on_theme_card_clicked)
+            self.theme_cards[key] = card_widget
+            cards_row.addWidget(card_widget)
+
+        t_layout.addLayout(cards_row)
+        t_layout.addWidget(self._create_separator())
+
+        # 2. 界面文字缩放
+        font_header = self._create_section_header("界面文字缩放", "调节应用程序全局界面文字大小与缩放比例")
+        t_layout.addLayout(font_header)
+
+        fs_box = QVBoxLayout()
+        fs_box.setSpacing(6)
+
+        cur_fs = self.config.get("ui_font_size", 13)
+
+        # Slider 及其指示
+        slider_row = QHBoxLayout()
+        slider_row.setSpacing(12)
+
         self.font_slider = QSlider(Qt.Horizontal)
         self.font_slider.setRange(11, 16)
-        cur_fs = self.config.get("ui_font_size", 13)
         self.font_slider.setValue(cur_fs)
         self.font_slider.valueChanged.connect(self._on_font_size_changed)
-        fs_row.addWidget(self.font_slider, 1)
+        slider_row.addWidget(self.font_slider, 1)
 
-        self.font_lbl = QLabel(f"{self.font_slider.value()}px")
-        self.font_lbl.setMinimumWidth(40)
-        self.font_lbl.setStyleSheet("color: #818cf8; font-weight: bold; font-size: 14px;")
-        fs_row.addWidget(self.font_lbl)
-        fc_layout.addLayout(fs_row)
-        t_layout.addWidget(font_card)
+        self.font_lbl = QLabel(self._get_font_size_desc(cur_fs))
+        self.font_lbl.setMinimumWidth(80)
+        self.font_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.font_lbl.setStyleSheet("color: #818cf8; font-weight: 600; font-size: 13px;")
+        slider_row.addWidget(self.font_lbl)
+        fs_box.addLayout(slider_row)
+
+        # 刻度说明
+        scale_labels = QHBoxLayout()
+        lbl_small = QLabel("小")
+        lbl_small.setStyleSheet("color: #6b7280; font-size: 11px;")
+        lbl_mid = QLabel("标准")
+        lbl_mid.setStyleSheet("color: #6b7280; font-size: 11px;")
+        lbl_large = QLabel("大")
+        lbl_large.setStyleSheet("color: #6b7280; font-size: 11px;")
+        scale_labels.addWidget(lbl_small)
+        scale_labels.addStretch()
+        scale_labels.addWidget(lbl_mid)
+        scale_labels.addStretch()
+        scale_labels.addWidget(lbl_large)
+        fs_box.addLayout(scale_labels)
+
+        t_layout.addLayout(fs_box)
+        t_layout.addWidget(self._create_separator())
+
+        # 3. 界面预览
+        preview_header = self._create_section_header("界面预览", "即时预览当前外观主题与字号下的控件视觉效果")
+        t_layout.addLayout(preview_header)
+
+        preview_card = QFrame()
+        preview_card.setStyleSheet("background-color: rgba(255, 255, 255, 0.02); border: 1px solid #27272a; border-radius: 8px;")
+        pv_layout = QVBoxLayout(preview_card)
+        pv_layout.setContentsMargins(14, 12, 14, 12)
+        pv_layout.setSpacing(10)
+
+        pv_title = QLabel("ArtCrossPost 多平台发布助手")
+        pv_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #f1f5f9;")
+        pv_desc = QLabel("作品标题与简介预览：支持自动打码、添加变现签名并一键分发至各大画师平台。")
+        pv_desc.setStyleSheet("font-size: 12px; color: #9ca3af;")
+        pv_desc.setWordWrap(True)
+        pv_layout.addWidget(pv_title)
+        pv_layout.addWidget(pv_desc)
+
+        pv_row = QHBoxLayout()
+        pv_row.setSpacing(10)
+        sample_input = QLineEdit()
+        sample_input.setPlaceholderText("示例输入框...")
+        sample_input.setReadOnly(True)
+        sample_input.setFixedHeight(30)
+        pv_row.addWidget(sample_input, 1)
+
+        sample_btn = QPushButton("主要按钮")
+        sample_btn.setObjectName("accentBtn")
+        sample_btn.setFixedHeight(30)
+        sample_btn.setEnabled(False)
+        pv_row.addWidget(sample_btn)
+
+        sample_sec_btn = QPushButton("辅助按钮")
+        sample_sec_btn.setObjectName("secondaryBtn")
+        sample_sec_btn.setFixedHeight(30)
+        pv_row.addWidget(sample_sec_btn)
+        pv_layout.addLayout(pv_row)
+
+        sample_cb = QCheckBox("自动打码与分级保护已就绪")
+        sample_cb.setChecked(True)
+        sample_cb.setEnabled(False)
+        pv_layout.addWidget(sample_cb)
+
+        t_layout.addWidget(preview_card)
 
         # 提示小字
-        tip_box = QLabel("💡 外观改动无需重启程序，选定后即刻生效并自动写入 presets.json。")
-        tip_box.setStyleSheet("color: #9ca3af; font-size: 12px; padding: 4px;")
+        tip_box = QLabel("💡 外观改动无需重启程序，选定后即刻生效并自动保存。")
+        tip_box.setStyleSheet("color: #6b7280; font-size: 12px; margin-top: 2px;")
         t_layout.addWidget(tip_box)
-        t_layout.addStretch()
 
-    def _on_theme_changed(self):
-        new_theme = self.theme_combo.currentData()
-        self.config["ui_theme"] = new_theme
+        t_layout.addStretch()
+        return self._wrap_in_scroll(content)
+
+    def _get_font_size_desc(self, size):
+        mapping = {
+            11: "11px (较小)",
+            12: "12px (紧凑)",
+            13: "13px (标准)",
+            14: "14px (中大)",
+            15: "15px (较大)",
+            16: "16px (特大)"
+        }
+        return mapping.get(size, f"{size}px")
+
+    def _on_theme_card_clicked(self, key):
+        for k, card in self.theme_cards.items():
+            card.set_selected(k == key)
+        self.config["ui_theme"] = key
+        for i in range(self.theme_combo.count()):
+            if self.theme_combo.itemData(i) == key:
+                self.theme_combo.setCurrentIndex(i)
+                break
         fs = self.config.get("ui_font_size", 13)
         app = QApplication.instance()
         if app:
-            apply_app_appearance(app, theme_name=new_theme, font_size=fs)
-        if self.main_window:
-            self.main_window._schedule_config_save()
+            apply_app_appearance(app, theme_name=key, font_size=fs)
+        self._notify_saved()
+
+    def _on_theme_changed(self):
+        new_theme = self.theme_combo.currentData()
+        if new_theme:
+            self._on_theme_card_clicked(new_theme)
 
     def _on_font_size_changed(self, val):
-        self.font_lbl.setText(f"{val}px")
+        self.font_lbl.setText(self._get_font_size_desc(val))
         self.config["ui_font_size"] = val
         cur_theme = self.config.get("ui_theme", "pure_dark")
         app = QApplication.instance()
         if app:
             apply_app_appearance(app, theme_name=cur_theme, font_size=val)
-        if self.main_window:
-            self.main_window._schedule_config_save()
+        self._notify_saved()
 
     def _build_tab_accounts(self):
-        layout = QVBoxLayout(self.tab_accounts)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(14)
 
-        tip_lbl = QLabel("💡 平台账号在此统一维护登录与清除。登录成功后主界面将同步呈现。")
-        tip_lbl.setStyleSheet("color: #9ca3af; font-size: 12px; margin-bottom: 4px;")
-        layout.addWidget(tip_lbl)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QWidget()
-        scroll_vbox = QVBoxLayout(scroll_content)
-        scroll_vbox.setContentsMargins(0, 0, 0, 0)
-        scroll_vbox.setSpacing(8)
+        acc_header = self._create_section_header("平台账号", "统一维护各平台的登录授权与会话状态，主界面将实时同步。")
+        layout.addLayout(acc_header)
 
         self.account_row_widgets = {}
 
         for disp in self.dispatchers:
-            row_card = QFrame()
-            row_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 8px;")
-            r_layout = QHBoxLayout(row_card)
-            r_layout.setContentsMargins(8, 6, 8, 6)
-            r_layout.setSpacing(10)
+            card = QFrame()
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: rgba(255, 255, 255, 0.02);
+                    border: 1px solid #27272a;
+                    border-radius: 8px;
+                }
+            """)
+            c_layout = QVBoxLayout(card)
+            c_layout.setContentsMargins(14, 12, 14, 12)
+            c_layout.setSpacing(8)
 
-            # 平台名
+            # 顶层：平台名称 (左) + 状态指示 (右)
+            top_row = QHBoxLayout()
             p_name = QLabel(disp.display_name)
-            p_name.setStyleSheet("font-weight: bold; font-size: 14px; min-width: 110px;")
-            r_layout.addWidget(p_name)
+            p_name.setStyleSheet("font-weight: bold; font-size: 15px; color: #f3f4f6;")
+            top_row.addWidget(p_name)
+            top_row.addStretch()
 
-            # 用户名与状态
             profile = disp.get_profile()
             is_logged_in = profile.get("logged_in", False)
             username = profile.get("username", "未登录")
 
-            u_text = f"@{username}" if is_logged_in and not username.startswith("@") else username
-            u_lbl = QLabel(u_text if is_logged_in else "未登录")
-            u_color = "#10b981" if is_logged_in else "#9ca3af"
-            u_lbl.setStyleSheet(f"color: {u_color}; font-size: 13px; font-weight: 500; min-width: 120px;")
-            r_layout.addWidget(u_lbl)
-
             s_badge = QLabel("● 已连接" if is_logged_in else "○ 未连接")
-            s_badge.setStyleSheet(f"color: {u_color}; font-size: 12px; min-width: 70px;")
-            r_layout.addWidget(s_badge)
+            u_color = "#10b981" if is_logged_in else "#9ca3af"
+            s_badge.setStyleSheet(f"color: {u_color}; font-size: 12px; font-weight: 500;")
+            top_row.addWidget(s_badge)
+            c_layout.addLayout(top_row)
 
-            r_layout.addStretch()
+            # 中间层：用户名
+            u_text = f"@{username}" if is_logged_in and not username.startswith("@") else username
+            u_lbl = QLabel(u_text if is_logged_in else "未连接任何账号")
+            u_lbl.setStyleSheet(f"color: {'#e2e8f0' if is_logged_in else '#6b7280'}; font-size: 13px; font-weight: 500;")
+            c_layout.addWidget(u_lbl)
 
-            login_btn = QPushButton("登录 / 更新Cookie")
-            login_btn.setObjectName("secondaryBtn")
-            login_btn.setFixedHeight(28)
-            login_btn.clicked.connect(lambda chk, d=disp, sb=s_badge, ub=u_lbl: self._start_login(d, sb, ub))
-            r_layout.addWidget(login_btn)
+            # 底层：操作按钮 (右对齐)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
 
             clear_btn = QPushButton("清除会话")
             clear_btn.setFixedHeight(28)
             clear_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #27272a;
+                    background-color: transparent;
                     border: 1px solid #3f3f46;
                     border-radius: 6px;
-                    color: #ef4444;
+                    color: #9ca3af;
                     font-size: 12px;
-                    padding: 4px 10px;
+                    padding: 4px 12px;
                 }
                 QPushButton:hover {
-                    background-color: #3f3f46;
+                    background-color: rgba(239, 68, 68, 0.1);
                     color: #f87171;
                     border-color: #ef4444;
                 }
             """)
-            clear_btn.clicked.connect(lambda chk, d=disp, sb=s_badge, ub=u_lbl: self._clear_session(d, sb, ub))
-            r_layout.addWidget(clear_btn)
+            btn_row.addWidget(clear_btn)
 
-            scroll_vbox.addWidget(row_card)
+            login_btn = QPushButton("重新登录" if is_logged_in else "登录账号")
+            login_btn.setFixedHeight(28)
+            login_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #272738;
+                    border: 1px solid #3f3f46;
+                    border-radius: 6px;
+                    color: #ffffff;
+                    font-size: 12px;
+                    font-weight: 500;
+                    padding: 4px 14px;
+                }
+                QPushButton:hover {
+                    background-color: #383852;
+                    border-color: #6366f1;
+                }
+            """)
+            btn_row.addWidget(login_btn)
+            c_layout.addLayout(btn_row)
+
+            login_btn.clicked.connect(lambda chk, d=disp, sb=s_badge, ub=u_lbl, lb=login_btn: self._start_login(d, sb, ub, lb))
+            clear_btn.clicked.connect(lambda chk, d=disp, sb=s_badge, ub=u_lbl, lb=login_btn: self._clear_session(d, sb, ub, lb))
+
+            layout.addWidget(card)
             self.account_row_widgets[disp.name] = {
                 "u_lbl": u_lbl,
                 "s_badge": s_badge,
@@ -1650,117 +1874,125 @@ class SettingsDialog(QDialog):
                 "clear_btn": clear_btn
             }
 
-        scroll_vbox.addStretch()
-        scroll.setWidget(scroll_content)
-        layout.addWidget(scroll, 1)
+        layout.addStretch()
+        return self._wrap_in_scroll(content)
 
-    def _start_login(self, disp, s_badge, u_lbl):
+    def _start_login(self, disp, s_badge, u_lbl, login_btn=None):
         s_badge.setText("● 正在打开浏览器...")
-        s_badge.setStyleSheet("color: #fbbf24; font-size: 12px;")
+        s_badge.setStyleSheet("color: #fbbf24; font-size: 12px; font-weight: 500;")
+        if login_btn:
+            login_btn.setEnabled(False)
         if self.main_window:
             self.main_window.notify(f"正在唤起浏览器登录 {disp.display_name}...", level="info")
 
         thread = LoginThread(disp)
         self._login_threads[disp.name] = thread
         thread.finished_signal.connect(
-            lambda success, msg, profile: self._on_login_finished(disp, s_badge, u_lbl, success, msg, profile)
+            lambda success, msg, profile: self._on_login_finished(disp, s_badge, u_lbl, success, msg, profile, login_btn)
         )
         thread.start()
 
-    def _on_login_finished(self, disp, s_badge, u_lbl, success, msg, profile):
+    def _on_login_finished(self, disp, s_badge, u_lbl, success, msg, profile, login_btn=None):
+        if login_btn:
+            login_btn.setEnabled(True)
         username = profile.get("username", "已登录用户")
         if success:
             u_text = f"@{username}" if not username.startswith("@") else username
             u_lbl.setText(u_text)
-            u_lbl.setStyleSheet("color: #10b981; font-weight: bold; font-size: 13px;")
+            u_lbl.setStyleSheet("color: #e2e8f0; font-weight: 500; font-size: 13px;")
             s_badge.setText("● 已连接")
-            s_badge.setStyleSheet("color: #10b981; font-size: 12px;")
+            s_badge.setStyleSheet("color: #10b981; font-size: 12px; font-weight: 500;")
+            if login_btn:
+                login_btn.setText("重新登录")
             if self.main_window:
                 self.main_window._refresh_all_platform_statuses()
                 self.main_window.notify(f"{disp.display_name} 账号已连接成功！已同步用户信息", level="success")
         else:
-            s_badge.setText("○ 未连接")
-            s_badge.setStyleSheet("color: #ef4444; font-size: 12px;")
+            s_badge.setText("○ 连接失败")
+            s_badge.setStyleSheet("color: #ef4444; font-size: 12px; font-weight: 500;")
             if self.main_window:
                 self.main_window.notify(f"{disp.display_name} 登录未能完成: {msg}", level="warning")
 
-    def _clear_session(self, disp, s_badge, u_lbl):
+    def _clear_session(self, disp, s_badge, u_lbl, login_btn=None):
         disp.clear_session()
-        u_lbl.setText("未登录")
-        u_lbl.setStyleSheet("color: #9ca3af; font-size: 13px;")
+        u_lbl.setText("未连接任何账号")
+        u_lbl.setStyleSheet("color: #6b7280; font-size: 13px;")
         s_badge.setText("○ 未连接")
-        s_badge.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        s_badge.setStyleSheet("color: #9ca3af; font-size: 12px; font-weight: 500;")
+        if login_btn:
+            login_btn.setText("登录账号")
         if self.main_window:
             self.main_window._refresh_all_platform_statuses()
             self.main_window.notify(f"已清除 {disp.display_name} 的本地登录凭据与会话", level="info")
 
     def _build_tab_preferences(self):
-        layout = QVBoxLayout(self.tab_preferences)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(14)
 
-        # 1. 常驻固定标签
-        tags_card = QFrame()
-        tags_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
-        tg_layout = QVBoxLayout(tags_card)
-        tg_layout.setSpacing(6)
+        # 1. 常用发布偏好
+        pref_header = self._create_section_header("常用发布偏好", "管理作品发布时通用的标签预设与文案签名模板")
+        layout.addLayout(pref_header)
 
-        tg_title = QLabel("🏷️ 常驻固定标签偏好")
-        tg_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
-        tg_layout.addWidget(tg_title)
+        # 默认标签
+        tags_vbox = QVBoxLayout()
+        tags_vbox.setSpacing(6)
+        tg_title = QLabel("默认标签")
+        tg_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        tags_vbox.addWidget(tg_title)
 
-        tg_desc = QLabel("输入日常发布中高频使用的常驻标签（以逗号或空格隔开）：")
+        tg_desc = QLabel("新建作品时自动填充的常用标签。")
         tg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
-        tg_layout.addWidget(tg_desc)
+        tags_vbox.addWidget(tg_desc)
 
         self.def_tags_edit = QTextEdit()
-        self.def_tags_edit.setFixedHeight(70)
+        self.def_tags_edit.setFixedHeight(66)
         self.def_tags_edit.setPlaceholderText("例如: original, oc, anime, illustration, fantasy")
         self.def_tags_edit.setPlainText(self.config.get("default_tags", "original, oc, anime, illustration"))
         self.def_tags_edit.textChanged.connect(self._on_def_tags_changed)
-        tg_layout.addWidget(self.def_tags_edit)
+        tags_vbox.addWidget(self.def_tags_edit)
 
-        self.auto_fill_cb = QCheckBox("每次新建作品 / 清空信息时自动预填固定标签")
+        self.auto_fill_cb = QCheckBox("新建作品 / 清空信息时自动填充")
         self.auto_fill_cb.setChecked(self.config.get("auto_fill_default_tags", True))
         self.auto_fill_cb.stateChanged.connect(self._on_auto_fill_changed)
-        tg_layout.addWidget(self.auto_fill_cb)
-        layout.addWidget(tags_card)
+        tags_vbox.addWidget(self.auto_fill_cb)
+        layout.addLayout(tags_vbox)
 
-        # 2. 变现引流签名模板
-        sig_card = QFrame()
-        sig_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
-        sc_layout = QVBoxLayout(sig_card)
-        sc_layout.setSpacing(6)
+        # 签名模板
+        sig_vbox = QVBoxLayout()
+        sig_vbox.setSpacing(6)
+        sc_title = QLabel("签名模板")
+        sc_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        sig_vbox.addWidget(sc_title)
 
-        sc_title = QLabel("💰 变现引流签名模板 (Patreon / Ko-fi 尾巴)")
-        sc_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
-        sc_layout.addWidget(sc_title)
-
-        sc_desc = QLabel("用于通过主界面「一键追加赞助引流尾巴」按钮插入到作品简介末尾：")
+        sc_desc = QLabel("用于一键追加到作品简介末尾，可包含 Patreon、Ko-fi 等链接。")
         sc_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
-        sc_layout.addWidget(sc_desc)
+        sig_vbox.addWidget(sc_desc)
 
         self.sig_edit = QTextEdit()
-        self.sig_edit.setFixedHeight(95)
+        self.sig_edit.setFixedHeight(88)
         default_sig = "\n\n---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname"
         self.sig_edit.setPlainText(self.config.get("signature_template", default_sig))
         self.sig_edit.textChanged.connect(self._on_sig_changed)
-        sc_layout.addWidget(self.sig_edit)
-        layout.addWidget(sig_card)
+        sig_vbox.addWidget(self.sig_edit)
+        layout.addLayout(sig_vbox)
 
-        # 3. DeviantArt 默认相册偏好
-        da_gal_card = QFrame()
-        da_gal_card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; padding: 10px;")
-        dg_layout = QVBoxLayout(da_gal_card)
-        dg_layout.setSpacing(6)
+        layout.addWidget(self._create_separator())
 
-        dg_title = QLabel("🎨 DeviantArt 默认相册")
-        dg_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #a5b4fc;")
-        dg_layout.addWidget(dg_title)
+        # 2. 平台默认值
+        plat_header = self._create_section_header("平台默认值", "针对特定发布平台的默认参数与相册归属")
+        layout.addLayout(plat_header)
 
-        dg_desc = QLabel("配置日常同步到 DeviantArt 时的缺省相册（支持下拉选择或直接输入）：")
+        da_vbox = QVBoxLayout()
+        da_vbox.setSpacing(6)
+        dg_title = QLabel("DeviantArt 默认相册")
+        dg_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        da_vbox.addWidget(dg_title)
+
+        dg_desc = QLabel("日常同步到 DeviantArt 时使用的默认相册。")
         dg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
-        dg_layout.addWidget(dg_desc)
+        da_vbox.addWidget(dg_desc)
 
         self.def_da_gallery_combo = QComboBox()
         make_responsive_combo(self.def_da_gallery_combo)
@@ -1791,25 +2023,23 @@ class SettingsDialog(QDialog):
             self.def_da_gallery_combo.setCurrentIndex(0)
 
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
-        dg_layout.addWidget(self.def_da_gallery_combo)
-        layout.addWidget(da_gal_card)
+        da_vbox.addWidget(self.def_da_gallery_combo)
+        layout.addLayout(da_vbox)
 
         layout.addStretch()
+        return self._wrap_in_scroll(content)
 
     def _on_def_tags_changed(self):
         self.config["default_tags"] = self.def_tags_edit.toPlainText().strip()
-        if self.main_window:
-            self.main_window._schedule_config_save()
+        self._notify_saved()
 
     def _on_auto_fill_changed(self, state):
         self.config["auto_fill_default_tags"] = (state == Qt.Checked)
-        if self.main_window:
-            self.main_window._schedule_config_save()
+        self._notify_saved()
 
     def _on_sig_changed(self):
         self.config["signature_template"] = self.sig_edit.toPlainText()
-        if self.main_window:
-            self.main_window._schedule_config_save()
+        self._notify_saved()
 
     def _on_def_da_gallery_changed(self):
         if "defaults" not in self.config:
@@ -1833,7 +2063,7 @@ class SettingsDialog(QDialog):
                         w.setCurrentIndex(0)
                 else:
                     w.setText(gal_val)
-            self.main_window._schedule_config_save()
+        self._notify_saved()
 
     def _on_close_clicked(self):
         save_config(self.config)
