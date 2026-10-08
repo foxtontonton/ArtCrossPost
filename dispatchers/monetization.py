@@ -208,13 +208,13 @@ class PatreonDispatcher(BaseDispatcher):
                         return False
                     return p.query_selector("header img, nav img, span[data-tag='user-name'], a[href*='/posts/new']") is not None
 
+                login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）；必须在 if 外初始化，已登录跳过时仍需用它提取资料
                 if not is_patreon_logged_in(page):
                     logger.info("[Patreon] 尚未登录，正在前往登录页面...")
                     self.safe_goto(page, self.login_url)
                     logger.info("[Patreon] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
-                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
                     last_url_log = 0
                     while time.time() - start_time < 300:
@@ -609,13 +609,13 @@ class KofiDispatcher(BaseDispatcher):
                         return False
                     return p.query_selector("a[href*='/manage'], a[href*='/home'], nav img, header img, div[data-testid='user-avatar']") is not None
 
+                login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）；必须在 if 外初始化，已登录跳过时仍需用它提取资料
                 if not is_kofi_logged_in(page):
                     logger.info("[Ko-fi] 尚未登录，正在前往登录页面...")
                     self.safe_goto(page, self.login_url)
                     logger.info("[Ko-fi] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
-                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
                     last_url_log = 0
                     while time.time() - start_time < 300:
