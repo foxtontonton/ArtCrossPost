@@ -311,35 +311,76 @@ class XTwitterDispatcher(BaseDispatcher):
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
                     )
-                    context.add_cookies(cookies)
+
+                # 无论是否独立持久化环境，均同步注入本地保存的有效 Cookies
+                if cookies:
+                    try:
+                        context.add_cookies(cookies)
+                    except Exception as ce:
+                        logger.debug(f"[X] 注入 context cookies 提示: {ce}")
 
                 page = context.pages[0] if context.pages else context.new_page()
                 self.apply_stealth(page)
 
-                self.safe_goto(page, "https://x.com/compose/post", timeout=30000)
+                # 1. 优先访问主页建立完整会话 (杜绝直接硬连 /compose/post 触发 ERR_HTTP_RESPONSE_CODE_FAILURE)
+                logger.info("[X] 正在访问 X 主页建立会话...")
+                self.safe_goto(page, "https://x.com/home", timeout=35000)
+                page.wait_for_timeout(2000)
+
+                curr_url = page.url.lower()
+                if "/login" in curr_url or "/i/flow/login" in curr_url:
+                    self.close_login_session(browser, context)
+                    return False, "X (Twitter) 登录态已失效 (已重定向至登录页)，请在卡片重新点击登录", compliance
+
+                # 2. 定位发帖输入框：支持主页内嵌输入框与弹出式 compose 弹窗
+                editor_sel = "div[data-testid='tweetTextarea_0']"
                 try:
-                    page.wait_for_selector("div[data-testid='tweetTextarea_0']", timeout=15000)
-                except Exception as e:
-                    logger.debug(f"[X] 等待发帖输入框超时: {e}")
+                    page.wait_for_selector(editor_sel, timeout=12000)
+                except Exception:
+                    logger.info("[X] 主页输入框未就绪，尝试点击侧边栏发帖按钮或直达 compose 弹窗...")
+                    compose_btn = page.query_selector("a[data-testid='SideNav_NewTweet_Button'], button[data-testid='SideNav_NewTweet_Button']")
+                    if compose_btn:
+                        compose_btn.click()
+                        page.wait_for_timeout(1000)
+                    else:
+                        self.safe_goto(page, "https://x.com/compose/post", timeout=25000)
+                    try:
+                        page.wait_for_selector(editor_sel, timeout=15000)
+                    except Exception as e:
+                        logger.debug(f"[X] 等待发帖输入框超时: {e}")
 
-                # 1. 填入首条推文内容并断言回读
-                editor = page.query_selector("div[data-testid='tweetTextarea_0']")
-                if editor:
-                    editor.click()
-                    editor.fill(thread_chunks[0])
-                    time.sleep(0.5)  # 等待文本填入就绪
-                    val_ok, val_msg = self.assert_field_value(
-                        page,
-                        "div[data-testid='tweetTextarea_0']",
-                        thread_chunks[0][:30],
-                        is_contenteditable=True
-                    )
-                    if not val_ok:
-                        self.close_login_session(browser, context)
-                        return False, val_msg, compliance
+                editor = page.query_selector(editor_sel)
+                if not editor:
+                    diag_url = page.url[:80]
+                    self.close_login_session(browser, context)
+                    return False, f"X (Twitter) 未能定位到发帖输入框 (当前URL: {diag_url})，请检查账号是否受限或重新登录", compliance
 
-                # 2. 上传图片附件 (仅上传到首条推文，符合 X 平台 thread 规范)
-                file_input = page.query_selector("input[data-testid='fileInput']")
+                # 填入首条推文内容并断言回读
+                editor.click()
+                editor.fill(thread_chunks[0])
+                time.sleep(0.5)  # 等待文本填入就绪
+                val_ok, val_msg = self.assert_field_value(
+                    page,
+                    editor_sel,
+                    thread_chunks[0][:30],
+                    is_contenteditable=True
+                )
+                if not val_ok:
+                    self.close_login_session(browser, context)
+                    return False, val_msg, compliance
+
+                # 3. 上传图片附件 (仅上传到首条推文，符合 X 平台 thread 规范)
+                file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
+                if not file_input and abs_images:
+                    try:
+                        page.wait_for_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']", timeout=5000)
+                        file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
+                    except Exception:
+                        pass
+                if not file_input and abs_images:
+                    self.close_login_session(browser, context)
+                    return False, "X (Twitter) 未能定位到图片上传控件，已中止发布以防文字单独泄露", compliance
+
                 if file_input:
                     file_input.set_input_files(abs_images)
                     logger.info("[X] 正在上传图片并等待服务端渲染...")

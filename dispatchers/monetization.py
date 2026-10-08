@@ -195,18 +195,29 @@ class PatreonDispatcher(BaseDispatcher):
                     context.add_cookies(existing_cookies)
 
                 page = context.new_page()
-                self.apply_stealth(page)
-
+                login_page = page
                 self.safe_goto(page, "https://www.patreon.com/home", timeout=40000)
                 try:
-                    page.wait_for_selector("header img, nav img, span[data-tag='user-name'], a[href*='/posts/new']", timeout=5000)
+                    page.wait_for_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu']", timeout=5000)
                 except Exception as e:
                     logger.debug(f"[Patreon] 等待主页特征元素超时: {e}")
 
                 def is_patreon_logged_in(p):
-                    if "/login" in p.url.lower() or "/signup" in p.url.lower():
+                    try:
+                        url = p.url.lower()
+                        if "/login" in url or "/signup" in url or "/join" in url:
+                            return False
+                        has_login_btn = p.query_selector("a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
+                        has_user_indicator = p.query_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu'], button[aria-label*='user menu' i], a[href*='/dashboard']") is not None
+                        if has_user_indicator:
+                            return True
+                        cks = context.cookies()
+                        has_session = any(c.get("name") in ("session_id", "patreon_device_id") for c in cks)
+                        if has_session and not has_login_btn:
+                            return True
                         return False
-                    return p.query_selector("header img, nav img, span[data-tag='user-name'], a[href*='/posts/new']") is not None
+                    except Exception:
+                        return False
 
                 if not is_patreon_logged_in(page):
                     logger.info("[Patreon] 尚未登录，正在前往登录页面...")
@@ -214,7 +225,6 @@ class PatreonDispatcher(BaseDispatcher):
                     logger.info("[Patreon] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
-                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
                     last_url_log = 0
                     while time.time() - start_time < 300:
@@ -596,18 +606,30 @@ class KofiDispatcher(BaseDispatcher):
                     context.add_cookies(existing_cookies)
 
                 page = context.new_page()
-                self.apply_stealth(page)
-
+                login_page = page
                 self.safe_goto(page, "https://ko-fi.com/home", timeout=40000)
                 try:
-                    page.wait_for_selector("a[href*='/manage'], a[href*='/home'], nav img, header img, div[data-testid='user-avatar']", timeout=5000)
+                    page.wait_for_selector("a[href*='/manage'], a[href*='/settings'], div[data-testid='user-avatar']", timeout=5000)
                 except Exception as e:
                     logger.debug(f"[Ko-fi] 等待主页特征元素超时: {e}")
 
                 def is_kofi_logged_in(p):
-                    if "/account/login" in p.url.lower() or "/login" in p.url.lower():
+                    try:
+                        url = p.url.lower()
+                        if "/account/login" in url or "/login" in url or "/signup" in url or "/register" in url:
+                            return False
+                        has_login_btn = p.query_selector("a[href*='/account/login'], a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
+                        has_user_indicator = p.query_selector("a[href*='/manage'], a[href*='/settings'], a[href*='/account/logout'], div[data-testid='user-avatar'], a[href*='/dashboard']") is not None
+                        if has_user_indicator:
+                            return True
+                        cks = context.cookies()
+                        auth_cookie_names = [".aspnet.applicationcookie", "asp.net_sessionid", ".aspnetcore.cookies", "ko-fi.auth", "user_id"]
+                        has_auth_cookie = any(any(ak in c.get("name", "").lower() for ak in auth_cookie_names) for c in cks)
+                        if has_auth_cookie and not has_login_btn:
+                            return True
                         return False
-                    return p.query_selector("a[href*='/manage'], a[href*='/home'], nav img, header img, div[data-testid='user-avatar']") is not None
+                    except Exception:
+                        return False
 
                 if not is_kofi_logged_in(page):
                     logger.info("[Ko-fi] 尚未登录，正在前往登录页面...")
@@ -615,7 +637,6 @@ class KofiDispatcher(BaseDispatcher):
                     logger.info("[Ko-fi] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
-                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
                     last_url_log = 0
                     while time.time() - start_time < 300:
