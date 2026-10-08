@@ -8,7 +8,7 @@ ArtCrossPost - 多平台艺术创作一键同步分发工具 (PyQt5 客户端 - 
 4. 深度纯暗色调 (Pure Dark Mode)，去除一切白底与高亮刺眼反差
 """
 try:
-    from logger import get_logger, logger
+    from logger import logger
 except ImportError:
     import logging
     logger = logging.getLogger("ArtCrossPost")
@@ -16,7 +16,7 @@ except ImportError:
 # 必须在导入 cv2 / PyQt5 之前预先导入 onnxruntime，
 # 彻底解决 Windows 下 OpenCV 与 ONNX Runtime 的 DLL 初始化例程冲突
 try:
-    import onnxruntime
+    pass
 except Exception as e:
     logger.debug(f"预导入 onnxruntime 提示: {e}")
 
@@ -32,18 +32,18 @@ from PIL import Image
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QTextEdit, QPushButton, QCheckBox, QComboBox,
-    QFileDialog, QListWidget, QListWidgetItem, QGroupBox, QSplitter,
+    QFileDialog, QListWidget, QGroupBox, QSplitter,
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
-    QTextBrowser, QDialog, QTabWidget, QTabBar
+    QTextBrowser, QDialog, QTabWidget
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QFontMetrics
+from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen
 
 from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
 from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
-from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads
+from x_text_utils import calculate_x_char_count
 
 THEMES = {
     "pure_dark": {"name": "纯净极黑", "bg": "#121218", "card": "#181822", "border": "#2e2e3e", "accent": "#4f46e5", "accent_hover": "#6366f1"},
@@ -4117,7 +4117,7 @@ class MainWindow(QMainWindow):
         # 内嵌通知条与富文本日志汇报（严格遵守红线 #8: 严禁 QMessageBox）
         self.notify(summary_msg, level=msg_level, auto_dismiss=False)
         self.notification_bar.append_rich_log(
-            f"<br><b>📊 【全平台分发结果统计】</b><br>" + "<br>".join(summary_rows) + "<br>"
+            "<br><b>📊 【全平台分发结果统计】</b><br>" + "<br>".join(summary_rows) + "<br>"
         )
         self.notification_bar.expand_log(True)
 

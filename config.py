@@ -2,7 +2,6 @@
 """
 ArtCrossPost - Configuration & Presets Manager
 """
-import os
 import json
 from pathlib import Path
 

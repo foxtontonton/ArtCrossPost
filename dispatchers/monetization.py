@@ -407,10 +407,12 @@ class PatreonDispatcher(BaseDispatcher):
                 try:
                     if visibility == "public":
                         pub_radio = page.query_selector("label:has-text('Public') input")
-                        if pub_radio: pub_radio.click()
+                        if pub_radio:
+                            pub_radio.click()
                     else:
                         pat_radio = page.query_selector("label:has-text('Patrons only') input, label:has-text('All patrons') input")
-                        if pat_radio: pat_radio.click()
+                        if pat_radio:
+                            pat_radio.click()
                     time.sleep(0.3)  # 等待受众单选生效
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
@@ -423,7 +425,7 @@ class PatreonDispatcher(BaseDispatcher):
 
                 try:
                     publish_btn.click()
-                except Exception as e:
+                except Exception:
                     publish_btn.evaluate("el => el.click()")
 
                 sub_ok, sub_msg = self.assert_submitted(
@@ -858,7 +860,7 @@ class KofiDispatcher(BaseDispatcher):
 
                 try:
                     publish_btn.click()
-                except Exception as e:
+                except Exception:
                     publish_btn.evaluate("el => el.click()")
 
                 sub_ok, sub_msg = self.assert_submitted(

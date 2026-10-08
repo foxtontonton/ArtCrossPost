@@ -1,0 +1,25 @@
+# Ruff configuration
+target-version = "py310"
+line-length = 120
+
+[lint]
+# 初始规则集从宽：启用 Pyflakes (F) 与 关键 pycodestyle errors
+select = [
+    "F",      # Pyflakes (未定义变量、未引用包、重复定义等)
+    "E4",     # Import 结构错误
+    "E7",     # 语句对比与语法规范
+    "E9",     # 运行语法解析错误
+]
+ignore = [
+    "E402",   # 模块级导入顺序 (因 Windows DLL 冲突须前置预导入 onnxruntime)
+    "E501",   # 行宽限制
+]
+
+exclude = [
+    ".git",
+    "__pycache__",
+    "data",
+    "build",
+    "dist",
+    "scratch*",
+]

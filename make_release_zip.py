@@ -21,6 +21,7 @@ INCLUDE_FILES = [
     "watermark_engine.py",
     "x_text_utils.py",
     "requirements.txt",
+    "ruff.toml",
     "start.bat",
     "README.md",
     "PROJECT_HANDOVER.md",
@@ -65,7 +66,7 @@ def build_zip():
             zf.writestr(data_info, "")
             zf.writestr("data/.gitkeep", "")
 
-    print(f"\n[2/3] 打包完成！已生成:")
+    print("\n[2/3] 打包完成！已生成:")
     print(f"  - {OUTPUT_ZIP} ({os.path.getsize(OUTPUT_ZIP)} bytes)")
     print(f"  - {FALLBACK_ZIP} ({os.path.getsize(FALLBACK_ZIP)} bytes)")
 
