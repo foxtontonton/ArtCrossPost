@@ -248,9 +248,9 @@ class WatermarkEngine:
         margin_y = max(24, int(h * 0.028))
 
         if position == "tiled":
-            # 倾斜平铺防盗印 (角度 30°，行列交错)
-            step_w = max(tw + 140, 240)
-            step_h = max(th + 100, 140)
+            # 倾斜平铺防盗印 (角度 28°，行列奇偶交错)
+            step_w = max(tw + 120, 220)
+            step_h = max(th + 80, 120)
             stamp = Image.new("RGBA", (step_w, step_h), (0, 0, 0, 0))
             sdraw = ImageDraw.Draw(stamp)
             sdraw.text(
@@ -264,9 +264,12 @@ class WatermarkEngine:
             rot_stamp = stamp.rotate(28, expand=True, resample=Image.BICUBIC)
             rw, rh = rot_stamp.size
 
+            row_idx = 0
             for py in range(-rh, h + rh, rh):
-                for px in range(-rw, w + rw, rw):
-                    watermark_layer.paste(rot_stamp, (px, py), rot_stamp)
+                x_offset = (rw // 2) if (row_idx % 2 == 1) else 0
+                for px in range(-rw - rw // 2, w + rw, rw):
+                    watermark_layer.paste(rot_stamp, (px + x_offset, py), rot_stamp)
+                row_idx += 1
 
         else:
             # 单一位置：精准扣除文字包围盒 offset，确保 margin 绝对精确，绝不溢出或偏移

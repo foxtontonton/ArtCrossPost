@@ -722,42 +722,72 @@ class UnifiedPreviewCanvas(QLabel):
                     ascent = metrics.ascent()
                     descent = metrics.descent()
 
-                    margin_x = int(24 * scale_x)
-                    margin_y = int(24 * scale_y)
-
-                    if pos == "bottom_right":
-                        tx = ox + dw - tw - margin_x
-                        ty = oy + dh - margin_y - descent
-                    elif pos == "bottom_left":
-                        tx = ox + margin_x
-                        ty = oy + dh - margin_y - descent
-                    elif pos == "top_right":
-                        tx = ox + dw - tw - margin_x
-                        ty = oy + margin_y + ascent
-                    elif pos == "top_left":
-                        tx = ox + margin_x
-                        ty = oy + margin_y + ascent
-                    elif pos == "center":
-                        tx = ox + (dw - tw) // 2
-                        ty = oy + (dh + ascent - descent) // 2
-                    elif pos == "bottom_center":
-                        tx = ox + (dw - tw) // 2
-                        ty = oy + dh - margin_y - descent
-                    else:
-                        tx = ox + dw - tw - margin_x
-                        ty = oy + dh - margin_y - descent
-
                     base_col = QColor(color_hex)
                     fill_color = QColor(base_col.red(), base_col.green(), base_col.blue(), int(opacity * 255))
 
-                    path = QPainterPath()
-                    path.addText(tx, ty, font, text)
+                    if pos == "tiled":
+                        painter.save()
+                        # 严格限制在动图内容矩形区域内，严禁溢出到操作栏或留黑区
+                        painter.setClipRect(QRect(ox, oy, dw, dh))
 
-                    if enable_stroke:
-                        stroke_w = max(2, int(scaled_font_sz / 9))
-                        painter.strokePath(path, QPen(QColor(0, 0, 0, int(opacity * 220)), stroke_w))
+                        step_x = max(tw + int(100 * scale_x), int(180 * scale_x))
+                        step_y = max(int((ascent + descent) * 2.8), int(90 * scale_y))
 
-                    painter.fillPath(path, QBrush(fill_color))
+                        stroke_w = max(2, int(scaled_font_sz / 9)) if enable_stroke else 0
+                        stroke_pen = QPen(QColor(0, 0, 0, int(opacity * 220)), stroke_w) if enable_stroke else None
+
+                        row_idx = 0
+                        # 覆盖范围四周预留扩展，确保旋转后边缘不留白缝
+                        for cy in range(oy - int(dh * 0.25), oy + dh + int(dh * 0.25), step_y):
+                            x_offset = (step_x // 2) if (row_idx % 2 == 1) else 0
+                            for cx in range(ox - int(dw * 0.25), ox + dw + int(dw * 0.25), step_x):
+                                painter.save()
+                                painter.translate(cx + x_offset, cy)
+                                painter.rotate(-28)
+
+                                path = QPainterPath()
+                                path.addText(-tw // 2, (ascent - descent) // 2, font, text)
+                                if stroke_pen:
+                                    painter.strokePath(path, stroke_pen)
+                                painter.fillPath(path, QBrush(fill_color))
+                                painter.restore()
+                            row_idx += 1
+
+                        painter.restore()
+                    else:
+                        margin_x = int(24 * scale_x)
+                        margin_y = int(24 * scale_y)
+
+                        if pos == "bottom_right":
+                            tx = ox + dw - tw - margin_x
+                            ty = oy + dh - margin_y - descent
+                        elif pos == "bottom_left":
+                            tx = ox + margin_x
+                            ty = oy + dh - margin_y - descent
+                        elif pos == "top_right":
+                            tx = ox + dw - tw - margin_x
+                            ty = oy + margin_y + ascent
+                        elif pos == "top_left":
+                            tx = ox + margin_x
+                            ty = oy + margin_y + ascent
+                        elif pos == "center":
+                            tx = ox + (dw - tw) // 2
+                            ty = oy + (dh + ascent - descent) // 2
+                        elif pos == "bottom_center":
+                            tx = ox + (dw - tw) // 2
+                            ty = oy + dh - margin_y - descent
+                        else:
+                            tx = ox + dw - tw - margin_x
+                            ty = oy + dh - margin_y - descent
+
+                        path = QPainterPath()
+                        path.addText(tx, ty, font, text)
+
+                        if enable_stroke:
+                            stroke_w = max(2, int(scaled_font_sz / 9))
+                            painter.strokePath(path, QPen(QColor(0, 0, 0, int(opacity * 220)), stroke_w))
+
+                        painter.fillPath(path, QBrush(fill_color))
 
         # 2. 交互式打码控制层（动图与静态图片共用，只要打码开启即显示高亮边框、8向拖拽控制手柄和编号徽章）
         if self._censor_enabled and self._censor_boxes:
