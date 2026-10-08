@@ -668,11 +668,90 @@ class DeviantArtDispatcher(BaseDispatcher):
                         return True
                     return False
 
+                # 阶段 1：首轮提交后 5 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
+                logger.info("[DeviantArt] 正在等待提交响应 (5秒首轮窗口)...")
+                first_submit_passed = False
+                for _ in range(5):
+                    time.sleep(1.0)
+                    if is_da_submitted(page):
+                        first_submit_passed = True
+                        break
+
+                if not first_submit_passed:
+                    logger.warning("[DeviantArt] 首次点击 5 秒内未离开投稿页 (/submit)，触发自动二次补全与挽救提交...")
+                    # 1. 检查是否存在未勾选的 Mature 二级分类 (Nudity/Sexual themes)，若未选则补选
+                    if is_mature:
+                        sub_tags = page.query_selector_all(
+                            "label:has-text('Nudity'), label:has-text('Sexual themes'), label:has-text('Sexual Themes'), "
+                            "label:has-text('Sexual') input, label:has-text('Nudity') input, "
+                            "input[name*='sexual'], input[name*='nudity']"
+                        )
+                        for st in sub_tags:
+                            try:
+                                if not is_element_checked(st):
+                                    click_safely(st)
+                                    page.wait_for_timeout(200)
+                                    logger.info("[DeviantArt] 自愈阶段成功补勾选 Mature 二级分类")
+                            except Exception:
+                                pass
+
+                    # 2. 重新聚焦标题输入框，强制重新填入用户设置的正确作品标题
+                    try:
+                        re_title_input = page.query_selector(title_sel)
+                        if re_title_input:
+                            re_title_input.scroll_into_view_if_needed()
+                            re_title_input.click()
+                            page.keyboard.press("Control+A")
+                            page.keyboard.press("Backspace")
+                            re_title_input.fill(title)
+                            page.wait_for_timeout(300)
+                            page.keyboard.press("Tab")
+                            page.wait_for_timeout(200)
+                            import json as _json
+                            page.evaluate(f"""() => {{
+                                const el = document.querySelector("{title_sel}");
+                                if (el) {{
+                                    el.value = {_json.dumps(title)};
+                                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                }}
+                            }}""")
+                            logger.info(f"[DeviantArt] 自愈阶段已强制回填标题: {title}")
+                    except Exception as te:
+                        logger.debug(f"[DeviantArt] 自愈阶段标题回填提示: {te}")
+
+                    # 3. 重新定位 Submit Now 按钮，执行 scroll_into_view_if_needed 并执行第二次穿透点击
+                    re_submit_btn = None
+                    for sel in candidate_sels:
+                        btns = page.query_selector_all(sel)
+                        for b in btns:
+                            txt = b.inner_text().strip().lower()
+                            if any(kw in txt for kw in ["stash", "draft", "cancel", "save to"]):
+                                continue
+                            if "submit" in txt:
+                                re_submit_btn = b
+                                break
+                        if re_submit_btn:
+                            break
+
+                    if re_submit_btn:
+                        try:
+                            re_submit_btn.scroll_into_view_if_needed()
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+                        try:
+                            re_submit_btn.click()
+                        except Exception as e:
+                            logger.debug(f"[DeviantArt] 自愈阶段普通点击失败，切换 evaluate 点击: {e}")
+                            re_submit_btn.evaluate("el => el.click()")
+                        logger.info("[DeviantArt] 自愈补全完毕，已执行第二次挽救提交！")
+
                 logger.info("[DeviantArt] 等待发布结果确认 (等待离开 /submit 或展示页渲染)...")
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     is_da_submitted,
-                    timeout=40000,
+                    timeout=35000,
                     error_msg="DeviantArt 提交超时未离开投稿页 (/submit)，作品可能仅存为草稿箱，请前往网页确认发布"
                 )
 
@@ -684,18 +763,82 @@ class DeviantArtDispatcher(BaseDispatcher):
                             err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
                     except Exception:
                         pass
-                    sub_msg = f"{sub_msg}{err_detail}"
+                    self.close_login_session(browser, context, page)
+                    return False, f"{sub_msg}{err_detail}", compliance
 
-                # 成功确认后使用纯净 time.sleep 缓冲 3 秒，严禁使用 networkidle 避免挂起死锁
-                if sub_ok:
-                    logger.info("[DeviantArt] 作品正式上架确认！执行安全网络缓冲等待 (3秒)...")
-                    time.sleep(3)
+                # 成功离开 /submit 后的最终真发布核验：访问 Studio Drafts 验证草稿彻底销毁与出库
+                logger.info("[DeviantArt] 正在对 DeviantArt Studio 草稿箱执行反向核验 (验证草稿是否彻底销毁/出库)...")
+                draft_cleared = False
+                studio_page = None
+                try:
+                    studio_page = context.new_page()
+                    self.apply_stealth(studio_page)
+                    self.safe_goto(studio_page, "https://www.deviantart.com/studio", timeout=25000)
+                    studio_page.wait_for_timeout(2000)
+
+                    # 尝试点击 Drafts 标签页
+                    try:
+                        drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
+                        if drafts_tab:
+                            drafts_tab.click()
+                            studio_page.wait_for_timeout(1500)
+                    except Exception as dte:
+                        logger.debug(f"[DeviantArt] Studio 点击 Drafts 标签页提示: {dte}")
+
+                    import re
+                    clean_title = title.strip()
+                    safe_slug = re.sub(r'[\\/*?:"<>|\s]+', '_', clean_title)
+                    keywords_to_check = [clean_title]
+                    if safe_slug and safe_slug != clean_title:
+                        keywords_to_check.append(safe_slug)
+
+                    studio_text = studio_page.inner_text("body")
+                    title_in_drafts = any(kw.lower() in studio_text.lower() for kw in keywords_to_check if kw)
+
+                    if title_in_drafts:
+                        # 缓冲 3 秒刷新复核 (防止 DA 异步数据库索引毫秒级微小延迟)
+                        logger.info("[DeviantArt] 探测到草稿暂存，等待 3 秒后执行最终状态复核...")
+                        time.sleep(3)
+                        studio_page.reload()
+                        studio_page.wait_for_timeout(2000)
+                        try:
+                            drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
+                            if drafts_tab:
+                                drafts_tab.click()
+                                studio_page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
+                        studio_text_retry = studio_page.inner_text("body")
+                        still_in_drafts = any(kw.lower() in studio_text_retry.lower() for kw in keywords_to_check if kw)
+                        if still_in_drafts:
+                            logger.error(f"[DeviantArt] 草稿箱反向核验失败: 作品 '{title}' 依然滞留在 Studio Drafts 中未完成出库！")
+                            draft_cleared = False
+                        else:
+                            logger.info("[DeviantArt] 复核通过：作品已从 Studio Drafts 彻底出库！")
+                            draft_cleared = True
+                    else:
+                        logger.info(f"[DeviantArt] 草稿箱反向核验通过：Studio Drafts 中已无同名草稿，作品已正式销毁草稿并出库！")
+                        draft_cleared = True
+
+                except Exception as se:
+                    logger.warning(f"[DeviantArt] 草稿箱反向核验网络异常 ({se})，以投稿主页面成功跳转为准")
+                    draft_cleared = True
+                finally:
+                    if studio_page:
+                        try:
+                            studio_page.close()
+                        except Exception:
+                            pass
+
+                if not draft_cleared:
+                    self.close_login_session(browser, context, page)
+                    return False, f"DeviantArt 提交未能正式出库，作品 '{title}' 仍在草稿箱 (Drafts) 中未成功发布，已拦截虚假成功报告", compliance
+
+                logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
+                time.sleep(3)
 
                 self.close_login_session(browser, context, page)
-                if not sub_ok:
-                    return False, sub_msg, compliance
-
-                return True, "DeviantArt 发布成功 (已更新标题、对齐 Created using AI tools 及 Mature Content 二级分类并正式提交)", compliance
+                return True, "DeviantArt 已正式发布并出库 (草稿箱已销毁，作品正式上架)", compliance
         except Exception as e:
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")
             return False, f"DeviantArt 自动化发布异常: {e}", compliance
