@@ -139,8 +139,8 @@ class PatreonDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://www.patreon.com/posts/new", timeout=30000)
                 try:
                     page.wait_for_selector("button:has-text('Images'), div[role='button']:has-text('Images')", timeout=10000)
-                except Exception as e:
-                    logger.debug(f"[Patreon] 图片发布类型按钮等待超时，体检将标记为 unknown: {e}")
+                except Exception:
+                    pass
 
                 manifest = self.get_selector_manifest()
                 img_btn = page.query_selector(manifest["images_post_type"])
@@ -155,10 +155,7 @@ class PatreonDispatcher(BaseDispatcher):
 
                 if img_btn:
                     img_btn.click()
-                    try:
-                        page.wait_for_selector(manifest["title_input"], timeout=8000)
-                    except Exception as e:
-                        logger.debug(f"[Patreon] 切换图片发布类型后表单未渲染: {e}")
+                    time.sleep(1)
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("adult_checkbox", manifest["adult_checkbox"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
@@ -214,32 +211,63 @@ class PatreonDispatcher(BaseDispatcher):
                     logger.info("[Patreon] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
+                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
+                    last_url_log = 0
                     while time.time() - start_time < 300:
                         if page.is_closed():
                             break
                         try:
-                            if is_patreon_logged_in(page):
-                                logged_in = True
+                            # 检查上下文内所有页面（含 Google OAuth 弹窗）：任一登录成功即算成功
+                            for p in context.pages:
+                                try:
+                                    if not p.is_closed() and is_patreon_logged_in(p):
+                                        logged_in = True
+                                        login_page = p
+                                        if p != page:
+                                            logger.info(f"[Patreon] 在新页面检测到登录态: {p.url[:80]}")
+                                        break
+                                except Exception:
+                                    continue
+                            if logged_in:
                                 break
+                            # 每 15 秒记录一次各页面 URL，便于定位卡死位置（如 OAuth 回调白屏）
+                            now = time.time()
+                            if now - last_url_log > 15:
+                                last_url_log = now
+                                try:
+                                    urls = [pg.url[:70] for pg in context.pages if not pg.is_closed()]
+                                except Exception:
+                                    urls = ["<读取失败>"]
+                                logger.info(f"[Patreon] 等待登录中，当前页面: {urls}")
                         except Exception as e:
                             logger.debug(f"[Patreon] 轮询登录状态异常: {e}")
-                        time.sleep(1.5)  # 登录轮询间隔，避免高频查询触发平台风控
+                        time.sleep(1.5)
 
-                    if not logged_in and not is_patreon_logged_in(page):
+                    if not logged_in:
+                        # 收尾前对所有页面再做一次登录态确认
+                        try:
+                            for p in context.pages:
+                                if not p.is_closed() and is_patreon_logged_in(p):
+                                    logged_in = True
+                                    login_page = p
+                                    break
+                        except Exception:
+                            pass
+                    if not logged_in:
                         if not page.is_closed():
                             self.close_login_session(browser, context)
                         return False, "Patreon 登录未完成或窗口已关闭"
 
                 time.sleep(1)  # 等待登录后页面状态稳定
-                # 提取用户名与头像
+                # 提取用户名与头像（从实际登录的页面提取，可能是 OAuth 弹窗页）
                 user_name = "Patreon 创作者"
                 avatar_src = None
                 try:
-                    name_elem = page.query_selector("header span[data-tag='user-name'], nav span")
+                    name_elem = login_page.query_selector("header span[data-tag='user-name'], nav span")
                     if name_elem:
                         user_name = name_elem.inner_text().strip() or user_name
-                    avatar_elem = page.query_selector("header img, nav img")
+                    avatar_elem = login_page.query_selector("header img, nav img")
                     if avatar_elem:
                         avatar_src = avatar_elem.get_attribute("src")
                     self.save_profile(username=user_name, avatar_url=avatar_src)
@@ -508,8 +536,8 @@ class KofiDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://ko-fi.com/manage/posts/new", timeout=30000)
                 try:
                     page.wait_for_selector("button:has-text('Image'), div:has-text('Image Post')", timeout=10000)
-                except Exception as e:
-                    logger.debug(f"[Ko-fi] 图片发布选项卡等待超时，体检将标记为 unknown: {e}")
+                except Exception:
+                    pass
 
                 manifest = self.get_selector_manifest()
                 tab_btn = page.query_selector(manifest["image_tab"])
@@ -524,10 +552,7 @@ class KofiDispatcher(BaseDispatcher):
 
                 if tab_btn:
                     tab_btn.click()
-                    try:
-                        page.wait_for_selector(manifest["title_input"], timeout=8000)
-                    except Exception as e:
-                        logger.debug(f"[Ko-fi] 切换图片发布选项卡后表单未渲染: {e}")
+                    time.sleep(1)
 
                 for k, sel in [("title_input", manifest["title_input"]), ("upload_input", manifest["upload_input"]), ("publish_button", manifest["publish_button"])]:
                     el = page.query_selector(sel)
@@ -584,32 +609,63 @@ class KofiDispatcher(BaseDispatcher):
                     logger.info("[Ko-fi] 请在弹出的浏览器中完成登录...")
 
                     logged_in = False
+                    login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）
                     start_time = time.time()
+                    last_url_log = 0
                     while time.time() - start_time < 300:
                         if page.is_closed():
                             break
                         try:
-                            if is_kofi_logged_in(page):
-                                logged_in = True
+                            # 检查上下文内所有页面（含 OAuth 弹窗）：任一登录成功即算成功
+                            for p in context.pages:
+                                try:
+                                    if not p.is_closed() and is_kofi_logged_in(p):
+                                        logged_in = True
+                                        login_page = p
+                                        if p != page:
+                                            logger.info(f"[Ko-fi] 在新页面检测到登录态: {p.url[:80]}")
+                                        break
+                                except Exception:
+                                    continue
+                            if logged_in:
                                 break
+                            # 每 15 秒记录一次各页面 URL，便于定位卡死位置
+                            now = time.time()
+                            if now - last_url_log > 15:
+                                last_url_log = now
+                                try:
+                                    urls = [pg.url[:70] for pg in context.pages if not pg.is_closed()]
+                                except Exception:
+                                    urls = ["<读取失败>"]
+                                logger.info(f"[Ko-fi] 等待登录中，当前页面: {urls}")
                         except Exception as e:
                             logger.debug(f"[Ko-fi] 轮询登录状态异常: {e}")
-                        time.sleep(1.5)  # 登录轮询间隔，避免高频查询触发平台风控
+                        time.sleep(1.5)
 
-                    if not logged_in and not is_kofi_logged_in(page):
+                    if not logged_in:
+                        # 收尾前对所有页面再做一次登录态确认
+                        try:
+                            for p in context.pages:
+                                if not p.is_closed() and is_kofi_logged_in(p):
+                                    logged_in = True
+                                    login_page = p
+                                    break
+                        except Exception:
+                            pass
+                    if not logged_in:
                         if not page.is_closed():
                             self.close_login_session(browser, context)
                         return False, "Ko-fi 登录未完成或窗口已关闭"
 
                 time.sleep(1)  # 等待登录后页面状态稳定
-                # 提取用户名与头像
+                # 提取用户名与头像（从实际登录的页面提取，可能是 OAuth 弹窗页）
                 user_name = "Ko-fi 创作者"
                 avatar_src = None
                 try:
-                    name_elem = page.query_selector("nav span, header span, a[href*='/home'] span")
+                    name_elem = login_page.query_selector("nav span, header span, a[href*='/home'] span")
                     if name_elem:
                         user_name = name_elem.inner_text().strip() or user_name
-                    avatar_elem = page.query_selector("nav img, header img, div[data-testid='user-avatar'] img")
+                    avatar_elem = login_page.query_selector("nav img, header img, div[data-testid='user-avatar'] img")
                     if avatar_elem:
                         avatar_src = avatar_elem.get_attribute("src")
                     self.save_profile(username=user_name, avatar_url=avatar_src)
