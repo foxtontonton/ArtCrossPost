@@ -219,6 +219,7 @@ class PatreonDispatcher(BaseDispatcher):
                     except Exception:
                         return False
 
+                login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）；必须在 if 外初始化，已登录跳过时仍需用它提取资料
                 if not is_patreon_logged_in(page):
                     logger.info("[Patreon] 尚未登录，正在前往登录页面...")
                     self.safe_goto(page, self.login_url)
@@ -631,6 +632,7 @@ class KofiDispatcher(BaseDispatcher):
                     except Exception:
                         return False
 
+                login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）；必须在 if 外初始化，已登录跳过时仍需用它提取资料
                 if not is_kofi_logged_in(page):
                     logger.info("[Ko-fi] 尚未登录，正在前往登录页面...")
                     self.safe_goto(page, self.login_url)
