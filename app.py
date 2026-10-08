@@ -1148,14 +1148,25 @@ class DiagnosticThread(QThread):
 
 class NoWheelEventFilter(QObject):
     """
-    全局鼠标中键与滚轮事件拦截器：
-    彻底取消程序对鼠标中键滑动（滚轮上下滚动）及中键点击的任何反馈，
-    确保选项栏及各内部控件保持完全静止，不发生误触滚动或数值改变。
+    全局滚轮/中键事件过滤器（选择性拦截）：
+    - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider），保持防误触行为；
+    - 放行：以滚动浏览为主要用途的控件（QTextEdit / QTextBrowser / QScrollArea / QListWidget），
+      例如日志抽屉需要滚轮翻阅日志。
+    注意：QTextEdit 等的滚轮事件实际发往其 viewport，需沿 parent 链向上查找所属控件。
+    未命中白名单的控件默认保持拦截（与旧行为一致，零回归风险）。
     """
+    # 滚轮=滚动浏览 → 放行白名单
+    _WHEEL_SCROLL_OK = (QTextEdit, QTextBrowser, QScrollArea, QListWidget)
+
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel:
+            target = obj
+            while isinstance(target, QWidget):
+                if isinstance(target, self._WHEEL_SCROLL_OK):
+                    return super().eventFilter(obj, event)  # 放行，交由控件原生处理
+                target = target.parent()
             event.ignore()
-            return True
+            return True  # 默认拦截，保持原有防误触行为
         if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease) and hasattr(event, "button"):
             if event.button() == Qt.MidButton:
                 event.ignore()
