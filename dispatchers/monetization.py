@@ -728,7 +728,7 @@ class KofiDispatcher(BaseDispatcher):
         - 上传无码原图
         - 设置 Audience (Supporters Only / Everyone)
         """
-        images = payload.get("raw_images", payload.get("images", [])) # 必须是无码原图
+        images = payload.get("kofi_images", payload.get("raw_images", payload.get("images", []))) # 必须是赞助端无码原图(经 Ko-fi ≤ 9.5MB 规则适配)
         if not images:
             return False, "Ko-fi 发布失败: 未选择图片", []
 

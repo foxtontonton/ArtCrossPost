@@ -1079,6 +1079,81 @@ class NotificationBar(QFrame):
         self.msg_lbl.setText("就绪 - 等待操作")
 
 
+def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=9.5):
+    """
+    单通道无码无水印 GIF 原图专用优化器:
+    保留原始帧率与循环配置，在不添加任何打码/水印（保持赞助商原图纯净度）的前提下，
+    通过自适应调色板降级 (192 -> 128 -> 96 色) 与等比分辨率自适应缩放，
+    严格将体积压缩至 max_limit_mb 以内 (如 Ko-fi 9.5MB 门禁)。
+    若已达极限仍超标，抛出 RuntimeError 触发发布门禁中止，杜绝静默上传损坏/降级素材。
+    """
+    from PIL import ImageSequence
+
+    in_p = Path(input_gif_path)
+    out_p = Path(output_gif_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    with Image.open(str(in_p)) as im:
+        duration = im.info.get("duration", 100)
+        loop = im.info.get("loop", 0)
+        frames = [f.convert("RGB") for f in ImageSequence.Iterator(im)]
+
+    if not frames:
+        raise RuntimeError("GIF 动图不包含任何有效帧")
+
+    target_limit_bytes = int(max_limit_mb * 1024 * 1024)
+
+    # 优先以 256 色优化保存
+    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in frames]
+    p_frames[0].save(
+        str(out_p),
+        save_all=True,
+        append_images=p_frames[1:],
+        duration=duration,
+        loop=loop,
+        optimize=True
+    )
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    color_steps = [192, 128, 96]
+    step_idx = 0
+    current_frames = frames
+
+    while out_p.stat().st_size > target_limit_bytes:
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        if step_idx < len(color_steps):
+            colors = color_steps[step_idx]
+            step_idx += 1
+            logger.info(f"[GIF Optimizer] Ko-fi 无码动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
+            p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=colors) for f in current_frames]
+        else:
+            cur_w, cur_h = current_frames[0].size
+            scale = min(0.85, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
+            new_w = max(320, int(cur_w * scale))
+            new_h = max(240, int(cur_h * scale))
+            if new_w >= cur_w or new_h >= cur_h:
+                raise RuntimeError(
+                    f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {cur_size_mb:.2f}MB，"
+                    f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，Ko-fi 限制图片 ≤ 10MB。"
+                )
+            logger.info(f"[GIF Optimizer] Ko-fi 无码动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
+            current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
+            p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
+
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=duration,
+            loop=loop,
+            optimize=True
+        )
+
+    return str(out_p)
+
+
 class LoginThread(QThread):
     finished_signal = pyqtSignal(bool, str, dict)
 
@@ -1127,14 +1202,47 @@ class PublishThread(QThread):
 
         gate_skipped_count = 0
         for disp in self.dispatchers:
-            if disp.name in ("patreon", "kofi"):
+            if disp.name == "patreon":
                 disp_images = raw_images
+            elif disp.name == "kofi":
+                disp_images = self.payload.get("kofi_images") or raw_images
             elif disp.name == "x_twitter":
                 disp_images = self.payload.get("x_images") or images
             elif disp.name == "deviantart":
                 disp_images = self.payload.get("da_images") or images
             else:
                 disp_images = images
+
+            # 针对 Ko-fi 轨道的防卫性二次自愈门禁 (若未在发布准备时压缩或原图动态超限)
+            if disp.name == "kofi":
+                kofi_resolved = []
+                compress_failed = False
+                for k_img in disp_images:
+                    kp = Path(k_img)
+                    if kp.suffix.lower() == ".gif" and kp.exists() and kp.stat().st_size > 10 * 1024 * 1024:
+                        orig_bytes = kp.stat().st_size
+                        orig_mb = orig_bytes / (1024 * 1024)
+                        logger.info(f"[Pre-publish Gate] [Ko-fi] 门禁捕获 GIF 超限 ({orig_mb:.2f}MB > 10MB)，触发无码 GIF 优化器 (目标 ≤ 9.5MB)...")
+                        self.progress_signal.emit(10, f"Ko-fi 动图超限 ({orig_mb:.2f}MB)，正在优化至 9.5MB 以内...")
+                        k_out = CACHE_DIR / f"kofi_gate_opt_{kp.stem}.gif"
+                        try:
+                            opt_res = optimize_raw_gif(kp, k_out, max_limit_mb=9.5)
+                            new_mb = Path(opt_res).stat().st_size / (1024 * 1024)
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规放行)")
+                            kofi_resolved.append(str(opt_res))
+                        except RuntimeError as e:
+                            err_msg = f"Ko-fi 动图压缩超限失败: {e}"
+                            logger.error(f"[Pre-publish Gate] [Ko-fi] {err_msg}")
+                            results[disp.name] = (False, f"发布前门禁拦截: {err_msg}", [])
+                            gate_skipped_count += 1
+                            compress_failed = True
+                            break
+                    else:
+                        kofi_resolved.append(str(k_img))
+                if compress_failed:
+                    continue
+                disp_images = kofi_resolved
+                self.payload["kofi_images"] = kofi_resolved
 
             # 1.1 登录态轻量探针 (probe_login: 不唤起浏览器)
             if hasattr(disp, "probe_login"):
@@ -1171,6 +1279,10 @@ class PublishThread(QThread):
                             break
                         elif p_obj.suffix.lower() in [".png", ".jpg", ".jpeg"] and f_size > 5 * 1024 * 1024:
                             asset_err = f"X (Twitter) 限制单张静态图 ≤ 5MB (当前 {f_size / 1024 / 1024:.2f}MB)"
+                            break
+                    elif disp.name == "kofi":
+                        if p_obj.suffix.lower() == ".gif" and f_size > 10 * 1024 * 1024:
+                            asset_err = f"Ko-fi 限制 GIF ≤ 10MB (当前 {f_size / 1024 / 1024:.2f}MB，超限会被官方降级为静态图)"
                             break
                     elif disp.name == "deviantart":
                         if p_obj.suffix.lower() == ".gif" and f_size > 200 * 1024 * 1024:
@@ -3357,9 +3469,10 @@ class MainWindow(QMainWindow):
                         new_w = max(320, int(cur_w * scale))
                         new_h = max(240, int(cur_h * scale))
                         if new_w >= cur_w or new_h >= cur_h:
+                            limit_hint = "，X 限制 GIF ≤ 15MB" if max_limit_mb == 13.8 else ""
                             raise RuntimeError(
                                 f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {cur_size_mb:.2f}MB，"
-                                f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，X 限制 GIF ≤ 15MB。"
+                                f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试{limit_hint}。"
                             )
                         logger.info(f"[GIF Optimizer] 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
                         current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
@@ -3550,6 +3663,7 @@ class MainWindow(QMainWindow):
         raw_images = [str(p) for p in self.image_paths]
         public_images = []
         x_images = []
+        kofi_images = []
 
         censor_enabled = self.auto_censor_cb.isChecked()
         wm_enabled = self.watermark_enabled_cb.isChecked()
@@ -3571,6 +3685,7 @@ class MainWindow(QMainWindow):
         safe_title = safe_title[:40]
 
         is_x_selected = any(d.name == "x_twitter" for d in selected)
+        is_kofi_selected = any(d.name == "kofi" for d in selected)
 
         self.notify("正在准备全平台素材 (公开发布端打码/水印处理，赞助端高清原图)...", level="info")
 
@@ -3628,6 +3743,27 @@ class MainWindow(QMainWindow):
                     x_images.append(str(x_out_path))
                 else:
                     x_images.append(str(pub_out_path))
+
+                # 3. Ko-fi 平台专属无码动图压缩 (若选中 Ko-fi 且动图 > 10MB，严格无码压缩至 9.5MB)
+                if is_kofi_selected:
+                    p_stat = Path(p).stat().st_size
+                    if p_stat > 10 * 1024 * 1024:
+                        orig_mb = p_stat / (1024 * 1024)
+                        logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出 10MB 门禁限制 ({orig_mb:.2f}MB)，启动无码 GIF 优化器 (目标 ≤ 9.5MB)...")
+                        kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                        try:
+                            optimize_raw_gif(p, kofi_out_path, max_limit_mb=9.5)
+                            new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规就绪)")
+                            kofi_images.append(str(kofi_out_path))
+                        except RuntimeError as e:
+                            self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
+                            logger.error(f"[Pre-publish Gate] [Ko-fi] 动图压缩超限失败: {e}")
+                            return
+                    else:
+                        kofi_images.append(str(p))
+                else:
+                    kofi_images.append(str(p))
             else:
                 if censor_enabled:
                     custom_boxes = self.custom_censor_boxes.get(p)
@@ -3686,6 +3822,7 @@ class MainWindow(QMainWindow):
                         x_images.append(public_images[-1])
                 else:
                     x_images.append(public_images[-1])
+                kofi_images.append(str(p))
 
         tags = [t.strip() for t in self.tags_input.text().replace("，", ",").split(",") if t.strip()]
 
@@ -3781,7 +3918,8 @@ class MainWindow(QMainWindow):
             "images": public_images,            # 打码/水印高清图 (DeviantArt 平台)
             "da_images": public_images,         # DeviantArt 平台专属高质量图 (原分辨率, 256色)
             "x_images": x_images,               # X (Twitter) 专属优化压缩图 (≤ 13.8MB)
-            "raw_images": raw_images,           # 无码高清原图发给赞助平台 (Patreon, Ko-fi)
+            "kofi_images": kofi_images,         # Ko-fi 专属无码压缩图 (≤ 9.5MB)
+            "raw_images": raw_images,           # 无码高清原图发给赞助平台 (Patreon)
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
             "platform_options": platform_options
