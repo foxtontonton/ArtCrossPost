@@ -942,8 +942,9 @@ class UnifiedPreviewCanvas(QLabel):
 
 class NotificationBar(QFrame):
     """内嵌通知栏组件，零弹窗沉浸式用户反馈与事件日志"""
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, is_expanded: bool = True):
         super().__init__(parent)
+        self.main_window = parent
         self.setObjectName("notificationBar")
         self.setStyleSheet("""
             QFrame#notificationBar {
@@ -985,7 +986,7 @@ class NotificationBar(QFrame):
         top_row.addWidget(self.time_lbl)
 
         # 展开/收起日志按钮
-        self.toggle_log_btn = QPushButton("📜 查看日志 (0)")
+        self.toggle_log_btn = QPushButton("📜 收起日志 (0)" if is_expanded else "📜 查看日志 (0)")
         self.toggle_log_btn.setObjectName("secondaryBtn")
         self.toggle_log_btn.setFixedHeight(28)
         self.toggle_log_btn.clicked.connect(self._toggle_log)
@@ -1013,7 +1014,7 @@ class NotificationBar(QFrame):
             color: #cbd5e1;
             padding: 6px;
         """)
-        self.log_drawer.setVisible(False)
+        self.log_drawer.setVisible(is_expanded)
         layout.addWidget(self.log_drawer)
 
         self._log_count = 0
@@ -1049,7 +1050,8 @@ class NotificationBar(QFrame):
 
         # 记录到日志抽屉
         self._log_count += 1
-        self.toggle_log_btn.setText(f"📜 查看日志 ({self._log_count})")
+        btn_text = f"📜 收起日志 ({self._log_count})" if self.log_drawer.isVisible() else f"📜 查看日志 ({self._log_count})"
+        self.toggle_log_btn.setText(btn_text)
         log_line = f"<font color='#6b7280'>[{now_str}]</font> <font color='{color_hex}'><b>[{badge_text}]</b></font> {message}"
         self.log_drawer.append(log_line)
 
@@ -1059,7 +1061,8 @@ class NotificationBar(QFrame):
     def append_rich_log(self, html_content: str):
         self.log_drawer.append(html_content)
         self._log_count += 1
-        self.toggle_log_btn.setText(f"📜 查看日志 ({self._log_count})")
+        btn_text = f"📜 收起日志 ({self._log_count})" if self.log_drawer.isVisible() else f"📜 查看日志 ({self._log_count})"
+        self.toggle_log_btn.setText(btn_text)
 
     def _toggle_log(self):
         is_vis = self.log_drawer.isVisible()
@@ -1067,7 +1070,11 @@ class NotificationBar(QFrame):
 
     def expand_log(self, show: bool = True):
         self.log_drawer.setVisible(show)
-        self.toggle_log_btn.setText("📜 收起日志" if show else f"📜 查看日志 ({self._log_count})")
+        self.toggle_log_btn.setText(f"📜 收起日志 ({self._log_count})" if show else f"📜 查看日志 ({self._log_count})")
+        if self.main_window and hasattr(self.main_window, "config"):
+            self.main_window.config["log_drawer_expanded"] = show
+            if hasattr(self.main_window, "_schedule_config_save"):
+                self.main_window._schedule_config_save()
 
     def _on_auto_clear(self):
         self.badge_lbl.setText("● 就绪")
@@ -1203,7 +1210,7 @@ class PublishThread(QThread):
         gate_skipped_count = 0
         for disp in self.dispatchers:
             if disp.name == "patreon":
-                disp_images = raw_images
+                disp_images = self.payload.get("patreon_images") or raw_images
             elif disp.name == "kofi":
                 disp_images = self.payload.get("kofi_images") or raw_images
             elif disp.name == "x_twitter":
@@ -1496,7 +1503,7 @@ class ThemeOptionCard(QFrame):
 
 class SettingsDialog(QDialog):
     """系统设置中心对话框：集中承载外观主题、账号会话维护与固定标签/引流签名"""
-    def __init__(self, parent=None, target_tab=0):
+    def __init__(self, parent=None, target_tab=None):
         super().__init__(parent)
         self.main_window = parent
         self.config = parent.config if parent else load_config()
@@ -1505,11 +1512,33 @@ class SettingsDialog(QDialog):
         self.theme_cards = {}
 
         self.setWindowTitle("⚙ 系统设置")
-        self.resize(700, 560)
+        saved_size = self.config.get("settings_dialog_size", [760, 680])
+        if isinstance(saved_size, list) and len(saved_size) == 2:
+            self.resize(max(640, int(saved_size[0])), max(520, int(saved_size[1])))
+        else:
+            self.resize(760, 680)
         self.setMinimumSize(620, 480)
         self.setModal(True)
 
+        if target_tab is None:
+            target_tab = self.config.get("settings_dialog_tab", 0)
+
         self._build_ui(target_tab)
+
+    def _on_tab_changed(self, idx):
+        self.config["settings_dialog_tab"] = idx
+        self._notify_saved()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.config["settings_dialog_size"] = [self.width(), self.height()]
+        if hasattr(self, "_resize_timer"):
+            self._resize_timer.stop()
+        else:
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._notify_saved)
+        self._resize_timer.start(500)
 
     def _create_section_header(self, title_text, desc_text=None):
         container = QVBoxLayout()
@@ -1579,6 +1608,7 @@ class SettingsDialog(QDialog):
 
         if 0 <= target_tab < self.tabs.count():
             self.tabs.setCurrentIndex(target_tab)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # 底部栏：左侧自动保存状态，右侧完成按钮
         footer = QHBoxLayout()
@@ -2066,6 +2096,8 @@ class SettingsDialog(QDialog):
         self._notify_saved()
 
     def _on_close_clicked(self):
+        self.config["settings_dialog_size"] = [self.width(), self.height()]
+        self.config["settings_dialog_tab"] = self.tabs.currentIndex()
         save_config(self.config)
         self.accept()
 
@@ -2108,6 +2140,7 @@ class MainWindow(QMainWindow):
         self.custom_censor_boxes = {}  # {image_path: [[x1, y1, x2, y2], ...]}
         self.current_preview_index = 0
         self._current_rendered_pixmap = None
+        self._platform_login_threads = {}
 
         # 预览防抖定时器 (80ms，保证拖动滑块时平滑不掉帧)
         self._preview_timer = QTimer(self)
@@ -2438,6 +2471,8 @@ class MainWindow(QMainWindow):
                 # X (Twitter)
                 if "x_twitter" in self.platform_controls:
                     x_opts = self.platform_controls["x_twitter"]["options"]
+                    if "censor" in x_opts:
+                        self.config["defaults"]["x_censor"] = x_opts["censor"].isChecked()
                     if "sensitive" in x_opts:
                         self.config["defaults"]["x_sensitive"] = x_opts["sensitive"].isChecked()
                     if "premium" in x_opts:
@@ -2448,6 +2483,8 @@ class MainWindow(QMainWindow):
                 # DeviantArt
                 if "deviantart" in self.platform_controls:
                     da_opts = self.platform_controls["deviantart"]["options"]
+                    if "censor" in da_opts:
+                        self.config["defaults"]["deviantart_censor"] = da_opts["censor"].isChecked()
                     if "mature" in da_opts:
                         da_map = {0: "strict", 1: "moderate", 2: "none"}
                         idx = da_opts["mature"].currentIndex()
@@ -2458,6 +2495,8 @@ class MainWindow(QMainWindow):
                 # Patreon
                 if "patreon" in self.platform_controls:
                     pat_opts = self.platform_controls["patreon"]["options"]
+                    if "censor" in pat_opts:
+                        self.config["defaults"]["patreon_censor"] = pat_opts["censor"].isChecked()
                     if "visibility" in pat_opts:
                         pat_map = {0: "patrons", 1: "public", 2: "tiers"}
                         idx = pat_opts["visibility"].currentIndex()
@@ -2466,6 +2505,8 @@ class MainWindow(QMainWindow):
                 # Ko-fi
                 if "kofi" in self.platform_controls:
                     kofi_opts = self.platform_controls["kofi"]["options"]
+                    if "censor" in kofi_opts:
+                        self.config["defaults"]["kofi_censor"] = kofi_opts["censor"].isChecked()
                     if "visibility" in kofi_opts:
                         kofi_map = {0: "supporters", 1: "everyone", 2: "tier"}
                         idx = kofi_opts["visibility"].currentIndex()
@@ -2495,7 +2536,7 @@ class MainWindow(QMainWindow):
         self.settings_btn.setObjectName("secondaryBtn")
         self.settings_btn.setFixedHeight(28)
         self.settings_btn.setToolTip("打开系统设置中心 (界面外观、字号缩放、账号管理与固定偏好)")
-        self.settings_btn.clicked.connect(lambda: self._open_settings_dialog(target_tab=0))
+        self.settings_btn.clicked.connect(lambda: self._open_settings_dialog(target_tab=None))
         top_bar.addWidget(self.settings_btn)
 
         root_vlayout.addLayout(top_bar)
@@ -2648,7 +2689,7 @@ class MainWindow(QMainWindow):
         censor_vlayout.setContentsMargins(4, 4, 4, 4)
         censor_vlayout.setSpacing(4)
 
-        # 第 1 行 (水平并排): 启用打码 + 弹簧 + 清除 + 恢复AI
+        # 第 1 行 (水平并排): 启用打码 + 套用到所有平台 + 弹簧 + 清除 + 恢复AI
         c_row1 = QHBoxLayout()
         c_row1.setSpacing(4)
         censor_cfg = self.config.get("censor", {})
@@ -2657,6 +2698,14 @@ class MainWindow(QMainWindow):
         self.auto_censor_cb.stateChanged.connect(self._schedule_preview_refresh)
         self.auto_censor_cb.stateChanged.connect(lambda: self._schedule_config_save())
         c_row1.addWidget(self.auto_censor_cb)
+
+        self.apply_all_censor_btn = QPushButton("套用到所有平台")
+        self.apply_all_censor_btn.setObjectName("secondaryBtn")
+        self.apply_all_censor_btn.setFixedHeight(24)
+        self.apply_all_censor_btn.setToolTip("将当前打码总开关状态一键套用到所有平台的打码保护选项")
+        self.apply_all_censor_btn.clicked.connect(self._apply_censor_to_all_platforms)
+        c_row1.addWidget(self.apply_all_censor_btn)
+
         c_row1.addStretch()
 
         self.clear_censor_btn = QPushButton("🧹 清除")
@@ -3102,7 +3151,8 @@ class MainWindow(QMainWindow):
         self.main_splitter.setSizes([430, 780, 450])
 
         # ==================== 底部嵌入式全局通知栏与事件日志 ====================
-        self.notification_bar = NotificationBar()
+        init_log_expanded = self.config.get("log_drawer_expanded", True)
+        self.notification_bar = NotificationBar(parent=self, is_expanded=init_log_expanded)
         root_vlayout.addWidget(self.notification_bar)
 
         # 初始化 X 字符统计状态
@@ -3115,7 +3165,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # 头部单行紧凑布局：[✔] 平台名称 + 用户名与状态徽标 + [⚙️ 管理/登录] 按钮
+        # 头部单行紧凑布局：[✔] 平台名称 + 用户名与状态徽标 + [登录/重新登录] 直接登录按钮
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
@@ -3142,25 +3192,31 @@ class MainWindow(QMainWindow):
         header.addWidget(status_lbl)
         header.addStretch()
 
-        manage_btn = QPushButton("⚙️ 管理/登录")
-        manage_btn.setFixedHeight(24)
-        manage_btn.setStyleSheet("""
+        login_btn = QPushButton("重新登录" if is_logged_in else "登录")
+        login_btn.setFixedHeight(24)
+        login_btn.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
-                border: 1px solid #374151;
+                background-color: #272738;
+                border: 1px solid #3f3f46;
                 border-radius: 4px;
-                color: #9ca3af;
+                color: #e2e8f0;
                 font-size: 11px;
-                padding: 1px 6px;
+                font-weight: 500;
+                padding: 1px 8px;
             }
             QPushButton:hover {
-                background-color: #2e2e3e;
-                color: #818cf8;
+                background-color: #383852;
                 border-color: #6366f1;
+                color: #ffffff;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a24;
+                color: #64748b;
+                border-color: #282838;
             }
         """)
-        manage_btn.clicked.connect(lambda: self._open_settings_dialog(target_tab=1))
-        header.addWidget(manage_btn)
+        login_btn.clicked.connect(lambda chk, d=disp, sl=status_lbl, lb=login_btn: self._start_platform_direct_login(d, sl, lb))
+        header.addWidget(login_btn)
 
         layout.addLayout(header)
 
@@ -3173,6 +3229,13 @@ class MainWindow(QMainWindow):
             x_box.setSpacing(4)
             x_row1 = QHBoxLayout()
             x_row2 = QHBoxLayout()
+
+            x_censor = QCheckBox("打码保护")
+            x_censor.setChecked(self.config.get("defaults", {}).get("x_censor", True))
+            x_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            x_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            x_row1.addWidget(x_censor)
+            opts["censor"] = x_censor
 
             x_sens = QCheckBox("原生敏感警告 (Nudity 打标)")
             x_sens.setChecked(self.config["defaults"].get("x_sensitive", True))
@@ -3213,6 +3276,13 @@ class MainWindow(QMainWindow):
             opts_layout.addLayout(x_box)
 
         elif disp.name == "deviantart":
+            da_censor = QCheckBox("打码保护")
+            da_censor.setChecked(self.config.get("defaults", {}).get("deviantart_censor", True))
+            da_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            da_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(da_censor)
+            opts["censor"] = da_censor
+
             opts_layout.addWidget(QLabel("Mature:"))
             da_combo = QComboBox()
             make_responsive_combo(da_combo)
@@ -3265,6 +3335,13 @@ class MainWindow(QMainWindow):
             opts["ai"] = da_ai
 
         elif disp.name == "patreon":
+            pat_censor = QCheckBox("打码保护")
+            pat_censor.setChecked(self.config.get("defaults", {}).get("patreon_censor", False))
+            pat_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            pat_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(pat_censor)
+            opts["censor"] = pat_censor
+
             opts_layout.addWidget(QLabel("可见范围:"))
             pat_combo = QComboBox()
             make_responsive_combo(pat_combo)
@@ -3283,6 +3360,13 @@ class MainWindow(QMainWindow):
             opts["ai"] = pat_ai
 
         elif disp.name == "kofi":
+            kofi_censor = QCheckBox("打码保护")
+            kofi_censor.setChecked(self.config.get("defaults", {}).get("kofi_censor", False))
+            kofi_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            kofi_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(kofi_censor)
+            opts["censor"] = kofi_censor
+
             opts_layout.addWidget(QLabel("可见范围:"))
             kofi_combo = QComboBox()
             make_responsive_combo(kofi_combo)
@@ -3306,11 +3390,69 @@ class MainWindow(QMainWindow):
             "checkbox": cb,
             "dispatcher": disp,
             "options": opts,
-            "status_lbl": status_lbl
+            "status_lbl": status_lbl,
+            "login_btn": login_btn
         }
         return card
 
-    def _open_settings_dialog(self, target_tab=0):
+    def _start_platform_direct_login(self, disp, status_lbl, login_btn):
+        status_lbl.setText("(● 正在打开浏览器...)")
+        status_lbl.setStyleSheet("color: #fbbf24; font-size: 12px; font-weight: 500;")
+        login_btn.setEnabled(False)
+        self.notify(f"正在唤起浏览器登录 {disp.display_name}...", level="info")
+
+        thread = LoginThread(disp)
+        self._platform_login_threads[disp.name] = thread
+        thread.finished_signal.connect(
+            lambda success, msg, profile: self._on_platform_direct_login_finished(disp, status_lbl, login_btn, success, msg, profile)
+        )
+        thread.start()
+
+    def _on_platform_direct_login_finished(self, disp, status_lbl, login_btn, success, msg, profile):
+        login_btn.setEnabled(True)
+        username = profile.get("username", "已登录用户")
+        if success:
+            u_text = f"@{username}" if not username.startswith("@") else username
+            status_lbl.setText(f"{u_text} (● 已就绪)")
+            status_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+            login_btn.setText("重新登录")
+            self._refresh_all_platform_statuses()
+            self.notify(f"{disp.display_name} 账号已连接成功！已同步用户信息", level="success")
+        else:
+            status_lbl.setText("(○ 未连接)")
+            status_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
+            login_btn.setText("登录")
+            self.notify(f"{disp.display_name} 登录未能完成: {msg}", level="warning")
+
+    def _apply_censor_to_all_platforms(self):
+        is_on = self.auto_censor_cb.isChecked()
+        for disp_name, ctrl in self.platform_controls.items():
+            c_cb = ctrl.get("options", {}).get("censor")
+            if c_cb:
+                c_cb.setChecked(is_on)
+                key = "x_censor" if disp_name == "x_twitter" else f"{disp_name}_censor"
+                if "defaults" in self.config:
+                    self.config["defaults"][key] = is_on
+        self._schedule_config_save()
+        status_text = "开启" if is_on else "关闭"
+        self.notify(f"已将打码保护状态 ({status_text}) 一键套用到所有发布平台！", level="success")
+
+    def _on_platform_censor_toggled(self, state):
+        if getattr(self, "_is_restoring_config", False):
+            return
+        if state == Qt.Checked and hasattr(self, "auto_censor_cb") and not self.auto_censor_cb.isChecked():
+            self.auto_censor_cb.setChecked(True)
+
+    def _is_platform_censor_checked(self, disp_name: str) -> bool:
+        ctrl = self.platform_controls.get(disp_name)
+        if not ctrl:
+            return False
+        cb = ctrl.get("options", {}).get("censor")
+        if cb is not None:
+            return cb.isChecked()
+        return False
+
+    def _open_settings_dialog(self, target_tab=None):
         dlg = SettingsDialog(self, target_tab=target_tab)
         dlg.exec_()
 
@@ -3323,13 +3465,18 @@ class MainWindow(QMainWindow):
         is_logged_in = profile.get("logged_in", False)
         username = profile.get("username", "未登录")
         status_lbl = ctrl["status_lbl"]
+        login_btn = ctrl.get("login_btn")
         if is_logged_in:
             u_text = f"@{username}" if not username.startswith("@") else username
             status_lbl.setText(f"{u_text} (● 已就绪)")
             status_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+            if login_btn:
+                login_btn.setText("重新登录")
         else:
             status_lbl.setText("(○ 未连接)")
             status_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+            if login_btn:
+                login_btn.setText("登录")
 
     def _refresh_all_platform_statuses(self):
         for disp_name in self.platform_controls:
@@ -4010,13 +4157,22 @@ class MainWindow(QMainWindow):
 
         # 准备分发图片资源
         raw_images = [str(p) for p in self.image_paths]
-        public_images = []
+        da_images = []
         x_images = []
+        patreon_images = []
         kofi_images = []
 
         censor_enabled = self.auto_censor_cb.isChecked()
         wm_enabled = self.watermark_enabled_cb.isChecked()
         apply_wm_publish = self.watermark_apply_publish_cb.isChecked()
+
+        is_x_selected = any(d.name == "x_twitter" for d in selected)
+        is_kofi_selected = any(d.name == "kofi" for d in selected)
+
+        is_da_censor = censor_enabled and self._is_platform_censor_checked("deviantart")
+        is_x_censor = censor_enabled and self._is_platform_censor_checked("x_twitter")
+        is_pat_censor = censor_enabled and self._is_platform_censor_checked("patreon")
+        is_kofi_censor = censor_enabled and self._is_platform_censor_checked("kofi")
 
         style, mode, ratio = self._get_current_censor_params()
         wm_text = self.watermark_text_input.text().strip()
@@ -4033,10 +4189,7 @@ class MainWindow(QMainWindow):
         safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
         safe_title = safe_title[:40]
 
-        is_x_selected = any(d.name == "x_twitter" for d in selected)
-        is_kofi_selected = any(d.name == "kofi" for d in selected)
-
-        self.notify("正在准备全平台素材 (公开发布端打码/水印处理，赞助端高清原图)...", level="info")
+        self.notify("正在准备全平台素材 (按各平台打码及体积配置分别渲染处理)...", level="info")
 
         for idx, p in enumerate(self.image_paths):
             is_gif = p.lower().endswith(".gif")
@@ -4054,11 +4207,10 @@ class MainWindow(QMainWindow):
                 "stroke": wm_stroke
             } if (wm_enabled and apply_wm_publish and wm_text) else None
 
-            # 1. 公开发布端高清素材生成 (DeviantArt 原生支持高达 200MB，保持原分辨率与 256 色完整调色板)
             if is_gif:
-                pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.gif"
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
                 c_params = None
-                if censor_enabled:
+                if any_censor:
                     orig_w, orig_h = 800, 600
                     try:
                         with Image.open(p) as tmp_im:
@@ -4072,49 +4224,97 @@ class MainWindow(QMainWindow):
                         user_customized=bool(custom_boxes))
                     c_params = {"enabled": True, "style": style, "boxes": final_boxes}
 
-                try:
-                    self._generate_composite_gif(p, pub_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
-                except RuntimeError as e:
-                    self.notify(f"高清 GIF 合成失败: {e}", level="error")
-                    logger.error(f"[发布准备] {e}")
-                    return
-                public_images.append(str(pub_out_path))
+                # 1. DeviantArt 动图
+                da_out_path = None
+                if is_da_censor:
+                    da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
+                    try:
+                        self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
+                    except RuntimeError as e:
+                        self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
+                        logger.error(f"[发布准备] {e}")
+                        return
+                    da_images.append(str(da_out_path))
+                else:
+                    if wm_info:
+                        da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_wm.gif"
+                        try:
+                            self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                        except RuntimeError as e:
+                            self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
+                            logger.error(f"[发布准备] {e}")
+                            return
+                        da_images.append(str(da_out_path))
+                    else:
+                        da_images.append(str(p))
 
-                # 2. X (Twitter) 平台专属压缩素材 (若选中 X，严格压缩至 13.8MB)
+                # 2. X (Twitter) 动图 (严格 ≤ 13.8MB)
                 if is_x_selected:
                     x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
+                    x_c = c_params if is_x_censor else None
                     try:
-                        self._generate_composite_gif(p, x_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=13.8)
+                        self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
                     except RuntimeError as e:
                         self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
                         logger.error(f"[发布准备] {e}")
                         return
                     x_images.append(str(x_out_path))
                 else:
-                    x_images.append(str(pub_out_path))
+                    x_images.append(da_images[-1])
 
-                # 3. Ko-fi 平台专属无码动图压缩 (若选中 Ko-fi 且动图 > 10MB，严格无码压缩至 9.5MB)
-                if is_kofi_selected:
-                    p_stat = Path(p).stat().st_size
-                    if p_stat > 10 * 1024 * 1024:
-                        orig_mb = p_stat / (1024 * 1024)
-                        logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出 10MB 门禁限制 ({orig_mb:.2f}MB)，启动无码 GIF 优化器 (目标 ≤ 9.5MB)...")
-                        kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                # 3. Patreon 动图
+                if is_pat_censor:
+                    if da_out_path and is_da_censor and Path(da_out_path).exists():
+                        patreon_images.append(str(da_out_path))
+                    else:
+                        pat_out_path = CACHE_DIR / f"{safe_title}_{idx}_pat_censor.gif"
                         try:
-                            optimize_raw_gif(p, kofi_out_path, max_limit_mb=9.5)
-                            new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
-                            logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规就绪)")
+                            self._generate_composite_gif(p, pat_out_path, censor_params=c_params, wm_params=None, max_limit_mb=None)
+                        except RuntimeError as e:
+                            self.notify(f"Patreon 打码 GIF 合成失败: {e}", level="error")
+                            logger.error(f"[发布准备] {e}")
+                            return
+                        patreon_images.append(str(pat_out_path))
+                else:
+                    patreon_images.append(str(p))
+
+                # 4. Ko-fi 动图 (严格 ≤ 9.5MB 门禁)
+                if is_kofi_selected:
+                    if is_kofi_censor:
+                        kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_censor.gif"
+                        try:
+                            self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=None, max_limit_mb=9.5)
                             kofi_images.append(str(kofi_out_path))
                         except RuntimeError as e:
-                            self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
-                            logger.error(f"[Pre-publish Gate] [Ko-fi] 动图压缩超限失败: {e}")
+                            self.notify(f"Ko-fi 打码动图压缩超限失败: {e}", level="error")
+                            logger.error(f"[Pre-publish Gate] [Ko-fi] 打码动图压缩超限失败: {e}")
                             return
                     else:
-                        kofi_images.append(str(p))
+                        p_stat = Path(p).stat().st_size
+                        if p_stat > 10 * 1024 * 1024:
+                            orig_mb = p_stat / (1024 * 1024)
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出 10MB 门禁限制 ({orig_mb:.2f}MB)，启动无码 GIF 优化器 (目标 ≤ 9.5MB)...")
+                            kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                            try:
+                                optimize_raw_gif(p, kofi_out_path, max_limit_mb=9.5)
+                                new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
+                                logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规就绪)")
+                                kofi_images.append(str(kofi_out_path))
+                            except RuntimeError as e:
+                                self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
+                                logger.error(f"[Pre-publish Gate] [Ko-fi] 动图压缩超限失败: {e}")
+                                return
+                        else:
+                            kofi_images.append(str(p))
                 else:
                     kofi_images.append(str(p))
             else:
-                if censor_enabled:
+                # 静态图片处理
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
+                pub_censor_path = None
+                clean_censor_path = None
+
+                if any_censor:
                     custom_boxes = self.custom_censor_boxes.get(p)
                     censored_bgr, _ = self.censor_engine.apply_censor(
                         p,
@@ -4124,8 +4324,8 @@ class MainWindow(QMainWindow):
                         custom_ratio=ratio,
                         custom_boxes=custom_boxes
                     )
-                    pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.{ext}"
                     if wm_info:
+                        pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_wm.{ext}"
                         self.watermark_engine.apply_watermark(
                             censored_bgr,
                             text=wm_text,
@@ -4135,13 +4335,17 @@ class MainWindow(QMainWindow):
                             position=wm_pos,
                             color_hex=wm_color,
                             enable_stroke=wm_stroke,
-                            output_path=pub_out_path
+                            output_path=pub_censor_path
                         )
                     else:
-                        cv2.imwrite(str(pub_out_path), censored_bgr)
-                    public_images.append(str(pub_out_path))
-                elif wm_info:
-                    pub_out_path = CACHE_DIR / f"{safe_title}_{idx}.{ext}"
+                        pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored.{ext}"
+                        cv2.imwrite(str(pub_censor_path), censored_bgr)
+
+                    clean_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_clean.{ext}"
+                    cv2.imwrite(str(clean_censor_path), censored_bgr)
+
+                if wm_info:
+                    pub_raw_path = CACHE_DIR / f"{safe_title}_{idx}_raw_wm.{ext}"
                     self.watermark_engine.apply_watermark(
                         p,
                         text=wm_text,
@@ -4151,15 +4355,19 @@ class MainWindow(QMainWindow):
                         position=wm_pos,
                         color_hex=wm_color,
                         enable_stroke=wm_stroke,
-                        output_path=pub_out_path
+                        output_path=pub_raw_path
                     )
-                    public_images.append(str(pub_out_path))
                 else:
-                    public_images.append(str(p))
+                    pub_raw_path = Path(p)
 
-                # X 专属体积门禁 (单图 ≤ 5MB，超过 4.8MB 自动转码优化 JPEG)
-                if is_x_selected and Path(public_images[-1]).exists() and Path(public_images[-1]).stat().st_size > 4.8 * 1024 * 1024:
-                    big_p = Path(public_images[-1])
+                # DeviantArt 静态图
+                da_target = pub_censor_path if is_da_censor else pub_raw_path
+                da_images.append(str(da_target))
+
+                # X (Twitter) 静态图与体积门禁 (单图 ≤ 5MB，超过 4.8MB 自动高质量转码 JPEG)
+                x_target = pub_censor_path if is_x_censor else pub_raw_path
+                if is_x_selected and Path(x_target).exists() and Path(x_target).stat().st_size > 4.8 * 1024 * 1024:
+                    big_p = Path(x_target)
                     opt_jpg = CACHE_DIR / f"{safe_title}_{idx}_xopt.jpg"
                     try:
                         with Image.open(str(big_p)) as im_big:
@@ -4168,10 +4376,21 @@ class MainWindow(QMainWindow):
                         logger.info(f"[Image Optimizer] X 静态图超限，已自动高质量转码 JPEG: {big_p.stat().st_size / 1024 / 1024:.2f}MB -> {opt_jpg.stat().st_size / 1024 / 1024:.2f}MB")
                     except Exception as e:
                         logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
-                        x_images.append(public_images[-1])
+                        x_images.append(str(x_target))
                 else:
-                    x_images.append(public_images[-1])
-                kofi_images.append(str(p))
+                    x_images.append(str(x_target))
+
+                # Patreon 静态图
+                if is_pat_censor:
+                    patreon_images.append(str(clean_censor_path or pub_censor_path))
+                else:
+                    patreon_images.append(str(p))
+
+                # Ko-fi 静态图
+                if is_kofi_censor:
+                    kofi_images.append(str(clean_censor_path or pub_censor_path))
+                else:
+                    kofi_images.append(str(p))
 
         tags = [t.strip() for t in self.tags_input.text().replace("，", ",").split(",") if t.strip()]
 
@@ -4266,11 +4485,12 @@ class MainWindow(QMainWindow):
             "title": self.title_input.text().strip(),
             "description": self.desc_input.toPlainText().strip(),
             "tags": tags,
-            "images": public_images,            # 打码/水印高清图 (DeviantArt 平台)
-            "da_images": public_images,         # DeviantArt 平台专属高质量图 (原分辨率, 256色)
-            "x_images": x_images,               # X (Twitter) 专属优化压缩图 (≤ 13.8MB)
-            "kofi_images": kofi_images,         # Ko-fi 专属无码压缩图 (≤ 9.5MB)
-            "raw_images": raw_images,           # 无码高清原图发给赞助平台 (Patreon)
+            "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
+            "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
+            "x_images": x_images,               # X (Twitter) 专属图 (按 X 打码选项与体积限制)
+            "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
+            "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤9.5MB 限制)
+            "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
             "platform_options": platform_options

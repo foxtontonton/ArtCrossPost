@@ -50,6 +50,9 @@ DEFAULT_CONFIG = {
         "stroke": True
     },
     "selected_platforms": ["x_twitter", "deviantart"],  # 记录上次选中的发布平台
+    "log_drawer_expanded": True,                          # 底部日志栏默认展开状态
+    "settings_dialog_size": [760, 680],                   # 系统设置窗口记忆尺寸 (宽, 高)
+    "settings_dialog_tab": 0,                             # 系统设置窗口记忆激活选项卡
     "deviantart_known_galleries": [
         "Featured",
         "NSFW - Ai Training Clip",
@@ -62,10 +65,14 @@ DEFAULT_CONFIG = {
         "x_sensitive": True,
         "x_premium": False,
         "x_over_limit_policy": "ask",     # "ask", "truncate", "thread"
+        "x_censor": True,                 # X (Twitter) 专属打码保护开关
         "deviantart_mature": "strict",
         "deviantart_default_gallery": "", # 默认发布相册 (留空使用默认)
+        "deviantart_censor": True,        # DeviantArt 专属打码保护开关
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
-        "kofi_visibility": "supporters"   # "everyone", "supporters", "tier"
+        "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
+        "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
+        "kofi_censor": False              # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
     }
 }
 
