@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QPushButton, QCheckBox, QComboBox,
     QFileDialog, QListWidget, QGroupBox, QSplitter,
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
-    QTextBrowser, QDialog, QTabWidget
+    QTextBrowser, QDialog, QTabWidget, QSpinBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen
@@ -62,6 +62,11 @@ def get_theme_stylesheet(theme_name="pure_dark", font_size=13):
     fs = font_size
     fs_lg = font_size + 2
     fs_sm = max(11, font_size - 1)
+    ind_size = max(18, int(font_size * 0.85))
+    ind_radius = max(3, int(ind_size * 0.2))
+    slider_groove = max(6, int(font_size * 0.35))
+    slider_handle = max(16, int(font_size * 0.75))
+    slider_handle_margin = (slider_handle - slider_groove) // 2
 
     return f"""
 QMainWindow, QDialog {{
@@ -160,9 +165,9 @@ QCheckBox {{
     color: #e2e8f0;
 }}
 QCheckBox::indicator {{
-    width: 18px;
-    height: 18px;
-    border-radius: 4px;
+    width: {ind_size}px;
+    height: {ind_size}px;
+    border-radius: {ind_radius}px;
     border: 1px solid #4b5563;
     background-color: #161622;
 }}
@@ -222,21 +227,42 @@ QProgressBar::chunk {{
     border-radius: 5px;
 }}
 QSlider::groove:horizontal {{
-    height: 6px;
+    height: {slider_groove}px;
     background: #2a2a38;
-    border-radius: 3px;
+    border-radius: {slider_groove // 2}px;
 }}
 QSlider::sub-page:horizontal {{
     background: {accent_hover};
-    border-radius: 3px;
+    border-radius: {slider_groove // 2}px;
+}}
+
+QSpinBox {{
+    background-color: #0c0d14;
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 4px 8px;
+    color: #f1f5f9;
+    font-size: {fs}px;
+}}
+QSpinBox:focus {{
+    border: 1px solid {accent_hover};
+    background-color: #10111a;
+}}
+QSpinBox::up-button, QSpinBox::down-button {{
+    background-color: #272738;
+    border: none;
+    width: {max(18, int(font_size * 0.85))}px;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+    background-color: {accent};
 }}
 QSlider::handle:horizontal {{
     background: #818cf8;
     border: 2px solid {accent};
-    width: 16px;
-    margin-top: -5px;
-    margin-bottom: -5px;
-    border-radius: 8px;
+    width: {slider_handle}px;
+    margin-top: -{slider_handle_margin}px;
+    margin-bottom: -{slider_handle_margin}px;
+    border-radius: {slider_handle // 2}px;
 }}
 QScrollArea {{
     border: none;
@@ -976,26 +1002,26 @@ class NotificationBar(QFrame):
 
         # 核心信息文本
         self.msg_lbl = QLabel("欢迎使用 ArtCrossPost - 请导入图片并开始分发配置")
-        self.msg_lbl.setStyleSheet("color: #e2e8f0; font-size: 14px;")
+        self.msg_lbl.setStyleSheet("color: #e2e8f0;")
         self.msg_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         top_row.addWidget(self.msg_lbl, 1)
 
         # 时间戳
         self.time_lbl = QLabel(datetime.now().strftime("%H:%M:%S"))
-        self.time_lbl.setStyleSheet("color: #6b7280; font-size: 12px;")
+        self.time_lbl.setStyleSheet("color: #6b7280;")
         top_row.addWidget(self.time_lbl)
 
         # 展开/收起日志按钮
         self.toggle_log_btn = QPushButton("📜 收起日志 (0)" if is_expanded else "📜 查看日志 (0)")
         self.toggle_log_btn.setObjectName("secondaryBtn")
-        self.toggle_log_btn.setFixedHeight(28)
+        self.toggle_log_btn.setMinimumHeight(28)
         self.toggle_log_btn.clicked.connect(self._toggle_log)
         top_row.addWidget(self.toggle_log_btn)
 
         # 关闭/清除按钮
         close_btn = QPushButton("✕")
         close_btn.setObjectName("secondaryBtn")
-        close_btn.setFixedSize(28, 28)
+        close_btn.setMinimumSize(28, 28)
         close_btn.clicked.connect(self.clear_banner)
         top_row.addWidget(close_btn)
 
@@ -1436,7 +1462,7 @@ class ThemeOptionCard(QFrame):
         self.accent_hex = accent_hex
         self.is_selected = is_selected
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(68)
+        self.setMinimumHeight(68)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout = QVBoxLayout(self)
@@ -1446,7 +1472,7 @@ class ThemeOptionCard(QFrame):
         # 顶行：主题名称 + 选中指示器
         top_row = QHBoxLayout()
         self.name_lbl = QLabel(name)
-        self.name_lbl.setStyleSheet("font-weight: 600; font-size: 13px; color: #f3f4f6;")
+        self.name_lbl.setStyleSheet("font-weight: 600; color: #f3f4f6;")
         top_row.addWidget(self.name_lbl)
         top_row.addStretch()
 
@@ -1520,6 +1546,10 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(620, 480)
         self.setModal(True)
 
+        self._font_apply_timer = QTimer(self)
+        self._font_apply_timer.setSingleShot(True)
+        self._font_apply_timer.timeout.connect(self._do_apply_font_size)
+
         if target_tab is None:
             target_tab = self.config.get("settings_dialog_tab", 0)
 
@@ -1544,11 +1574,11 @@ class SettingsDialog(QDialog):
         container = QVBoxLayout()
         container.setSpacing(4)
         t = QLabel(title_text)
-        t.setStyleSheet("font-size: 14px; font-weight: 600; color: #e5e7eb;")
+        t.setStyleSheet("font-weight: 600; color: #e5e7eb;")
         container.addWidget(t)
         if desc_text:
             d = QLabel(desc_text)
-            d.setStyleSheet("font-size: 12px; color: #9ca3af;")
+            d.setStyleSheet("color: #9ca3af;")
             d.setWordWrap(True)
             container.addWidget(d)
         return container
@@ -1570,7 +1600,7 @@ class SettingsDialog(QDialog):
 
     def _notify_saved(self):
         self.auto_save_lbl.setText("● 已自动保存")
-        self.auto_save_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: 500;")
+        self.auto_save_lbl.setStyleSheet("color: #10b981; font-weight: 500;")
         if self.main_window:
             self.main_window._schedule_config_save()
 
@@ -1583,9 +1613,9 @@ class SettingsDialog(QDialog):
         header = QVBoxLayout()
         header.setSpacing(4)
         title_lbl = QLabel("⚙ 系统设置")
-        title_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #f3f4f6;")
+        title_lbl.setStyleSheet("font-weight: bold; color: #f3f4f6;")
         desc_lbl = QLabel("管理应用外观、平台账号及默认发布行为")
-        desc_lbl.setStyleSheet("font-size: 12px; color: #9ca3af;")
+        desc_lbl.setStyleSheet("color: #9ca3af;")
         header.addWidget(title_lbl)
         header.addWidget(desc_lbl)
         layout.addLayout(header)
@@ -1613,13 +1643,13 @@ class SettingsDialog(QDialog):
         # 底部栏：左侧自动保存状态，右侧完成按钮
         footer = QHBoxLayout()
         self.auto_save_lbl = QLabel("● 设置会自动保存")
-        self.auto_save_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        self.auto_save_lbl.setStyleSheet("color: #9ca3af;")
         footer.addWidget(self.auto_save_lbl)
         footer.addStretch()
 
         self.save_btn = QPushButton("完成")
         self.save_btn.setObjectName("accentBtn")
-        self.save_btn.setFixedSize(88, 32)
+        self.save_btn.setMinimumSize(88, 32)
         self.save_btn.clicked.connect(self._on_close_clicked)
         footer.addWidget(self.save_btn)
         layout.addLayout(footer)
@@ -1667,8 +1697,8 @@ class SettingsDialog(QDialog):
         t_layout.addLayout(cards_row)
         t_layout.addWidget(self._create_separator())
 
-        # 2. 界面文字缩放
-        font_header = self._create_section_header("界面文字缩放", "调节应用程序全局界面文字大小与缩放比例")
+        # 2. 界面文字大小 (无档位连续调节，支持 10px ~ 60px)
+        font_header = self._create_section_header("界面文字大小", "无级平滑调节应用程序全局界面文字大小，支持 10px 至 60px")
         t_layout.addLayout(font_header)
 
         fs_box = QVBoxLayout()
@@ -1676,37 +1706,42 @@ class SettingsDialog(QDialog):
 
         cur_fs = self.config.get("ui_font_size", 13)
 
-        # Slider 及其指示
+        # Slider + SpinBox + 默认 13px 按钮
         slider_row = QHBoxLayout()
-        slider_row.setSpacing(12)
+        slider_row.setSpacing(10)
 
         self.font_slider = QSlider(Qt.Horizontal)
-        self.font_slider.setRange(11, 16)
+        self.font_slider.setRange(10, 60)
         self.font_slider.setValue(cur_fs)
-        self.font_slider.valueChanged.connect(self._on_font_size_changed)
+        self.font_slider.valueChanged.connect(self._on_font_slider_changed)
         slider_row.addWidget(self.font_slider, 1)
 
-        self.font_lbl = QLabel(self._get_font_size_desc(cur_fs))
-        self.font_lbl.setMinimumWidth(80)
-        self.font_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.font_lbl.setStyleSheet("color: #818cf8; font-weight: 600; font-size: 13px;")
-        slider_row.addWidget(self.font_lbl)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(10, 60)
+        self.font_spin.setValue(cur_fs)
+        self.font_spin.setSuffix(" px")
+        self.font_spin.setFixedWidth(78)
+        self.font_spin.valueChanged.connect(self._on_font_spin_changed)
+        slider_row.addWidget(self.font_spin)
+
+        reset_font_btn = QPushButton("默认 (13px)")
+        reset_font_btn.setObjectName("secondaryBtn")
+        reset_font_btn.setToolTip("恢复默认标准字号 (13px)")
+        reset_font_btn.clicked.connect(lambda: self.font_slider.setValue(13))
+        slider_row.addWidget(reset_font_btn)
+
         fs_box.addLayout(slider_row)
 
-        # 刻度说明
-        scale_labels = QHBoxLayout()
-        lbl_small = QLabel("小")
-        lbl_small.setStyleSheet("color: #6b7280; font-size: 11px;")
-        lbl_mid = QLabel("标准")
-        lbl_mid.setStyleSheet("color: #6b7280; font-size: 11px;")
-        lbl_large = QLabel("大")
-        lbl_large.setStyleSheet("color: #6b7280; font-size: 11px;")
-        scale_labels.addWidget(lbl_small)
-        scale_labels.addStretch()
-        scale_labels.addWidget(lbl_mid)
-        scale_labels.addStretch()
-        scale_labels.addWidget(lbl_large)
-        fs_box.addLayout(scale_labels)
+        # 范围提示 (仅标注最小与最大数值，无预设档位)
+        range_row = QHBoxLayout()
+        min_lbl = QLabel("10px")
+        min_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        max_lbl = QLabel("60px")
+        max_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        range_row.addWidget(min_lbl)
+        range_row.addStretch()
+        range_row.addWidget(max_lbl)
+        fs_box.addLayout(range_row)
 
         t_layout.addLayout(fs_box)
         t_layout.addWidget(self._create_separator())
@@ -1722,9 +1757,9 @@ class SettingsDialog(QDialog):
         pv_layout.setSpacing(10)
 
         pv_title = QLabel("ArtCrossPost 多平台发布助手")
-        pv_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #f1f5f9;")
+        pv_title.setStyleSheet("font-weight: bold; color: #f1f5f9;")
         pv_desc = QLabel("作品标题与简介预览：支持自动打码、添加变现签名并一键分发至各大画师平台。")
-        pv_desc.setStyleSheet("font-size: 12px; color: #9ca3af;")
+        pv_desc.setStyleSheet("color: #9ca3af;")
         pv_desc.setWordWrap(True)
         pv_layout.addWidget(pv_title)
         pv_layout.addWidget(pv_desc)
@@ -1734,18 +1769,18 @@ class SettingsDialog(QDialog):
         sample_input = QLineEdit()
         sample_input.setPlaceholderText("示例输入框...")
         sample_input.setReadOnly(True)
-        sample_input.setFixedHeight(30)
+        sample_input.setMinimumHeight(30)
         pv_row.addWidget(sample_input, 1)
 
         sample_btn = QPushButton("主要按钮")
         sample_btn.setObjectName("accentBtn")
-        sample_btn.setFixedHeight(30)
+        sample_btn.setMinimumHeight(30)
         sample_btn.setEnabled(False)
         pv_row.addWidget(sample_btn)
 
         sample_sec_btn = QPushButton("辅助按钮")
         sample_sec_btn.setObjectName("secondaryBtn")
-        sample_sec_btn.setFixedHeight(30)
+        sample_sec_btn.setMinimumHeight(30)
         pv_row.addWidget(sample_sec_btn)
         pv_layout.addLayout(pv_row)
 
@@ -1758,22 +1793,14 @@ class SettingsDialog(QDialog):
 
         # 提示小字
         tip_box = QLabel("💡 外观改动无需重启程序，选定后即刻生效并自动保存。")
-        tip_box.setStyleSheet("color: #6b7280; font-size: 12px; margin-top: 2px;")
+        tip_box.setStyleSheet("color: #6b7280; margin-top: 2px;")
         t_layout.addWidget(tip_box)
 
         t_layout.addStretch()
         return self._wrap_in_scroll(content)
 
     def _get_font_size_desc(self, size):
-        mapping = {
-            11: "11px (较小)",
-            12: "12px (紧凑)",
-            13: "13px (标准)",
-            14: "14px (中大)",
-            15: "15px (较大)",
-            16: "16px (特大)"
-        }
-        return mapping.get(size, f"{size}px")
+        return f"{size}px"
 
     def _on_theme_card_clicked(self, key):
         for k, card in self.theme_cards.items():
@@ -1794,9 +1821,27 @@ class SettingsDialog(QDialog):
         if new_theme:
             self._on_theme_card_clicked(new_theme)
 
-    def _on_font_size_changed(self, val):
-        self.font_lbl.setText(self._get_font_size_desc(val))
+    def _on_font_slider_changed(self, val):
+        if hasattr(self, "font_spin") and self.font_spin.value() != val:
+            self.font_spin.blockSignals(True)
+            self.font_spin.setValue(val)
+            self.font_spin.blockSignals(False)
         self.config["ui_font_size"] = val
+        self._font_apply_timer.start(80)
+
+    def _on_font_spin_changed(self, val):
+        if hasattr(self, "font_slider") and self.font_slider.value() != val:
+            self.font_slider.blockSignals(True)
+            self.font_slider.setValue(val)
+            self.font_slider.blockSignals(False)
+        self.config["ui_font_size"] = val
+        self._font_apply_timer.start(80)
+
+    def _on_font_size_changed(self, val):
+        self._on_font_slider_changed(val)
+
+    def _do_apply_font_size(self):
+        val = self.config.get("ui_font_size", 13)
         cur_theme = self.config.get("ui_theme", "pure_dark")
         app = QApplication.instance()
         if app:
@@ -1830,7 +1875,7 @@ class SettingsDialog(QDialog):
             # 顶层：平台名称 (左) + 状态指示 (右)
             top_row = QHBoxLayout()
             p_name = QLabel(disp.display_name)
-            p_name.setStyleSheet("font-weight: bold; font-size: 15px; color: #f3f4f6;")
+            p_name.setStyleSheet("font-weight: bold; color: #f3f4f6;")
             top_row.addWidget(p_name)
             top_row.addStretch()
 
@@ -1855,7 +1900,7 @@ class SettingsDialog(QDialog):
             btn_row.addStretch()
 
             clear_btn = QPushButton("清除会话")
-            clear_btn.setFixedHeight(28)
+            clear_btn.setMinimumHeight(28)
             clear_btn.setStyleSheet("""
                 QPushButton {
                     background-color: transparent;
@@ -1874,7 +1919,7 @@ class SettingsDialog(QDialog):
             btn_row.addWidget(clear_btn)
 
             login_btn = QPushButton("重新登录" if is_logged_in else "登录账号")
-            login_btn.setFixedHeight(28)
+            login_btn.setMinimumHeight(28)
             login_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #272738;
@@ -1977,7 +2022,7 @@ class SettingsDialog(QDialog):
         tags_vbox.addWidget(tg_desc)
 
         self.def_tags_edit = QTextEdit()
-        self.def_tags_edit.setFixedHeight(66)
+        self.def_tags_edit.setMinimumHeight(66)
         self.def_tags_edit.setPlaceholderText("例如: original, oc, anime, illustration, fantasy")
         self.def_tags_edit.setPlainText(self.config.get("default_tags", "original, oc, anime, illustration"))
         self.def_tags_edit.textChanged.connect(self._on_def_tags_changed)
@@ -2001,7 +2046,7 @@ class SettingsDialog(QDialog):
         sig_vbox.addWidget(sc_desc)
 
         self.sig_edit = QTextEdit()
-        self.sig_edit.setFixedHeight(88)
+        self.sig_edit.setMinimumHeight(88)
         default_sig = "\n\n---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname"
         self.sig_edit.setPlainText(self.config.get("signature_template", default_sig))
         self.sig_edit.textChanged.connect(self._on_sig_changed)
@@ -2096,6 +2141,9 @@ class SettingsDialog(QDialog):
         self._notify_saved()
 
     def _on_close_clicked(self):
+        if hasattr(self, "_font_apply_timer") and self._font_apply_timer.isActive():
+            self._font_apply_timer.stop()
+            self._do_apply_font_size()
         self.config["settings_dialog_size"] = [self.width(), self.height()]
         self.config["settings_dialog_tab"] = self.tabs.currentIndex()
         save_config(self.config)
@@ -2527,14 +2575,14 @@ class MainWindow(QMainWindow):
         # 顶部工具栏 (标题与系统设置快捷入口)
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(4, 0, 4, 0)
-        app_title_lbl = QLabel("🎨 ArtCrossPost  <span style='color: #818cf8; font-size: 13px;'>多平台艺术创作同步分发中心</span>")
-        app_title_lbl.setStyleSheet("font-weight: bold; font-size: 15px; color: #f1f5f9;")
+        app_title_lbl = QLabel("🎨 ArtCrossPost  <span style='color: #818cf8;'>多平台艺术创作同步分发中心</span>")
+        app_title_lbl.setStyleSheet("font-weight: bold; color: #f1f5f9;")
         top_bar.addWidget(app_title_lbl)
         top_bar.addStretch()
 
         self.settings_btn = QPushButton("⚙️ 系统设置")
         self.settings_btn.setObjectName("secondaryBtn")
-        self.settings_btn.setFixedHeight(28)
+        self.settings_btn.setMinimumHeight(28)
         self.settings_btn.setToolTip("打开系统设置中心 (界面外观、字号缩放、账号管理与固定偏好)")
         self.settings_btn.clicked.connect(lambda: self._open_settings_dialog(target_tab=None))
         top_bar.addWidget(self.settings_btn)
@@ -2576,7 +2624,7 @@ class MainWindow(QMainWindow):
         tags_header.addStretch()
 
         self.insert_def_tags_btn = QPushButton("+ 插入固定标签")
-        self.insert_def_tags_btn.setFixedHeight(22)
+        self.insert_def_tags_btn.setMinimumHeight(22)
         self.insert_def_tags_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
@@ -2599,7 +2647,7 @@ class MainWindow(QMainWindow):
 
         self.tags_input = QTextEdit()
         self.tags_input.setPlaceholderText("通用标签 (以逗号或空格分隔，如: oc, anime, 修仙)...")
-        self.tags_input.setFixedHeight(70)
+        self.tags_input.setMinimumHeight(70)
         self.tags_input.text = lambda: self.tags_input.toPlainText()
         self.tags_input.setText = lambda t: self.tags_input.setPlainText(t)
         tags_layout.addWidget(self.tags_input)
@@ -2629,7 +2677,7 @@ class MainWindow(QMainWindow):
         desc_layout.setSpacing(6)
         self.desc_input = QTextEdit()
         self.desc_input.setPlaceholderText("输入作品描述、剧情背景、世界观或想对粉丝说的话...")
-        self.desc_input.setFixedHeight(85)
+        self.desc_input.setMinimumHeight(85)
         desc_layout.addWidget(self.desc_input)
 
         sig_layout = QHBoxLayout()
@@ -2640,7 +2688,7 @@ class MainWindow(QMainWindow):
 
         sig_layout.addStretch()
         self.x_char_counter_lbl = QLabel("X (Twitter): 0 / 280")
-        self.x_char_counter_lbl.setStyleSheet("color: #9ca3af; font-size: 13px; font-weight: bold;")
+        self.x_char_counter_lbl.setStyleSheet("color: #9ca3af; font-weight: bold;")
         sig_layout.addWidget(self.x_char_counter_lbl)
 
         desc_layout.addLayout(sig_layout)
@@ -2677,7 +2725,7 @@ class MainWindow(QMainWindow):
         media_layout.addLayout(btn_row)
 
         self.img_list_widget = QListWidget()
-        self.img_list_widget.setMaximumHeight(75)
+        self.img_list_widget.setMinimumHeight(75)
         self.img_list_widget.currentRowChanged.connect(self._on_image_selection_changed)
         media_layout.addWidget(self.img_list_widget)
 
@@ -2701,7 +2749,7 @@ class MainWindow(QMainWindow):
 
         self.apply_all_censor_btn = QPushButton("套用到所有平台")
         self.apply_all_censor_btn.setObjectName("secondaryBtn")
-        self.apply_all_censor_btn.setFixedHeight(24)
+        self.apply_all_censor_btn.setMinimumHeight(24)
         self.apply_all_censor_btn.setToolTip("将当前打码总开关状态一键套用到所有平台的打码保护选项")
         self.apply_all_censor_btn.clicked.connect(self._apply_censor_to_all_platforms)
         c_row1.addWidget(self.apply_all_censor_btn)
@@ -2917,7 +2965,7 @@ class MainWindow(QMainWindow):
         # 预览顶部工具栏
         p_top_bar = QHBoxLayout()
         self.preview_info_lbl = QLabel("当前未选择图片")
-        self.preview_info_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; font-size: 14px;")
+        self.preview_info_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold;")
         p_top_bar.addWidget(self.preview_info_lbl, 1)
 
         self.prev_img_btn = QPushButton("◀ 上一张")
@@ -2949,7 +2997,7 @@ class MainWindow(QMainWindow):
 
         # 预览底部参数指示条
         self.preview_status_lbl = QLabel("🛡️ 打码: 未开启  |  💧 水印: 未开启")
-        self.preview_status_lbl.setStyleSheet("color: #9ca3af; font-size: 13px; padding-top: 4px;")
+        self.preview_status_lbl.setStyleSheet("color: #9ca3af; padding-top: 4px;")
         preview_vlayout.addWidget(self.preview_status_lbl)
 
         center_layout.addWidget(preview_group)
@@ -2983,7 +3031,7 @@ class MainWindow(QMainWindow):
         exec_layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("就绪 - 点击下方按钮开始全平台分发")
-        self.status_label.setStyleSheet("color: #9ca3af; font-size: 14px;")
+        self.status_label.setStyleSheet("color: #9ca3af;")
         exec_layout.addWidget(self.status_label)
 
         # 内嵌式 X (Twitter) 字数超限确认条 (严格遵守红线 #8: 严禁弹窗 QMessageBox)
@@ -2996,11 +3044,11 @@ class MainWindow(QMainWindow):
         x_confirm_layout.setSpacing(8)
 
         x_confirm_title = QLabel("⚠️ X (Twitter) 文本字数超限决策")
-        x_confirm_title.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 14px;")
+        x_confirm_title.setStyleSheet("color: #f59e0b; font-weight: bold;")
         x_confirm_layout.addWidget(x_confirm_title)
 
         self.x_limit_msg_lbl = QLabel()
-        self.x_limit_msg_lbl.setStyleSheet("color: #e2e8f0; font-size: 13px; line-height: 1.4;")
+        self.x_limit_msg_lbl.setStyleSheet("color: #e2e8f0; line-height: 1.4;")
         self.x_limit_msg_lbl.setWordWrap(True)
         x_confirm_layout.addWidget(self.x_limit_msg_lbl)
 
@@ -3173,7 +3221,7 @@ class MainWindow(QMainWindow):
         cb = QCheckBox(disp.display_name)
         selected_plats = self.config.get("selected_platforms", ["x_twitter", "deviantart"])
         cb.setChecked(disp.name in selected_plats)
-        cb.setStyleSheet("font-weight: bold; font-size: 14px;")
+        cb.setStyleSheet("font-weight: bold;")
         cb.stateChanged.connect(lambda: self._schedule_config_save())
         header.addWidget(cb)
 
@@ -3193,7 +3241,7 @@ class MainWindow(QMainWindow):
         header.addStretch()
 
         login_btn = QPushButton("重新登录" if is_logged_in else "登录")
-        login_btn.setFixedHeight(24)
+        login_btn.setMinimumHeight(24)
         login_btn.setStyleSheet("""
             QPushButton {
                 background-color: #272738;
