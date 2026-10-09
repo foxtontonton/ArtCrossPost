@@ -348,9 +348,9 @@ def apply_app_appearance(app, theme_name="pure_dark", font_size=13):
     """全局热切换主题配色与字体大小"""
     theme = THEMES.get(theme_name, THEMES["pure_dark"])
 
-    # 1. 设置全局字体大小
+    # 1. 设置全局字体大小 (以像素精准对齐 CSS px 规范)
     font = app.font()
-    font.setPointSize(font_size)
+    font.setPixelSize(font_size)
     font.setFamily("微软雅黑")
     app.setFont(font)
 
@@ -368,6 +368,14 @@ def apply_app_appearance(app, theme_name="pure_dark", font_size=13):
 
     # 3. 设置全局 QSS Stylesheet
     app.setStyleSheet(get_theme_stylesheet(theme_name, font_size))
+
+    # 4. 确保所有顶层窗口（主界面、对话框等）清除残留的旧覆盖样式并更新字体
+    for top_widget in app.topLevelWidgets():
+        if isinstance(top_widget, QMainWindow):
+            top_widget.setStyleSheet("")
+            top_widget.setFont(font)
+        elif isinstance(top_widget, QDialog):
+            top_widget.setFont(font)
 
 class UnifiedPreviewCanvas(QLabel):
     """大尺寸综合效果实时预览画布（打码 + 水印双重合成，支持图片与 GIF 动图，支持直接在画布上鼠标调整/框选/缩放打码位置）"""
@@ -1056,20 +1064,20 @@ class NotificationBar(QFrame):
 
         if level == "success":
             badge_text = "✅ 成功"
-            badge_style = "background-color: #065f46; color: #34d399; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 13px;"
+            badge_style = "background-color: #065f46; color: #34d399; padding: 3px 8px; border-radius: 4px; font-weight: bold;"
             color_hex = "#34d399"
         elif level == "warning":
             badge_text = "⚠️ 警告"
-            badge_style = "background-color: #78350f; color: #fbbf24; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 13px;"
+            badge_style = "background-color: #78350f; color: #fbbf24; padding: 3px 8px; border-radius: 4px; font-weight: bold;"
             color_hex = "#fbbf24"
         elif level == "error":
             badge_text = "❌ 错误"
-            badge_style = "background-color: #7f1d1d; color: #f87171; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 13px;"
+            badge_style = "background-color: #7f1d1d; color: #f87171; padding: 3px 8px; border-radius: 4px; font-weight: bold;"
             color_hex = "#f87171"
             self.expand_log(True)
         else:
             badge_text = "ℹ️ 提示"
-            badge_style = "background-color: #312e81; color: #a5b4fc; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 13px;"
+            badge_style = "background-color: #312e81; color: #a5b4fc; padding: 3px 8px; border-radius: 4px; font-weight: bold;"
             color_hex = "#818cf8"
 
         self.badge_lbl.setText(badge_text)
@@ -1105,7 +1113,7 @@ class NotificationBar(QFrame):
 
     def _on_auto_clear(self):
         self.badge_lbl.setText("● 就绪")
-        self.badge_lbl.setStyleSheet("background-color: #1f2937; color: #9ca3af; padding: 3px 8px; border-radius: 4px; font-size: 13px;")
+        self.badge_lbl.setStyleSheet("background-color: #1f2937; color: #9ca3af; padding: 3px 8px; border-radius: 4px;")
 
     def clear_banner(self):
         self._auto_clear_timer.stop()
@@ -1478,7 +1486,7 @@ class ThemeOptionCard(QFrame):
         top_row.addStretch()
 
         self.status_lbl = QLabel("● 当前" if is_selected else "")
-        self.status_lbl.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {accent_hex};")
+        self.status_lbl.setStyleSheet(f"font-weight: bold; color: {accent_hex};")
         top_row.addWidget(self.status_lbl)
         layout.addLayout(top_row)
 
@@ -2001,6 +2009,10 @@ class SettingsDialog(QDialog):
         app = QApplication.instance()
         if app:
             apply_app_appearance(app, theme_name=cur_theme, font_size=val)
+        if self.main_window and hasattr(self.main_window, "header_font_spin"):
+            self.main_window.header_font_spin.blockSignals(True)
+            self.main_window.header_font_spin.setValue(val)
+            self.main_window.header_font_spin.blockSignals(False)
         self._notify_saved()
 
     def _build_tab_accounts(self):
@@ -2040,14 +2052,14 @@ class SettingsDialog(QDialog):
 
             s_badge = QLabel("● 已连接" if is_logged_in else "○ 未连接")
             u_color = "#10b981" if is_logged_in else "#9ca3af"
-            s_badge.setStyleSheet(f"color: {u_color}; font-size: 12px; font-weight: 500;")
+            s_badge.setStyleSheet(f"color: {u_color}; font-weight: 500;")
             top_row.addWidget(s_badge)
             c_layout.addLayout(top_row)
 
             # 中间层：用户名
             u_text = f"@{username}" if is_logged_in and not username.startswith("@") else username
             u_lbl = QLabel(u_text if is_logged_in else "未连接任何账号")
-            u_lbl.setStyleSheet(f"color: {'#e2e8f0' if is_logged_in else '#6b7280'}; font-size: 13px; font-weight: 500;")
+            u_lbl.setStyleSheet(f"color: {'#e2e8f0' if is_logged_in else '#6b7280'}; font-weight: 500;")
             c_layout.addWidget(u_lbl)
 
             # 底层：操作按钮 (右对齐)
@@ -2109,7 +2121,7 @@ class SettingsDialog(QDialog):
 
     def _start_login(self, disp, s_badge, u_lbl, login_btn=None):
         s_badge.setText("● 正在打开浏览器...")
-        s_badge.setStyleSheet("color: #fbbf24; font-size: 12px; font-weight: 500;")
+        s_badge.setStyleSheet("color: #fbbf24; font-weight: 500;")
         if login_btn:
             login_btn.setEnabled(False)
         if self.main_window:
@@ -2129,9 +2141,9 @@ class SettingsDialog(QDialog):
         if success:
             u_text = f"@{username}" if not username.startswith("@") else username
             u_lbl.setText(u_text)
-            u_lbl.setStyleSheet("color: #e2e8f0; font-weight: 500; font-size: 13px;")
+            u_lbl.setStyleSheet("color: #e2e8f0; font-weight: 500;")
             s_badge.setText("● 已连接")
-            s_badge.setStyleSheet("color: #10b981; font-size: 12px; font-weight: 500;")
+            s_badge.setStyleSheet("color: #10b981; font-weight: 500;")
             if login_btn:
                 login_btn.setText("重新登录")
             if self.main_window:
@@ -2139,16 +2151,16 @@ class SettingsDialog(QDialog):
                 self.main_window.notify(f"{disp.display_name} 账号已连接成功！已同步用户信息", level="success")
         else:
             s_badge.setText("○ 连接失败")
-            s_badge.setStyleSheet("color: #ef4444; font-size: 12px; font-weight: 500;")
+            s_badge.setStyleSheet("color: #ef4444; font-weight: 500;")
             if self.main_window:
                 self.main_window.notify(f"{disp.display_name} 登录未能完成: {msg}", level="warning")
 
     def _clear_session(self, disp, s_badge, u_lbl, login_btn=None):
         disp.clear_session()
         u_lbl.setText("未连接任何账号")
-        u_lbl.setStyleSheet("color: #6b7280; font-size: 13px;")
+        u_lbl.setStyleSheet("color: #6b7280;")
         s_badge.setText("○ 未连接")
-        s_badge.setStyleSheet("color: #9ca3af; font-size: 12px; font-weight: 500;")
+        s_badge.setStyleSheet("color: #9ca3af; font-weight: 500;")
         if login_btn:
             login_btn.setText("登录账号")
         if self.main_window:
@@ -2169,11 +2181,11 @@ class SettingsDialog(QDialog):
         tags_vbox = QVBoxLayout()
         tags_vbox.setSpacing(6)
         tg_title = QLabel("默认标签")
-        tg_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        tg_title.setStyleSheet("font-weight: 600; color: #d1d5db;")
         tags_vbox.addWidget(tg_title)
 
         tg_desc = QLabel("新建作品时自动填充的常用标签 (输入空格/回车自动识别加逗号，支持 # 识别)。")
-        tg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        tg_desc.setStyleSheet("color: #9ca3af;")
         tags_vbox.addWidget(tg_desc)
 
         self.def_tags_edit = SmartTagEdit()
@@ -2195,11 +2207,11 @@ class SettingsDialog(QDialog):
         sig_vbox = QVBoxLayout()
         sig_vbox.setSpacing(6)
         sc_title = QLabel("签名模板")
-        sc_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        sc_title.setStyleSheet("font-weight: 600; color: #d1d5db;")
         sig_vbox.addWidget(sc_title)
 
         sc_desc = QLabel("用于一键追加到作品简介末尾，可包含 Patreon、Ko-fi 等链接（已完全展开显示）。")
-        sc_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        sc_desc.setStyleSheet("color: #9ca3af;")
         sig_vbox.addWidget(sc_desc)
 
         self.sig_edit = QTextEdit()
@@ -2224,11 +2236,11 @@ class SettingsDialog(QDialog):
         da_vbox = QVBoxLayout()
         da_vbox.setSpacing(6)
         dg_title = QLabel("DeviantArt 默认相册")
-        dg_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
+        dg_title.setStyleSheet("font-weight: 600; color: #d1d5db;")
         da_vbox.addWidget(dg_title)
 
         dg_desc = QLabel("日常同步到 DeviantArt 时使用的默认相册。")
-        dg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        dg_desc.setStyleSheet("color: #9ca3af;")
         da_vbox.addWidget(dg_desc)
 
         self.def_da_gallery_combo = QComboBox()
@@ -2344,7 +2356,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("ArtCrossPost - 多平台创作同步分发助手 (全尺寸 & 水印打码双核实时预览版)")
         self.setMinimumSize(1260, 780)
-        self.setStyleSheet(DARK_STYLE)
 
         self.data_dir = Path(__file__).resolve().parent / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -2756,6 +2767,51 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(app_title_lbl)
         top_bar.addStretch()
 
+        # 顶部直接调节字号工具栏 (无极缩放，直接在主界面体现)
+        font_bar = QHBoxLayout()
+        font_bar.setSpacing(4)
+
+        font_lbl = QLabel("🔍 界面字号:")
+        font_lbl.setStyleSheet("color: #9ca3af; font-weight: 500;")
+        font_bar.addWidget(font_lbl)
+
+        self.zoom_out_btn = QPushButton("A-")
+        self.zoom_out_btn.setObjectName("secondaryBtn")
+        self.zoom_out_btn.setToolTip("缩小界面字号 (-1px)")
+        self.zoom_out_btn.setFixedWidth(34)
+        self.zoom_out_btn.setMinimumHeight(28)
+        self.zoom_out_btn.clicked.connect(lambda: self._adjust_ui_font_size(-1))
+        font_bar.addWidget(self.zoom_out_btn)
+
+        cur_fs = self.config.get("ui_font_size", 13)
+        self.header_font_spin = QSpinBox()
+        self.header_font_spin.setRange(10, 60)
+        self.header_font_spin.setValue(cur_fs)
+        self.header_font_spin.setSuffix(" px")
+        self.header_font_spin.setToolTip("当前界面字号 (支持 10px ~ 60px 直接输入或滚动滚轮)")
+        self.header_font_spin.setFixedWidth(78)
+        self.header_font_spin.setMinimumHeight(28)
+        self.header_font_spin.valueChanged.connect(self._on_header_font_changed)
+        font_bar.addWidget(self.header_font_spin)
+
+        self.zoom_in_btn = QPushButton("A+")
+        self.zoom_in_btn.setObjectName("secondaryBtn")
+        self.zoom_in_btn.setToolTip("放大界面字号 (+1px)")
+        self.zoom_in_btn.setFixedWidth(34)
+        self.zoom_in_btn.setMinimumHeight(28)
+        self.zoom_in_btn.clicked.connect(lambda: self._adjust_ui_font_size(1))
+        font_bar.addWidget(self.zoom_in_btn)
+
+        self.reset_font_btn = QPushButton("默认")
+        self.reset_font_btn.setObjectName("secondaryBtn")
+        self.reset_font_btn.setToolTip("一键恢复默认标准字号 (13px)")
+        self.reset_font_btn.setMinimumHeight(28)
+        self.reset_font_btn.clicked.connect(lambda: self._set_ui_font_size(13))
+        font_bar.addWidget(self.reset_font_btn)
+
+        top_bar.addLayout(font_bar)
+        top_bar.addSpacing(8)
+
         self.settings_btn = QPushButton("⚙️ 系统设置")
         self.settings_btn.setObjectName("secondaryBtn")
         self.settings_btn.setMinimumHeight(28)
@@ -2807,7 +2863,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #374151;
                 border-radius: 4px;
                 color: #9ca3af;
-                font-size: 11px;
                 padding: 1px 6px;
             }
             QPushButton:hover {
@@ -3289,7 +3344,6 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
                 padding: 10px;
                 border-radius: 6px;
-                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #b45309;
@@ -3319,23 +3373,23 @@ class MainWindow(QMainWindow):
 
         diag_header = QHBoxLayout()
         self.diag_title_lbl = QLabel("📋 <b>系统健康与全平台自检报告</b>")
-        self.diag_title_lbl.setStyleSheet("color: #60a5fa; font-size: 14px;")
+        self.diag_title_lbl.setStyleSheet("color: #60a5fa;")
         diag_header.addWidget(self.diag_title_lbl)
         diag_header.addStretch()
 
         self.diag_export_btn = QPushButton("📄 导出报告 (.md)")
-        self.diag_export_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;")
+        self.diag_export_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; padding: 4px 10px; border-radius: 4px; font-weight: bold;")
         self.diag_export_btn.clicked.connect(self._open_diagnostic_report_file)
         diag_header.addWidget(self.diag_export_btn)
 
         self.diag_close_btn = QPushButton("✕ 收起")
-        self.diag_close_btn.setStyleSheet("background-color: #374151; color: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-size: 12px;")
+        self.diag_close_btn.setStyleSheet("background-color: #374151; color: #e2e8f0; padding: 4px 8px; border-radius: 4px;")
         self.diag_close_btn.clicked.connect(lambda: self.diag_panel.hide())
         diag_header.addWidget(self.diag_close_btn)
         diag_vbox.addLayout(diag_header)
 
         self.diag_summary_lbl = QLabel("")
-        self.diag_summary_lbl.setStyleSheet("color: #cbd5e1; font-size: 13px;")
+        self.diag_summary_lbl.setStyleSheet("color: #cbd5e1;")
         diag_vbox.addWidget(self.diag_summary_lbl)
 
         self.diag_text_browser = QTextBrowser()
@@ -3347,7 +3401,6 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
                 color: #e2e8f0;
                 font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
-                font-size: 13px;
                 padding: 8px;
             }
         """)
@@ -3407,10 +3460,10 @@ class MainWindow(QMainWindow):
         if is_logged_in:
             u_text = f"@{username}" if not username.startswith("@") else username
             status_lbl.setText(f"{u_text} (● 已就绪)")
-            status_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+            status_lbl.setStyleSheet("color: #10b981; font-weight: bold;")
         else:
             status_lbl.setText("(○ 未连接)")
-            status_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+            status_lbl.setStyleSheet("color: #9ca3af;")
         header.addWidget(status_lbl)
         header.addStretch()
 
@@ -3619,7 +3672,7 @@ class MainWindow(QMainWindow):
 
     def _start_platform_direct_login(self, disp, status_lbl, login_btn):
         status_lbl.setText("(● 正在打开浏览器...)")
-        status_lbl.setStyleSheet("color: #fbbf24; font-size: 12px; font-weight: 500;")
+        status_lbl.setStyleSheet("color: #fbbf24; font-weight: 500;")
         login_btn.setEnabled(False)
         self.notify(f"正在唤起浏览器登录 {disp.display_name}...", level="info")
 
@@ -3636,13 +3689,13 @@ class MainWindow(QMainWindow):
         if success:
             u_text = f"@{username}" if not username.startswith("@") else username
             status_lbl.setText(f"{u_text} (● 已就绪)")
-            status_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+            status_lbl.setStyleSheet("color: #10b981; font-weight: bold;")
             login_btn.setText("重新登录")
             self._refresh_all_platform_statuses()
             self.notify(f"{disp.display_name} 账号已连接成功！已同步用户信息", level="success")
         else:
             status_lbl.setText("(○ 未连接)")
-            status_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
+            status_lbl.setStyleSheet("color: #ef4444;")
             login_btn.setText("登录")
             self.notify(f"{disp.display_name} 登录未能完成: {msg}", level="warning")
 
@@ -3674,9 +3727,43 @@ class MainWindow(QMainWindow):
             return cb.isChecked()
         return False
 
+    def _adjust_ui_font_size(self, delta):
+        cur = self.config.get("ui_font_size", 13)
+        self._set_ui_font_size(cur + delta)
+
+    def _on_header_font_changed(self, val):
+        self._set_ui_font_size(val)
+
+    def _set_ui_font_size(self, val):
+        val = max(10, min(60, int(val)))
+        if self.config.get("ui_font_size") == val and getattr(self, "_font_initialized", False):
+            return
+        self._font_initialized = True
+        self.config["ui_font_size"] = val
+        if hasattr(self, "header_font_spin") and self.header_font_spin.value() != val:
+            self.header_font_spin.blockSignals(True)
+            self.header_font_spin.setValue(val)
+            self.header_font_spin.blockSignals(False)
+        cur_theme = self.config.get("ui_theme", "pure_dark")
+        app = QApplication.instance()
+        if app:
+            apply_app_appearance(app, theme_name=cur_theme, font_size=val)
+        if hasattr(self, "_active_settings_dialog") and self._active_settings_dialog and self._active_settings_dialog.isVisible():
+            dlg = self._active_settings_dialog
+            if hasattr(dlg, "font_slider") and dlg.font_slider.value() != val:
+                dlg.font_slider.blockSignals(True)
+                dlg.font_slider.setValue(val)
+                dlg.font_slider.blockSignals(False)
+            if hasattr(dlg, "font_spin") and dlg.font_spin.value() != val:
+                dlg.font_spin.blockSignals(True)
+                dlg.font_spin.setValue(val)
+                dlg.font_spin.blockSignals(False)
+        self._schedule_config_save()
+
     def _open_settings_dialog(self, target_tab=None):
-        dlg = SettingsDialog(self, target_tab=target_tab)
-        dlg.exec_()
+        self._active_settings_dialog = SettingsDialog(self, target_tab=target_tab)
+        self._active_settings_dialog.exec_()
+        self._active_settings_dialog = None
 
     def _update_platform_card_status(self, disp_name):
         ctrl = self.platform_controls.get(disp_name)
@@ -3691,12 +3778,12 @@ class MainWindow(QMainWindow):
         if is_logged_in:
             u_text = f"@{username}" if not username.startswith("@") else username
             status_lbl.setText(f"{u_text} (● 已就绪)")
-            status_lbl.setStyleSheet("color: #10b981; font-size: 12px; font-weight: bold;")
+            status_lbl.setStyleSheet("color: #10b981; font-weight: bold;")
             if login_btn:
                 login_btn.setText("重新登录")
         else:
             status_lbl.setText("(○ 未连接)")
-            status_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+            status_lbl.setStyleSheet("color: #9ca3af;")
             if login_btn:
                 login_btn.setText("登录")
 
