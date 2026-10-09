@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 import json
+import re
 import numpy as np
 import cv2
 from PIL import Image
@@ -1527,6 +1528,153 @@ class ThemeOptionCard(QFrame):
         super().mousePressEvent(event)
 
 
+def split_and_normalize_tags(raw_text: str) -> list:
+    """
+    智能解析与规范化标签列表:
+    支持以英文逗号 (,)、中文逗号 (，)、顿号 (、)、分号 (; ；)、
+    换行符 (\n)、空格及 Hashtag (#) 分隔的各种格式，
+    去重并保持原有顺序，返回纯净的标签列表。
+    """
+    if not raw_text:
+        return []
+    # 替换中文逗号、顿号、分号、换行符为英文逗号
+    text = raw_text.replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
+    text = text.replace("\r\n", ",").replace("\n", ",").replace("\r", ",")
+
+    # 统一处理 # 号: 将 #tag 提取为 ,tag,
+    text = re.sub(r"#+([^\s,，#]+)", r",\1,", text)
+
+    parts = text.split(",")
+    result = []
+    seen = set()
+    for part in parts:
+        sub_parts = part.strip().split()
+        for sp in sub_parts:
+            clean_tag = sp.strip().lstrip("#").strip()
+            if clean_tag and clean_tag.lower() not in seen:
+                seen.add(clean_tag.lower())
+                result.append(clean_tag)
+    return result
+
+
+def normalize_tags_to_string(raw_text: str) -> str:
+    """将输入的任意分隔符标签文本规范化为以逗号+空格分隔的标准字符串"""
+    tags = split_and_normalize_tags(raw_text)
+    return ", ".join(tags)
+
+
+class SmartTagEdit(QTextEdit):
+    """
+    智能标签输入框:
+    1. 输入空格、回车、中文逗号、分号时，自动识别并添加英文逗号 ', ' 分隔。
+    2. 按退格键 (Backspace) 时，若光标紧贴 ', '，一次性回退逗号与空格。
+    3. 粘贴文本时，自动识别空格、换行、#号，自动转为逗号分隔的规范标签列表。
+    4. 失去焦点 (focusOut) 时自动整理文本，去除末尾多余逗号。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.text = lambda: self.toPlainText()
+        self.setText = lambda t: self.setPlainText(t)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        text = event.text()
+
+        # 1. 退格键: 若前面刚好是 ', '，一次性删除逗号和空格
+        if key == Qt.Key_Backspace:
+            cursor = self.textCursor()
+            pos = cursor.position()
+            cur_text = self.toPlainText()
+            before_text = cur_text[:pos]
+            if before_text.endswith(", ") and not cursor.hasSelection():
+                cursor.deletePreviousChar()
+                cursor.deletePreviousChar()
+                event.accept()
+                return
+
+        # 2. 回车键: 不换行，自动添加逗号分隔
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self._handle_delimiter_input()
+            event.accept()
+            return
+
+        # 3. 空格键: 前面是完整单词且未以逗号结尾时，自动转为 ', '
+        if key == Qt.Key_Space:
+            cursor = self.textCursor()
+            pos = cursor.position()
+            cur_text = self.toPlainText()
+            before_text = cur_text[:pos]
+            if before_text.endswith(", "):
+                event.accept()
+                return
+            elif before_text.endswith(","):
+                cursor.insertText(" ")
+                event.accept()
+                return
+            elif before_text.strip() and not before_text.rstrip().endswith((",", "，")):
+                cursor.insertText(", ")
+                event.accept()
+                return
+
+        # 4. 中文逗号、分号、顿号: 自动转为标准英文逗号加空格
+        if text in ("，", "；", ";", "、"):
+            cursor = self.textCursor()
+            pos = cursor.position()
+            cur_text = self.toPlainText()
+            before_text = cur_text[:pos]
+            if not before_text.rstrip().endswith(","):
+                cursor.insertText(", ")
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def _handle_delimiter_input(self):
+        cursor = self.textCursor()
+        pos = cursor.position()
+        cur_text = self.toPlainText()
+        before_text = cur_text[:pos]
+        if before_text.strip() and not before_text.rstrip().endswith((",", "，")):
+            cursor.insertText(", ")
+
+    def insertFromMimeData(self, source):
+        """粘贴时自动识别空格、换行、#号，规整为标准逗号分隔"""
+        if source.hasText():
+            pasted_text = source.text()
+            tags = split_and_normalize_tags(pasted_text)
+            if tags:
+                cursor = self.textCursor()
+                cur_text = self.toPlainText()
+                pos = cursor.position()
+                before_text = cur_text[:pos]
+                insert_str = ", ".join(tags)
+                if before_text and not before_text.rstrip().endswith((",", "，")):
+                    insert_str = ", " + insert_str
+                cursor.insertText(insert_str)
+                return
+        super().insertFromMimeData(source)
+
+    def focusOutEvent(self, event):
+        """失去焦点时，自动整理规范化所有标签"""
+        super().focusOutEvent(event)
+        self.normalize_content()
+
+    def normalize_content(self):
+        raw = self.toPlainText().strip()
+        if raw:
+            normalized = normalize_tags_to_string(raw)
+            if normalized != raw:
+                cursor = self.textCursor()
+                pos = cursor.position()
+                self.blockSignals(True)
+                self.setPlainText(normalized)
+                self.blockSignals(False)
+                new_cursor = self.textCursor()
+                new_cursor.setPosition(min(pos, len(normalized)))
+                self.setTextCursor(new_cursor)
+                self.textChanged.emit()
+
+
 class SettingsDialog(QDialog):
     """系统设置中心对话框：集中承载外观主题、账号会话维护与固定标签/引流签名"""
     def __init__(self, parent=None, target_tab=None):
@@ -1569,6 +1717,13 @@ class SettingsDialog(QDialog):
             self._resize_timer.setSingleShot(True)
             self._resize_timer.timeout.connect(self._notify_saved)
         self._resize_timer.start(500)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_adjust_sig_edit_height"):
+            self._adjust_sig_edit_height()
+        if hasattr(self, "_adjust_def_tags_height"):
+            self._adjust_def_tags_height()
 
     def _create_section_header(self, title_text, desc_text=None):
         container = QVBoxLayout()
@@ -2017,15 +2172,17 @@ class SettingsDialog(QDialog):
         tg_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
         tags_vbox.addWidget(tg_title)
 
-        tg_desc = QLabel("新建作品时自动填充的常用标签。")
+        tg_desc = QLabel("新建作品时自动填充的常用标签 (输入空格/回车自动识别加逗号，支持 # 识别)。")
         tg_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
         tags_vbox.addWidget(tg_desc)
 
-        self.def_tags_edit = QTextEdit()
+        self.def_tags_edit = SmartTagEdit()
         self.def_tags_edit.setMinimumHeight(66)
-        self.def_tags_edit.setPlaceholderText("例如: original, oc, anime, illustration, fantasy")
+        self.def_tags_edit.setPlaceholderText("例如: original, oc, anime, illustration (输入空格/回车自动识别加逗号)")
         self.def_tags_edit.setPlainText(self.config.get("default_tags", "original, oc, anime, illustration"))
         self.def_tags_edit.textChanged.connect(self._on_def_tags_changed)
+        self.def_tags_edit.textChanged.connect(self._adjust_def_tags_height)
+        self._adjust_def_tags_height()
         tags_vbox.addWidget(self.def_tags_edit)
 
         self.auto_fill_cb = QCheckBox("新建作品 / 清空信息时自动填充")
@@ -2041,15 +2198,20 @@ class SettingsDialog(QDialog):
         sc_title.setStyleSheet("font-weight: 600; font-size: 13px; color: #d1d5db;")
         sig_vbox.addWidget(sc_title)
 
-        sc_desc = QLabel("用于一键追加到作品简介末尾，可包含 Patreon、Ko-fi 等链接。")
+        sc_desc = QLabel("用于一键追加到作品简介末尾，可包含 Patreon、Ko-fi 等链接（已完全展开显示）。")
         sc_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
         sig_vbox.addWidget(sc_desc)
 
         self.sig_edit = QTextEdit()
-        self.sig_edit.setMinimumHeight(88)
-        default_sig = "\n\n---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname"
-        self.sig_edit.setPlainText(self.config.get("signature_template", default_sig))
+        default_sig = "---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname"
+        saved_sig = self.config.get("signature_template", default_sig)
+        if saved_sig.startswith("\n\n"):
+            saved_sig = saved_sig.strip()
+        self.sig_edit.setPlainText(saved_sig)
+        self.sig_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.sig_edit.textChanged.connect(self._on_sig_changed)
+        self.sig_edit.textChanged.connect(self._adjust_sig_edit_height)
+        self._adjust_sig_edit_height()
         sig_vbox.addWidget(self.sig_edit)
         layout.addLayout(sig_vbox)
 
@@ -2103,6 +2265,20 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return self._wrap_in_scroll(content)
+
+    def _adjust_sig_edit_height(self):
+        if not hasattr(self, "sig_edit"):
+            return
+        doc = self.sig_edit.document()
+        doc_height = int(doc.size().height()) + 28
+        self.sig_edit.setMinimumHeight(max(160, doc_height))
+
+    def _adjust_def_tags_height(self):
+        if not hasattr(self, "def_tags_edit"):
+            return
+        doc = self.def_tags_edit.document()
+        doc_height = int(doc.size().height()) + 20
+        self.def_tags_edit.setMinimumHeight(max(66, doc_height))
 
     def _on_def_tags_changed(self):
         self.config["default_tags"] = self.def_tags_edit.toPlainText().strip()
@@ -2230,7 +2406,7 @@ class MainWindow(QMainWindow):
         if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
             def_t = self.config.get("default_tags", "").strip()
             if def_t:
-                self.tags_input.setPlainText(def_t)
+                self.tags_input.setPlainText(normalize_tags_to_string(def_t))
 
     def _save_draft(self):
         """P1-6: 自动将当前草稿保存至 data/draft.json"""
@@ -2645,11 +2821,9 @@ class MainWindow(QMainWindow):
         tags_header.addWidget(self.insert_def_tags_btn)
         tags_layout.addLayout(tags_header)
 
-        self.tags_input = QTextEdit()
-        self.tags_input.setPlaceholderText("通用标签 (以逗号或空格分隔，如: oc, anime, 修仙)...")
+        self.tags_input = SmartTagEdit()
+        self.tags_input.setPlaceholderText("通用标签 (输入空格、逗号或回车自动识别添加逗号，支持 # 识别)...")
         self.tags_input.setMinimumHeight(70)
-        self.tags_input.text = lambda: self.tags_input.toPlainText()
-        self.tags_input.setText = lambda t: self.tags_input.setPlainText(t)
         tags_layout.addWidget(self.tags_input)
         meta_layout.addLayout(tags_layout)
 
@@ -3536,13 +3710,13 @@ class MainWindow(QMainWindow):
             self.notify("尚未在系统设置中配置固定标签！", level="warning")
             return
         cur_text = self.tags_input.toPlainText().strip()
+        def_list = split_and_normalize_tags(def_tags)
         if cur_text:
-            cur_list = [t.strip() for t in cur_text.replace("，", ",").split(",") if t.strip()]
-            def_list = [t.strip() for t in def_tags.replace("，", ",").split(",") if t.strip()]
+            cur_list = split_and_normalize_tags(cur_text)
             merged = cur_list + [t for t in def_list if t not in cur_list]
             self.tags_input.setPlainText(", ".join(merged))
         else:
-            self.tags_input.setPlainText(def_tags)
+            self.tags_input.setPlainText(", ".join(def_list))
         self.notify("已成功追加固定标签！", level="info")
 
     def _render_avatar(self, label, avatar_path):
@@ -4181,7 +4355,7 @@ class MainWindow(QMainWindow):
         self._current_rendered_pixmap = None
         self._current_rendered_gif_path = None
         if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
-            self.tags_input.setPlainText(self.config.get("default_tags", ""))
+            self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
         self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
 
     def _start_publishing(self):
@@ -4440,7 +4614,7 @@ class MainWindow(QMainWindow):
                 else:
                     kofi_images.append(str(p))
 
-        tags = [t.strip() for t in self.tags_input.text().replace("，", ",").split(",") if t.strip()]
+        tags = split_and_normalize_tags(self.tags_input.toPlainText())
 
         platform_options = {
             "is_ai_generated": self.ai_checkbox.isChecked(),

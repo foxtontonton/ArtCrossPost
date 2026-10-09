@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
     # 2. 常用内容与固定标签偏好
     "default_tags": "original, oc, anime, illustration",  # 常驻固定标签
     "auto_fill_default_tags": True,                       # 新建作品/清空时是否自动预填
-    "signature_template": "\n\n---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname",
+    "signature_template": "---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname",
 
     # 3. 打码与水印保护设置
     "censor": {
