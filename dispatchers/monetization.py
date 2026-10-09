@@ -310,7 +310,7 @@ class PatreonDispatcher(BaseDispatcher):
         - 设置可见性 (All Patrons / Public / Tiers)
         - 勾选官方 Adult Content (18+)
         """
-        images = payload.get("raw_images", payload.get("images", [])) # 必须是无码原图
+        images = payload.get("patreon_images") or payload.get("raw_images", payload.get("images", []))
         if not images:
             return False, "Patreon 发布失败: 未选择图片", []
 
