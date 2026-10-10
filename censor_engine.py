@@ -48,12 +48,21 @@ class CensorEngine:
             logger.warning(f"[CensorEngine] NudeDetector 初始化失败: {e}")
             self.detector = None
 
+    def is_available(self) -> bool:
+        """返回 NudeDetector AI 检测模型是否已成功加载并就绪"""
+        return self.detector is not None
+
     def detect_sensitive_regions(self, img_path, img_bgr=None):
         """
         使用 AI 模型检测图片中的真实关键敏感区域坐标 [x1, y1, x2, y2]
+        若模型未就绪或未检出器官，严禁静默降级为中央默认框，必须返回空列表 []
         """
+        if self.detector is None:
+            logger.debug("[CensorEngine] NudeDetector 未就绪，跳过自动检测，返回空列表")
+            return []
+
         boxes = []
-        if self.detector is not None and img_path and Path(img_path).exists():
+        if img_path and Path(img_path).exists():
             try:
                 detections = self.detector.detect(str(img_path))
                 for det in detections:
@@ -65,25 +74,32 @@ class CensorEngine:
                         logger.info(f"[CensorEngine] AI 捕获关键部位: {cls_name} (置信度: {score:.2f}, 坐标: {det['box']})")
             except Exception as e:
                 logger.warning(f"[CensorEngine] AI 检测报错: {e}")
+        elif img_bgr is not None:
+            # 动图首帧通过临时文件交由 NudeNet 检测
+            try:
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_f:
+                    tmp_name = tmp_f.name
+                cv2.imwrite(tmp_name, img_bgr)
+                try:
+                    detections = self.detector.detect(tmp_name)
+                    for det in detections:
+                        cls_name = det.get("class", "")
+                        score = det.get("score", 0.0)
+                        if cls_name in TARGET_CLASSES and score >= 0.18:
+                            x, y, w, h = det["box"]
+                            boxes.append([int(x), int(y), int(x + w), int(y + h)])
+                            logger.info(f"[CensorEngine] AI 动图捕获关键部位: {cls_name} (置信度: {score:.2f})")
+                finally:
+                    try:
+                        import os
+                        os.unlink(tmp_name)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"[CensorEngine] 动图首帧检测异常: {e}")
 
-        # 如果 AI 模型未检出（例如二次元极度夸张线条或画风特殊），返回空列表，交由可视化手动框选或默认中心区
-        if not boxes:
-            if img_bgr is not None:
-                h, w = img_bgr.shape[:2]
-            elif img_path and Path(img_path).exists():
-                tmp = cv2.imread(str(img_path))
-                h, w = (tmp.shape[:2]) if tmp is not None else (800, 600)
-            else:
-                h, w = 800, 600
-
-            print("[CensorEngine] 提示: AI 未能在该图自动捕获器官，使用推荐初始框（建议使用可视化画框微调）")
-            boxes.append([
-                int(w * 0.35),
-                int(h * 0.52),
-                int(w * 0.65),
-                int(h * 0.72)
-            ])
-            
+        # 若 AI 未能捕获器官，返回空列表，由创作者在预览画布中手动框选，禁止静默生成中央框
         return boxes
 
     def compute_censor_box(self, raw_box, img_w, img_h, mode="moderate", custom_ratio=None):

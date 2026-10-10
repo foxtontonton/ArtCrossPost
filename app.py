@@ -2972,6 +2972,16 @@ class MainWindow(QMainWindow):
         censor_vlayout.setContentsMargins(4, 4, 4, 4)
         censor_vlayout.setSpacing(4)
 
+        self.censor_ai_status_lbl = QLabel("⚠️ NudeNet AI 引擎未就绪 (依赖组件缺失)，已停用自动框选，请在中央预览框手动框选打码")
+        self.censor_ai_status_lbl.setStyleSheet(
+            "color: #ef4444; font-size: 11px; font-weight: bold; padding: 4px 6px; "
+            "background-color: rgba(239, 68, 68, 0.12); border: 1px solid #ef4444; border-radius: 4px;"
+        )
+        self.censor_ai_status_lbl.setWordWrap(True)
+        censor_vlayout.addWidget(self.censor_ai_status_lbl)
+        if hasattr(self, "censor_engine") and self.censor_engine.is_available():
+            self.censor_ai_status_lbl.hide()
+
         # 第 1 行 (水平并排): 启用打码 + 套用到所有平台 + 弹簧 + 清除 + 恢复AI
         c_row1 = QHBoxLayout()
         c_row1.setSpacing(4)
@@ -4392,6 +4402,9 @@ class MainWindow(QMainWindow):
         self.notify("已清除当前作品的所有打码框！在中央预览图中空白处拖拽可新增打码框。", level="info")
 
     def _reset_current_censor_boxes(self):
+        if hasattr(self, "censor_engine") and not self.censor_engine.is_available():
+            self.notify("⚠️ AI 检测模型未就绪（NudeNet 离线），无法自动识别，请在中央预览图中手动拖拽框选！", level="warning")
+            return
         if not self.image_paths:
             self.notify("请先导入图片", level="warning")
             return
