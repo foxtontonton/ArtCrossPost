@@ -167,3 +167,70 @@ def split_into_x_threads(full_text: str, limit: int = 280) -> list[str]:
         final_chunks.append(full_c)
 
     return final_chunks
+
+
+def format_x_full_text(title: str = "", desc: str = "", tags: list[str] = None) -> str:
+    """
+    组合 X (Twitter) 推文完整正文:
+    - 规范化 tags 列表为标准推特 Hashtags (#tag1 #tag2)
+    - 自动滤除正文中已包含的重复标签
+    - 优先将 Hashtag 区域置于正文末尾、引流签名 (--- / Patreon / Ko-fi) 之前
+    """
+    title = (title or "").strip()
+    desc = (desc or "").strip()
+    tags = tags or []
+
+    hashtags = []
+    seen = set()
+    desc_lower = desc.lower()
+
+    for t in tags:
+        clean = re.sub(r"^[#＃]+", "", str(t).strip())
+        # 替换内部空格为下划线，符合推特 Hashtag 语法
+        clean = re.sub(r"\s+", "_", clean).strip()
+        if not clean:
+            continue
+        tag_lower = clean.lower()
+        if tag_lower in seen:
+            continue
+        # 如果正文中已明确包含此 Hashtag，则不重复追加
+        if f"#{tag_lower}" in desc_lower or f"#{clean}" in desc:
+            continue
+        seen.add(tag_lower)
+        hashtags.append(f"#{clean}")
+
+    tag_line = " ".join(hashtags)
+
+    if not tag_line:
+        return f"{title}\n\n{desc}".strip() if title else desc
+
+    if not desc:
+        return f"{title}\n\n{tag_line}".strip() if title else tag_line
+
+    # 检查 desc 末尾是否存在签名
+    sig_markers = ["patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp", "subscribestar", "dlsite", "gumroad", "---"]
+    tail_sample = desc[-200:].lower() if len(desc) > 200 else desc.lower()
+    has_sig = any(m in tail_sample for m in sig_markers)
+
+    sig_start = -1
+    if has_sig:
+        divider_idx = desc.rfind("\n---")
+        if divider_idx != -1 and divider_idx >= len(desc) - 220:
+            sig_start = divider_idx
+        else:
+            lines = desc.splitlines(keepends=True)
+            accum = 0
+            for line in lines:
+                if any(m in line.lower() for m in sig_markers) and accum >= len(desc) - 200:
+                    sig_start = accum
+                    break
+                accum += len(line)
+
+    if sig_start != -1:
+        body = desc[:sig_start].rstrip()
+        sig = desc[sig_start:].lstrip("\r\n")
+        combined_desc = f"{body}\n\n{tag_line}\n\n{sig}".strip() if body else f"{tag_line}\n\n{sig}".strip()
+    else:
+        combined_desc = f"{desc}\n\n{tag_line}".strip()
+
+    return f"{title}\n\n{combined_desc}".strip() if title else combined_desc

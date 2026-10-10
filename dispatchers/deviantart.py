@@ -222,7 +222,9 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self.apply_stealth(context)
                 context.on("page", lambda new_p: self.apply_stealth(new_p))
 
-                page = context.new_page()
+                # 复用已有主标签页，彻底清理启动时的冗余空白页
+                page = context.pages[0] if context.pages else context.new_page()
+                self.clean_context_tabs(context)
                 self.apply_stealth(page)
 
                 def is_da_logged_in(p, ctx):

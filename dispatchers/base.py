@@ -208,24 +208,59 @@ class BaseDispatcher(ABC):
                 args=stealth_args
             )
 
+    @staticmethod
+    def is_edge_running():
+        """检测本机 Edge 是否正在运行以避免单例锁冲突与串扰"""
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                errors="ignore"
+            )
+            return "msedge.exe" in (out.stdout or "").lower()
+        except Exception:
+            return False
+
+    def clean_context_tabs(self, context):
+        """确保 context 仅保留主标签页，清理初始产生的冗余空白页"""
+        try:
+            if hasattr(context, "pages") and len(context.pages) > 1:
+                for p in list(context.pages[1:]):
+                    try:
+                        if not p.is_closed() and ("about:blank" in p.url or not p.url):
+                            p.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"[{self.name}] 清理冗余空白页异常: {e}")
+
     def create_login_context(self, p, platform_name):
         """
         创建登录用浏览器上下文 (统一入口，各平台 login_interactive 必须经此创建)。
-        1. 优先尝试使用本机 Edge 真实用户配置 (持久化上下文)：若系统 Edge 已关闭，可直接复用现有登录会话；
-        2. 若本机 Edge 正在运行 (Lock file Error 32)，自动平滑切换至各平台专属独立持久化环境 (data/browser_profiles/<platform>)，
-           专属独立目录绝不发生单例锁冲突，且具备完整指纹与持久化存储能力，彻底规避 Google BotGuard 拦截；
-        3. 返回 (browser, context)：持久化模式下 browser 为 None，关闭时调用 close_login_session(browser, context)。
+        1. 若本机 Edge 正在运行，为避免单例锁冲突 (Lock file Error 32) 以及在用户日常 Edge 中意外弹标签，
+           直接使用各平台专属独立持久化环境 (data/browser_profiles/<platform>)；
+        2. 若本机 Edge 未运行，优先尝试使用本机 Edge 真实用户配置 (持久化上下文)，复用已有会话；
+        3. 若出现异常，平滑回退至各平台专属独立持久化环境；
+        4. 返回 (browser, context)：持久化模式下 browser 为 None，关闭时调用 close_login_session(browser, context)。
         """
         browser, context = None, None
+        edge_running = self.is_edge_running()
         user_data_dir = self.get_edge_user_data_dir()
-        if user_data_dir:
+
+        if user_data_dir and not edge_running:
             try:
-                logger.info(f"[{platform_name}] 尝试使用本机 Edge 真实用户配置启动登录窗口...")
+                logger.info(f"[{platform_name}] 检测到本机 Edge 未运行，尝试使用本机 Edge 真实用户配置启动登录窗口...")
                 context = self.create_persistent_stealth_context(p, user_data_dir, headless=False)
                 logger.info(f"[{platform_name}] 成功使用系统 Edge 原生配置！")
             except Exception as e:
-                logger.info(f"[{platform_name}] 本机 Edge 正在运行/配置被锁定 ({e})，自动切换至专属独立持久化环境...")
+                err_msg = str(e).split("\n")[0]
+                logger.info(f"[{platform_name}] 本机 Edge 配置被锁定或启动异常 ({err_msg})，自动切换至专属独立持久化环境...")
                 context = None
+        elif edge_running:
+            logger.info(f"[{platform_name}] 本机 Edge 正在运行，为避免单例锁冲突与串扰，直接启用专属独立持久化环境...")
 
         if context is None:
             # 专属独立持久化环境：永不锁死，保留 Google 会话与真实指纹，通过 Google 校验
@@ -233,9 +268,13 @@ class BaseDispatcher(ABC):
             try:
                 context = self.create_persistent_stealth_context(p, independent_dir, headless=False)
             except Exception as e:
-                logger.warning(f"[{platform_name}] 专属持久化启动异常 ({e})，回退至纯净浏览器模式...")
+                err_msg = str(e).split("\n")[0]
+                logger.warning(f"[{platform_name}] 专属持久化启动异常 ({err_msg})，回退至纯净浏览器模式...")
                 browser = self.create_stealth_browser(p, headless=False)
                 context = browser.new_context()
+
+        if context is not None:
+            self.clean_context_tabs(context)
 
         return browser, context
 

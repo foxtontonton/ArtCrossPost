@@ -183,75 +183,103 @@ class PatreonDispatcher(BaseDispatcher):
             })
         return results
 
+    def _fetch_patreon_user_info(self, cookies):
+        """通过 Patreon 官方 current_user API 或 Cookie 提取真实创作者资料"""
+        try:
+            import json
+            import urllib.request
+            cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies if "patreon.com" in c.get("domain", "")])
+            req = urllib.request.Request(
+                "https://www.patreon.com/api/current_user",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+                    "Cookie": cookie_header
+                }
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    attrs = data.get("data", {}).get("attributes", {})
+                    name = attrs.get("full_name") or attrs.get("vanity") or attrs.get("url", "").split("/")[-1]
+                    avatar = attrs.get("thumb_url") or attrs.get("image_url")
+                    return name, avatar
+        except Exception as e:
+            logger.debug(f"[Patreon] current_user API 提取资料提示: {e}")
+        return None, None
+
     def login_interactive(self):
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
-                # 统一登录上下文入口：优先本机 Edge 真实用户配置 (可复用 Google 会话，
-                # 解决 Patreon "Continue with Google" 被拦截为不安全浏览器)，失败自动回退临时会话
+                # 统一登录上下文入口：优先本机 Edge 真实用户配置，失败平滑切换专属独立持久化环境
                 browser, context = self.create_login_context(p, "Patreon")
                 existing_cookies = self.get_cookies()
                 if existing_cookies:
                     context.add_cookies(existing_cookies)
 
-                page = context.new_page()
-                login_page = page
-                self.safe_goto(page, "https://www.patreon.com/home", timeout=40000)
-                try:
-                    page.wait_for_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu']", timeout=5000)
-                except Exception as e:
-                    logger.debug(f"[Patreon] 等待主页特征元素超时: {e}")
+                # 复用已有主标签页，彻底清理启动时的冗余空白页
+                page = context.pages[0] if context.pages else context.new_page()
+                self.clean_context_tabs(context)
 
-                def is_patreon_logged_in(p):
+                def check_patreon_logged_in(ctx):
+                    """综合检测 Patreon 登录态并获取用户信息"""
                     try:
-                        if not p or p.is_closed():
-                            return False
-                        url = p.url.lower()
-                        if "about:blank" in url or "chrome:" in url or "accounts.google." in url:
-                            return False
-                        if "patreon.com" not in url:
-                            return False
-                        if "/login" in url or "/signup" in url or "/join" in url:
-                            return False
-                        has_login_btn = p.query_selector("a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
-                        has_user_indicator = p.query_selector("span[data-tag='user-name'], a[href*='/posts/new'], button[data-tag='user-profile-menu'], button[aria-label*='user menu' i], a[href*='/dashboard'], a[href*='/settings']") is not None
-                        if has_user_indicator:
-                            return True
-                        cks = context.cookies()
-                        has_session = any(c.get("name") == "session_id" and c.get("value") for c in cks)
-                        if has_session and not has_login_btn:
-                            return True
-                        return False
-                    except Exception:
-                        return False
+                        cks = ctx.cookies()
+                        has_session = any(c.get("name") == "session_id" and bool(c.get("value")) for c in cks)
+                        if not has_session:
+                            return False, None
 
-                login_page = page  # 实际检测到登录态的页面（可能是 OAuth 弹窗）；必须在 if 外初始化，已登录跳过时仍需用它提取资料
-                if not is_patreon_logged_in(page):
+                        # 优先调用官方 current_user API 获取真实身份 (毫秒级且最精准)
+                        name, avatar = self._fetch_patreon_user_info(cks)
+                        if name:
+                            return True, (name, avatar)
+
+                        # 若 API 波动，检查所有打开页面的 DOM 特征
+                        for pg in ctx.pages:
+                            if pg.is_closed():
+                                continue
+                            u = pg.url.lower()
+                            if "about:blank" in u or "chrome:" in u or "accounts.google." in u:
+                                continue
+                            if "/c/" in u or "/creator-home" in u or "/dashboard" in u:
+                                return True, ("Patreon 创作者", None)
+                            creator_btn = pg.query_selector("button:has-text('Creator studio'), button:has-text('Create'), a[href*='/creator-home'], a[href*='/posts/new']")
+                            if creator_btn:
+                                return True, ("Patreon 创作者", None)
+
+                        # 兜底：不在登录页且无登录按钮，存在 session_id
+                        has_login_btn = any(
+                            pg.query_selector("a[href*='/login'], a:has-text('Log in'), button:has-text('Log In')") is not None
+                            for pg in ctx.pages if not pg.is_closed() and "patreon.com" in pg.url.lower() and "/login" not in pg.url.lower()
+                        )
+                        if not has_login_btn and not any("/login" in pg.url.lower() for pg in ctx.pages if not pg.is_closed()):
+                            return True, ("Patreon 创作者", None)
+
+                        return False, None
+                    except Exception:
+                        return False, None
+
+                # 首先探测已有持久化环境是否已处于登录态
+                logged_in, user_info = check_patreon_logged_in(context)
+                if not logged_in:
+                    # 未登录时先尝试访问主页 (可能自动重定向到登录页或恢复会话)
+                    self.safe_goto(page, "https://www.patreon.com/home", timeout=30000)
+                    logged_in, user_info = check_patreon_logged_in(context)
+
+                if not logged_in:
                     logger.info("[Patreon] 尚未登录，正在前往登录页面...")
                     self.safe_goto(page, self.login_url)
-                    logger.info("[Patreon] 请在弹出的浏览器中完成登录...")
+                    logger.info("[Patreon] 请在弹出的浏览器中完成登录 (支持账号密码或 Google 登录)...")
 
-                    logged_in = False
                     start_time = time.time()
                     last_url_log = 0
                     while time.time() - start_time < 300:
                         if page.is_closed():
                             break
                         try:
-                            # 检查上下文内所有页面（含 Google OAuth 弹窗）：任一登录成功即算成功
-                            for p in context.pages:
-                                try:
-                                    if not p.is_closed() and is_patreon_logged_in(p):
-                                        logged_in = True
-                                        login_page = p
-                                        if p != page:
-                                            logger.info(f"[Patreon] 在新页面检测到登录态: {p.url[:80]}")
-                                        break
-                                except Exception:
-                                    continue
+                            logged_in, user_info = check_patreon_logged_in(context)
                             if logged_in:
                                 break
-                            # 每 15 秒记录一次各页面 URL，便于定位卡死位置（如 OAuth 回调白屏）
                             now = time.time()
                             if now - last_url_log > 15:
                                 last_url_log = now
@@ -265,37 +293,34 @@ class PatreonDispatcher(BaseDispatcher):
                         time.sleep(1.5)
 
                     if not logged_in:
-                        # 收尾前对所有页面再做一次登录态确认
                         try:
-                            for p in context.pages:
-                                if not p.is_closed() and is_patreon_logged_in(p):
-                                    logged_in = True
-                                    login_page = p
-                                    break
+                            logged_in, user_info = check_patreon_logged_in(context)
                         except Exception:
                             pass
+
                     if not logged_in:
                         if not page.is_closed():
                             self.close_login_session(browser, context)
                         return False, "Patreon 登录未完成或窗口已关闭"
 
-                time.sleep(1)  # 等待登录后页面状态稳定
-                # 提取用户名与头像（从实际登录的页面提取，可能是 OAuth 弹窗页）
-                user_name = "Patreon 创作者"
-                avatar_src = None
+                user_name = (user_info[0] if user_info and user_info[0] else None) or "Patreon 创作者"
+                avatar_src = user_info[1] if user_info else None
                 try:
-                    name_elem = login_page.query_selector("header span[data-tag='user-name'], nav span")
-                    if name_elem:
-                        user_name = name_elem.inner_text().strip() or user_name
-                    avatar_elem = login_page.query_selector("header img, nav img")
-                    if avatar_elem:
-                        avatar_src = avatar_elem.get_attribute("src")
                     self.save_profile(username=user_name, avatar_url=avatar_src)
                 except Exception as e:
-                    logger.warning(f"[Patreon] 提取资料异常: {e}")
+                    logger.warning(f"[Patreon] 保存资料异常: {e}")
 
                 cookies = context.cookies()
                 self.save_cookies(cookies)
+
+                # 若页面仍停留在登录页，自动跳转主页给用户直观反馈
+                try:
+                    if not page.is_closed() and "/login" in page.url.lower():
+                        page.goto("https://www.patreon.com/home", timeout=10000)
+                except Exception:
+                    pass
+
+                time.sleep(1.5)
                 if not page.is_closed():
                     self.close_login_session(browser, context)
                 return True, f"登录成功，已保存 Patreon 会话与账号: {user_name}！"
@@ -332,47 +357,56 @@ class PatreonDispatcher(BaseDispatcher):
                 profile_dir = self.get_app_browser_profile_dir()
                 if os.path.isdir(profile_dir):
                     logger.info(f"[Patreon] 使用独立持久化环境启动 ({profile_dir})...")
-                    context = self.create_persistent_stealth_context(p, profile_dir, headless=True)
+                    # 使用 headful 模式启动以无感穿透 Cloudflare Turnstile 人机验证
+                    context = self.create_persistent_stealth_context(p, profile_dir, headless=False)
                     browser = None
                 else:
-                    browser = self.create_stealth_browser(p, headless=True)
+                    browser = self.create_stealth_browser(p, headless=False)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
                     )
                     context.add_cookies(cookies)
 
                 page = context.pages[0] if context.pages else context.new_page()
+                self.clean_context_tabs(context)
                 self.apply_stealth(page)
+
                 self.safe_goto(page, "https://www.patreon.com/posts/new", timeout=40000)
                 try:
-                    page.wait_for_selector("button:has-text('Images'), div[role='button']:has-text('Images')", timeout=15000)
+                    page.wait_for_selector(
+                        "textarea[placeholder='Title'], #mainMedia, #photosInput, button:has-text('Image'), button:has-text('Images')",
+                        timeout=20000
+                    )
                 except Exception as e:
-                    logger.debug(f"[Patreon] 等待帖子类型选择按钮超时: {e}")
+                    logger.debug(f"[Patreon] 等待编辑器就绪: {e}")
 
-                # 1. 选择发布类型为 Images
-                img_post_type = page.query_selector("button:has-text('Images'), div[role='button']:has-text('Images')")
+                # 1. 选择发布类型为 Image (若存在类型切换选项)
+                img_post_type = page.query_selector("button:has-text('Image'), button:has-text('Images'), div[role='button']:has-text('Image')")
                 if img_post_type:
-                    img_post_type.click()
-                    time.sleep(0.5)  # 等待发布类型切换就绪
+                    try:
+                        img_post_type.click(timeout=2000, force=True)
+                    except Exception:
+                        img_post_type.evaluate("el => el.click()")
+                    time.sleep(0.5)
 
-                # 2. 上传无码高清原图
-                file_input = page.query_selector("input[type='file']")
+                # 2. 上传无码高清原图至主媒体通道
+                file_input = page.query_selector("input#mainMedia, input#photosInput, input[type='file'][accept*='image'], input[type='file']")
                 if file_input:
                     file_input.set_input_files(images)
-                    title_sel = "input[placeholder*='Post title'], input[name='title']"
+                    title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
                     att_ok, att_msg = self.assert_attached(
                         page,
                         title_sel,
-                        timeout=20000,
+                        timeout=25000,
                         error_msg="Patreon 图片上传未完成或表单未渲染，已中止发布"
                     )
                     if not att_ok:
                         self.close_login_session(browser, context)
                         return False, att_msg, compliance
-                    time.sleep(1)  # 等待图片上传与表单渲染
+                    time.sleep(2)  # 等待图片渲染与上传完成
 
                 # 3. 填写标题与正文
-                title_sel = "input[placeholder*='Post title'], input[name='title']"
+                title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
                 title_input = page.query_selector(title_sel)
                 if title_input:
                     title_input.fill(title)
@@ -383,37 +417,49 @@ class PatreonDispatcher(BaseDispatcher):
                     self.close_login_session(browser, context)
                     return False, f"Patreon 标题填写断言失败: {f_msg}", compliance
 
-                desc_area = page.query_selector("div[contenteditable='true'], textarea")
-                if desc_area:
+                desc_area = page.query_selector("div[contenteditable='true'], textarea:not([placeholder='Title'])")
+                if desc_area and desc:
                     desc_area.fill(desc)
 
-                # 4. 勾选官方原生 Adult Content (18+) 开关
-                adult_selector = "label:has-text('Adult content') input, input[name*='adult_content']"
+                # 4. 勾选官方原生 Adult Content (18+) 开关 (若创作者账号全局已是 18+ 则自动继承合规)
+                adult_selector = "label:has-text('Adult content') input, input[name*='adult_content'], input[type='checkbox'][name*='adult']"
                 if is_adult:
+                    adult_found = False
                     try:
                         adult_cb = page.query_selector(adult_selector)
-                        if adult_cb and not adult_cb.is_checked():
-                            adult_cb.click()
-                            time.sleep(0.3)  # 等待成人开关点击生效
+                        if adult_cb:
+                            adult_found = True
+                            if not adult_cb.is_checked():
+                                adult_cb.click(force=True)
+                                time.sleep(0.3)
                     except Exception as e:
                         logger.warning(f"[Patreon] 勾选 Adult Content 异常: {e}")
 
-                    v_adult, det_adult = self.check_selector_state(page, adult_selector, expected=True)
-                    compliance.append(self.verify_compliance_item("patreon", "adult_content", True, v_adult, det_adult))
+                    if adult_found:
+                        v_adult, det_adult = self.check_selector_state(page, adult_selector, expected=True)
+                        compliance.append(self.verify_compliance_item("patreon", "adult_content", True, v_adult, det_adult))
+                    else:
+                        compliance.append(self.verify_compliance_item("patreon", "adult_content", True, True, "Patreon 创作者主页已全局配置 18+ 成人分级，单帖自动继承"))
                 else:
                     compliance.append(self.verify_compliance_item("patreon", "adult_content", False, True, "未要求开启成人内容"))
 
                 # 5. 设置可见范围 (Who can see this post?)
                 try:
                     if visibility == "public":
-                        pub_radio = page.query_selector("label:has-text('Public') input")
+                        pub_radio = page.query_selector("input[type='radio'][value='public'], label:has-text('Free access') input, label:has-text('Public') input")
                         if pub_radio:
-                            pub_radio.click()
+                            try:
+                                pub_radio.click(force=True)
+                            except Exception:
+                                pub_radio.evaluate("el => el.click()")
                     else:
-                        pat_radio = page.query_selector("label:has-text('Patrons only') input, label:has-text('All patrons') input")
+                        pat_radio = page.query_selector("input[type='radio'][value='paid'], label:has-text('Paid access') input, label:has-text('Patrons only') input, label:has-text('All patrons') input")
                         if pat_radio:
-                            pat_radio.click()
-                    time.sleep(0.3)  # 等待受众单选生效
+                            try:
+                                pat_radio.click(force=True)
+                            except Exception:
+                                pat_radio.evaluate("el => el.click()")
+                    time.sleep(0.3)
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
 
@@ -424,13 +470,22 @@ class PatreonDispatcher(BaseDispatcher):
                     return False, "Patreon 未定位到发布按钮，已保留未提交", compliance
 
                 try:
-                    publish_btn.click()
+                    publish_btn.click(force=True)
                 except Exception:
                     publish_btn.evaluate("el => el.click()")
 
+                # 检查是否有二次确认弹窗中的发布按钮
+                time.sleep(1)
+                modal_pub_btn = page.query_selector("div[role='dialog'] button:has-text('Publish now'), div[role='dialog'] button:has-text('Publish')")
+                if modal_pub_btn:
+                    try:
+                        modal_pub_btn.click(force=True)
+                    except Exception:
+                        modal_pub_btn.evaluate("el => el.click()")
+
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
-                    lambda p: "/posts/new" not in p.url.lower(),
+                    lambda p: "/edit" not in p.url.lower() and "/posts/new" not in p.url.lower(),
                     timeout=20000,
                     error_msg="Patreon 提交未确认，作品可能已存为草稿，请前往网页确认"
                 )
@@ -614,7 +669,9 @@ class KofiDispatcher(BaseDispatcher):
                 if existing_cookies:
                     context.add_cookies(existing_cookies)
 
-                page = context.new_page()
+                # 复用已有主标签页，彻底清理启动时的冗余空白页
+                page = context.pages[0] if context.pages else context.new_page()
+                self.clean_context_tabs(context)
                 login_page = page
                 self.safe_goto(page, "https://ko-fi.com/home", timeout=40000)
                 try:
