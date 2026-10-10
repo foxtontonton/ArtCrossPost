@@ -16,9 +16,9 @@ except ImportError:
     from ..logger import get_logger
 
 try:
-    from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads
+    from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads, format_x_full_text
 except ImportError:
-    from ..x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads
+    from ..x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads, format_x_full_text
 
 logger = get_logger("XTwitter")
 
@@ -181,7 +181,9 @@ class XTwitterDispatcher(BaseDispatcher):
                 if existing_cookies:
                     context.add_cookies(existing_cookies)
 
-                page = context.new_page()
+                # 复用已有主标签页，彻底清理启动时的冗余空白页
+                page = context.pages[0] if context.pages else context.new_page()
+                self.clean_context_tabs(context)
                 self.apply_stealth(page)
 
                 # 先访问主页检测是否已处于登录态
@@ -264,13 +266,14 @@ class XTwitterDispatcher(BaseDispatcher):
 
         title = payload.get("title", "")
         desc = payload.get("description", "")
+        tags = payload.get("tags", [])
         is_sensitive = payload.get("platform_options", {}).get("x_sensitive", payload.get("is_nsfw", False))
         is_ai = payload.get("platform_options", {}).get("x_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
         is_premium = payload.get("platform_options", {}).get("x_premium", False)
         char_limit = 25000 if is_premium else payload.get("platform_options", {}).get("x_char_limit", 280)
         over_limit_action = payload.get("platform_options", {}).get("x_over_limit_action", "truncate")
 
-        full_text = f"{title}\n\n{desc}".strip() if title else desc.strip()
+        full_text = format_x_full_text(title, desc, tags)
         current_count = calculate_x_char_count(full_text)
 
         truncated = False
@@ -422,7 +425,10 @@ class XTwitterDispatcher(BaseDispatcher):
                         )
                         if disc_btns:
                             # 选取发帖栏内的披露按钮
-                            disc_btns[-1].click()
+                            try:
+                                disc_btns[-1].click(timeout=2000, force=True)
+                            except Exception:
+                                disc_btns[-1].evaluate("el => el.click()")
                             time.sleep(0.5)  # 等待披露设置弹窗动画
                             dlgs = page.query_selector_all("div[role='dialog']")
                             if dlgs:
@@ -446,7 +452,10 @@ class XTwitterDispatcher(BaseDispatcher):
                                 # 点击完成按钮返回发帖框
                                 done_btn = dlg.query_selector("button:has-text('完成'), button:has-text('Done')")
                                 if done_btn:
-                                    done_btn.click()
+                                    try:
+                                        done_btn.click(timeout=2000, force=True)
+                                    except Exception:
+                                        done_btn.evaluate("el => el.click()")
                                     time.sleep(0.5)  # 等待模态框关闭动画
                         else:
                             if is_any_gif:
@@ -479,14 +488,20 @@ class XTwitterDispatcher(BaseDispatcher):
                                 "button[aria-label*='编辑媒体'], button[aria-label*='Edit media'], button[aria-label*='编辑'], button[aria-label*='Edit'], div[data-testid='attachments'] button:has-text('编辑')"
                             )
                             if edit_btn:
-                                edit_btn.click()
+                                try:
+                                    edit_btn.click(timeout=2000, force=True)
+                                except Exception:
+                                    edit_btn.evaluate("el => el.click()")
                                 time.sleep(0.6)  # 等待媒体编辑弹窗展开
                                 edit_dialog = page.query_selector_all("div[role='dialog']")[-1]
 
                                 # 切换到编辑弹窗内部的第3个标签页: 内容警告
                                 tabs = edit_dialog.query_selector_all("[role='tab']")
                                 if len(tabs) >= 3:
-                                    tabs[2].click()
+                                    try:
+                                        tabs[2].click(timeout=2000, force=True)
+                                    except Exception:
+                                        tabs[2].evaluate("el => el.click()")
                                     time.sleep(0.4)  # 等待标签页切换完成
 
                                     # 4.1 勾选裸露复选框 (Nudity)
@@ -514,7 +529,10 @@ class XTwitterDispatcher(BaseDispatcher):
                                 # 点击保存 (endEditingButton) 确保关闭媒体弹窗
                                 save_btn = edit_dialog.query_selector("div[role='dialog'] button:has-text('保存'), div[role='dialog'] button:has-text('Save'), button[data-testid='endEditingButton']")
                                 if save_btn:
-                                    save_btn.click()
+                                    try:
+                                        save_btn.click(timeout=2000, force=True)
+                                    except Exception:
+                                        save_btn.evaluate("el => el.click()")
                                     time.sleep(0.8)  # 等待媒体弹窗保存并退出
                                 logger.info("[X] 媒体设置已保存并退出编辑框")
                         except Exception as e:

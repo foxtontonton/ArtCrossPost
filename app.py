@@ -44,7 +44,7 @@ from config import load_config, save_config, load_window_state, save_window_stat
 from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
-from x_text_utils import calculate_x_char_count
+from x_text_utils import calculate_x_char_count, format_x_full_text
 
 THEMES = {
     "pure_dark": {"name": "纯净极黑", "bg": "#121218", "card": "#181822", "border": "#2e2e3e", "accent": "#4f46e5", "accent_hover": "#6366f1"},
@@ -834,8 +834,11 @@ class UnifiedPreviewCanvas(QLabel):
                     color_hex = self._watermark_info.get("color_hex", "#ffffff")
                     enable_stroke = self._watermark_info.get("stroke", True)
 
-                    scaled_font_sz = max(10, int(base_font_size * scale_y))
-                    font = QFont(font_family, scaled_font_sz, QFont.Bold if is_bold else QFont.Normal)
+                    scaled_px = max(1, int(round(base_font_size * scale_y)))
+                    font = QFont(font_family)
+                    font.setPixelSize(scaled_px)
+                    if is_bold:
+                        font.setBold(True)
                     painter.setFont(font)
                     metrics = painter.fontMetrics()
                     tw = metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)
@@ -853,7 +856,7 @@ class UnifiedPreviewCanvas(QLabel):
                         step_x = max(tw + int(100 * scale_x), int(180 * scale_x))
                         step_y = max(int((ascent + descent) * 2.8), int(90 * scale_y))
 
-                        stroke_w = max(2, int(scaled_font_sz / 9)) if enable_stroke else 0
+                        stroke_w = max(1, int(round(scaled_px / 18))) if enable_stroke else 0
                         stroke_pen = QPen(QColor(0, 0, 0, int(opacity * 220)), stroke_w) if enable_stroke else None
 
                         row_idx = 0
@@ -875,8 +878,10 @@ class UnifiedPreviewCanvas(QLabel):
 
                         painter.restore()
                     else:
-                        margin_x = int(24 * scale_x)
-                        margin_y = int(24 * scale_y)
+                        orig_margin_x = max(24, int(orig_w * 0.028))
+                        orig_margin_y = max(24, int(orig_h * 0.028))
+                        margin_x = max(1, int(orig_margin_x * scale_x))
+                        margin_y = max(1, int(orig_margin_y * scale_y))
 
                         if pos == "bottom_right":
                             tx = ox + dw - tw - margin_x
@@ -904,7 +909,7 @@ class UnifiedPreviewCanvas(QLabel):
                         path.addText(tx, ty, font, text)
 
                         if enable_stroke:
-                            stroke_w = max(2, int(scaled_font_sz / 9))
+                            stroke_w = max(1, int(round(scaled_px / 18)))
                             painter.strokePath(path, QPen(QColor(0, 0, 0, int(opacity * 220)), stroke_w))
 
                         painter.fillPath(path, QBrush(fill_color))
@@ -1121,12 +1126,12 @@ class NotificationBar(QFrame):
         self.msg_lbl.setText("就绪 - 等待操作")
 
 
-def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=9.5):
+def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     """
     单通道无码无水印 GIF 原图专用优化器:
     保留原始帧率与循环配置，在不添加任何打码/水印（保持赞助商原图纯净度）的前提下，
     通过自适应调色板降级 (192 -> 128 -> 96 色) 与等比分辨率自适应缩放，
-    严格将体积压缩至 max_limit_mb 以内 (如 Ko-fi 9.5MB 门禁)。
+    严格将体积压缩至 max_limit_mb 以内 (如 Ko-fi 3.8MB 动图播放门禁，超 4MB 会被 Ko-fi 降级为静态图)。
     若已达极限仍超标，抛出 RuntimeError 触发发布门禁中止，杜绝静默上传损坏/降级素材。
     """
     from PIL import ImageSequence
@@ -1261,16 +1266,16 @@ class PublishThread(QThread):
                 compress_failed = False
                 for k_img in disp_images:
                     kp = Path(k_img)
-                    if kp.suffix.lower() == ".gif" and kp.exists() and kp.stat().st_size > 10 * 1024 * 1024:
+                    if kp.suffix.lower() == ".gif" and kp.exists() and kp.stat().st_size > 4.0 * 1024 * 1024:
                         orig_bytes = kp.stat().st_size
                         orig_mb = orig_bytes / (1024 * 1024)
-                        logger.info(f"[Pre-publish Gate] [Ko-fi] 门禁捕获 GIF 超限 ({orig_mb:.2f}MB > 10MB)，触发无码 GIF 优化器 (目标 ≤ 9.5MB)...")
-                        self.progress_signal.emit(10, f"Ko-fi 动图超限 ({orig_mb:.2f}MB)，正在优化至 9.5MB 以内...")
+                        logger.info(f"[Pre-publish Gate] [Ko-fi] 门禁捕获 GIF 超出动效播放上限 ({orig_mb:.2f}MB > 4.0MB)，触发无码 GIF 优化器 (目标 ≤ 3.8MB)...")
+                        self.progress_signal.emit(10, f"Ko-fi 动图超出播放限制 ({orig_mb:.2f}MB)，正在优化至 3.8MB 以内...")
                         k_out = CACHE_DIR / f"kofi_gate_opt_{kp.stem}.gif"
                         try:
-                            opt_res = optimize_raw_gif(kp, k_out, max_limit_mb=9.5)
+                            opt_res = optimize_raw_gif(kp, k_out, max_limit_mb=3.8)
                             new_mb = Path(opt_res).stat().st_size / (1024 * 1024)
-                            logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规放行)")
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 动效优化完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 3.8MB，合规放行)")
                             kofi_resolved.append(str(opt_res))
                         except RuntimeError as e:
                             err_msg = f"Ko-fi 动图压缩超限失败: {e}"
@@ -2879,6 +2884,7 @@ class MainWindow(QMainWindow):
         self.tags_input = SmartTagEdit()
         self.tags_input.setPlaceholderText("通用标签 (输入空格、逗号或回车自动识别添加逗号，支持 # 识别)...")
         self.tags_input.setMinimumHeight(70)
+        self.tags_input.textChanged.connect(self._update_x_char_counter)
         tags_layout.addWidget(self.tags_input)
         meta_layout.addLayout(tags_layout)
 
@@ -3848,7 +3854,8 @@ class MainWindow(QMainWindow):
             return
         title = self.title_input.text().strip()
         desc = self.desc_input.toPlainText().strip()
-        full_text = f"{title}\n\n{desc}".strip() if title else desc.strip()
+        tags = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+        full_text = format_x_full_text(title, desc, tags)
         count = calculate_x_char_count(full_text)
         limit = self._get_x_char_limit()
 
@@ -4193,6 +4200,8 @@ class MainWindow(QMainWindow):
             censor_style = censor_params.get("style", "black_bar")
 
         wm_enabled = wm_params and wm_params.get("enabled") and bool(wm_params.get("text"))
+        if wm_enabled:
+            logger.info(f"[GIF 渲染] 正在向动图各帧压制水印: 文本='{wm_params.get('text')}', 字号={wm_params.get('font_size')}px, 字体='{wm_params.get('font_name')}'")
 
         out_frames = []
         for f_idx, frame in enumerate(ImageSequence.Iterator(im)):
@@ -4500,6 +4509,11 @@ class MainWindow(QMainWindow):
 
         self.notify("正在准备全平台素材 (按各平台打码及体积配置分别渲染处理)...", level="info")
 
+        if wm_enabled and apply_wm_publish and wm_text:
+            logger.info(f"[发布准备] 文字水印已就绪 (连接至输出端): 文本='{wm_text}', 字体='{wm_font}', 字号={wm_size}px, 位置={wm_pos}, 透明度={int(wm_opacity*100)}%")
+        else:
+            logger.info(f"[发布准备] 文字水印未启用或未勾选同步发布: enabled={wm_enabled}, apply_publish={apply_wm_publish}, has_text={bool(wm_text)}")
+
         for idx, p in enumerate(self.image_paths):
             is_gif = p.lower().endswith(".gif")
             ext = "gif" if is_gif else "png"
@@ -4587,12 +4601,12 @@ class MainWindow(QMainWindow):
                 else:
                     patreon_images.append(str(p))
 
-                # 4. Ko-fi 动图 (严格 ≤ 9.5MB 门禁)
+                # 4. Ko-fi 动图 (严格 ≤ 3.8MB 门禁，保障官方动效播放)
                 if is_kofi_selected:
                     if is_kofi_censor:
                         kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_censor.gif"
                         try:
-                            self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=None, max_limit_mb=9.5)
+                            self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=None, max_limit_mb=3.8)
                             kofi_images.append(str(kofi_out_path))
                         except RuntimeError as e:
                             self.notify(f"Ko-fi 打码动图压缩超限失败: {e}", level="error")
@@ -4600,14 +4614,14 @@ class MainWindow(QMainWindow):
                             return
                     else:
                         p_stat = Path(p).stat().st_size
-                        if p_stat > 10 * 1024 * 1024:
+                        if p_stat > 4.0 * 1024 * 1024:
                             orig_mb = p_stat / (1024 * 1024)
-                            logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出 10MB 门禁限制 ({orig_mb:.2f}MB)，启动无码 GIF 优化器 (目标 ≤ 9.5MB)...")
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出动效上限 ({orig_mb:.2f}MB > 4.0MB)，启动无码 GIF 优化器 (目标 ≤ 3.8MB)...")
                             kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
                             try:
-                                optimize_raw_gif(p, kofi_out_path, max_limit_mb=9.5)
+                                optimize_raw_gif(p, kofi_out_path, max_limit_mb=3.8)
                                 new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
-                                logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 超限无码压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 9.5MB，合规就绪)")
+                                logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 动效压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 3.8MB，合规就绪)")
                                 kofi_images.append(str(kofi_out_path))
                             except RuntimeError as e:
                                 self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
@@ -4762,7 +4776,8 @@ class MainWindow(QMainWindow):
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         title_val = self.title_input.text().strip()
         desc_val = self.desc_input.toPlainText().strip()
-        full_x_text = f"{title_val}\n\n{desc_val}".strip() if title_val else desc_val.strip()
+        tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+        full_x_text = format_x_full_text(title_val, desc_val, tags_val)
         x_count = calculate_x_char_count(full_x_text)
         x_limit = platform_options.get("x_char_limit", 280)
 
@@ -4798,7 +4813,7 @@ class MainWindow(QMainWindow):
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
             "x_images": x_images,               # X (Twitter) 专属图 (按 X 打码选项与体积限制)
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
-            "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤9.5MB 限制)
+            "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
             "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
