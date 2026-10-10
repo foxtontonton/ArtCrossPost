@@ -16,7 +16,7 @@ except ImportError:
 # 必须在导入 cv2 / PyQt5 之前预先导入 onnxruntime，
 # 彻底解决 Windows 下 OpenCV 与 ONNX Runtime 的 DLL 初始化例程冲突
 try:
-    pass
+    import onnxruntime  # noqa: F401
 except Exception as e:
     logger.debug(f"预导入 onnxruntime 提示: {e}")
 
