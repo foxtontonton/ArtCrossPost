@@ -357,11 +357,10 @@ class PatreonDispatcher(BaseDispatcher):
                 profile_dir = self.get_app_browser_profile_dir()
                 if os.path.isdir(profile_dir):
                     logger.info(f"[Patreon] 使用独立持久化环境启动 ({profile_dir})...")
-                    # 使用 headful 模式启动以无感穿透 Cloudflare Turnstile 人机验证
-                    context = self.create_persistent_stealth_context(p, profile_dir, headless=False)
+                    context = self.create_persistent_stealth_context(p, profile_dir, headless=True)
                     browser = None
                 else:
-                    browser = self.create_stealth_browser(p, headless=False)
+                    browser = self.create_stealth_browser(p, headless=True)
                     context = browser.new_context(
                         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
                     )
@@ -389,8 +388,8 @@ class PatreonDispatcher(BaseDispatcher):
                         img_post_type.evaluate("el => el.click()")
                     time.sleep(0.5)
 
-                # 2. 上传无码高清原图至主媒体通道
-                file_input = page.query_selector("input#mainMedia, input#photosInput, input[type='file'][accept*='image'], input[type='file']")
+                # 2. 上传无码高清原图至主媒体通道 (优先 photosInput)
+                file_input = page.query_selector("input#photosInput, input#mainMedia, input[type='file'][accept*='image'], input[type='file']")
                 if file_input:
                     file_input.set_input_files(images)
                     title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
@@ -403,14 +402,16 @@ class PatreonDispatcher(BaseDispatcher):
                     if not att_ok:
                         self.close_login_session(browser, context)
                         return False, att_msg, compliance
-                    time.sleep(2)  # 等待图片渲染与上传完成
+                    time.sleep(3)  # 等待图片渲染与上传完成
 
                 # 3. 填写标题与正文
                 title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
                 title_input = page.query_selector(title_sel)
                 if title_input:
+                    title_input.click()
                     title_input.fill(title)
-                    time.sleep(0.3)
+                    title_input.press("Enter")
+                    time.sleep(0.5)
 
                 f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
                 if not f_ok:
@@ -463,19 +464,33 @@ class PatreonDispatcher(BaseDispatcher):
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
 
-                # 6. 点击发布
-                publish_btn = page.query_selector("button:has-text('Publish now'), button:has-text('Publish')")
+                # 6. 等待发布按钮激活并提交 (Patreon React 组件在素材加载后异步激活发布按钮)
+                pub_sel = "[data-tag='make-a-post-action-publish'], button:has-text('Publish now'), button:has-text('Publish')"
+                publish_btn = None
+                wait_pub_start = time.time()
+                while time.time() - wait_pub_start < 30:
+                    btn = page.query_selector(pub_sel)
+                    if btn:
+                        is_dis = btn.is_disabled() or btn.get_attribute("aria-disabled") == "true" or "isInactive" in (btn.get_attribute("class") or "")
+                        if not is_dis:
+                            publish_btn = btn
+                            break
+                    time.sleep(1.0)
+
+                if not publish_btn:
+                    publish_btn = page.query_selector(pub_sel)
+
                 if not publish_btn:
                     self.close_login_session(browser, context)
                     return False, "Patreon 未定位到发布按钮，已保留未提交", compliance
 
                 try:
-                    publish_btn.click(force=True)
+                    publish_btn.click()
                 except Exception:
                     publish_btn.evaluate("el => el.click()")
 
                 # 检查是否有二次确认弹窗中的发布按钮
-                time.sleep(1)
+                time.sleep(1.5)
                 modal_pub_btn = page.query_selector("div[role='dialog'] button:has-text('Publish now'), div[role='dialog'] button:has-text('Publish')")
                 if modal_pub_btn:
                     try:
@@ -485,8 +500,8 @@ class PatreonDispatcher(BaseDispatcher):
 
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
-                    lambda p: "/edit" not in p.url.lower() and "/posts/new" not in p.url.lower(),
-                    timeout=20000,
+                    lambda p: ("/posts/" in p.url.lower() and "/edit" not in p.url.lower() and "/posts/new" not in p.url.lower()) or "/home" in p.url.lower() or "/creator-home" in p.url.lower(),
+                    timeout=25000,
                     error_msg="Patreon 提交未确认，作品可能已存为草稿，请前往网页确认"
                 )
                 self.close_login_session(browser, context)
@@ -834,32 +849,43 @@ class KofiDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://ko-fi.com/manage/mypage", timeout=40000)
                 page.wait_for_timeout(2000)
 
-                # 1. 打开 Add Image 弹窗 (优先调用官方前端 JS 实例，若无则点击 Add image 按钮)
-                opened = page.evaluate("""() => {
-                    if (window.galleryItemUploadApp && typeof window.galleryItemUploadApp.openAddImage === 'function') {
-                        window.galleryItemUploadApp.openAddImage();
-                        return true;
-                    }
-                    return false;
-                }""")
-                if not opened:
-                    add_btn = page.query_selector("a[onclick*='openAddImage'], button[onclick*='openAddImage'], button:has-text('Add image'), a:has-text('Add something')")
-                    if add_btn:
-                        add_btn.click()
-                        time.sleep(1)
-                        img_opt = page.query_selector("a[onclick*='openAddImage'], a:has-text('Image')")
-                        if img_opt:
-                            img_opt.click()
+                # 1. 打开 Add Image 弹窗 (优先查找可视 Image 按钮，其次调用 openAddImage)
+                modal_opened = False
+                for b in page.query_selector_all("button, a, div[role='button']"):
+                    if b.is_visible() and b.inner_text().strip() == "Image":
+                        try:
+                            b.click()
+                            modal_opened = True
+                            break
+                        except Exception:
+                            pass
+
+                if not modal_opened:
+                    opened = page.evaluate("""() => {
+                        if (window.galleryItemUploadApp && typeof window.galleryItemUploadApp.openAddImage === 'function') {
+                            window.galleryItemUploadApp.openAddImage();
+                            return true;
+                        }
+                        return false;
+                    }""")
+                    if not opened:
+                        add_btn = page.query_selector("a[onclick*='openAddImage'], button[onclick*='openAddImage'], button:has-text('Add image'), a:has-text('Add something')")
+                        if add_btn:
+                            add_btn.click()
+                            time.sleep(1)
+                            img_opt = page.query_selector("a[onclick*='openAddImage'], a:has-text('Image')")
+                            if img_opt:
+                                img_opt.click()
 
                 try:
                     page.wait_for_selector("#postImageTitle, #uploadModal", timeout=15000)
                 except Exception as e:
                     logger.debug(f"[Ko-fi] 等待上传弹窗渲染超时: {e}")
 
-                # 2. 上传无码原图至 Dropzone
-                file_input = page.query_selector("#uploadModal input[type='file'], #multi-image-uploader-wrapper input[type='file'], input[type='file'][accept*='jpeg'], input[type='file'][accept*='gif']")
+                # 2. 上传无码原图至 Dropzone (精准匹配画廊发帖专用的 .dz-hidden-input)
+                file_input = page.query_selector("input.dz-hidden-input[accept*='.gif'], input.dz-hidden-input[accept*='.png'], input.dz-hidden-input")
                 if not file_input:
-                    file_input = page.query_selector("input[type='file']")
+                    file_input = page.query_selector("#uploadModal input[type='file'], input[type='file']")
                 if file_input:
                     file_input.set_input_files(images[0])
                     att_ok, att_msg = self.assert_attached(
@@ -871,7 +897,7 @@ class KofiDispatcher(BaseDispatcher):
                     if not att_ok:
                         self.close_login_session(browser, context)
                         return False, att_msg, compliance
-                    time.sleep(2)  # 等待图片在 Dropzone 挂载与缩略图生成
+                    time.sleep(3)  # 等待图片在 Dropzone 挂载与缩略图生成
 
                 # 3. 填写标题与描述
                 title_sel = "#postImageTitle"
@@ -922,7 +948,7 @@ class KofiDispatcher(BaseDispatcher):
 
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
-                    lambda p: p.query_selector("#uploadModal[style*='display: none']") is not None or p.query_selector("#uploadModal") is None or p.query_selector("div.toast, div.alert-success") is not None,
+                    lambda p: p.query_selector("#uploadModal[style*='display: none']") is not None or (p.query_selector("#uploadModal") and "in" not in (p.query_selector("#uploadModal").get_attribute("class") or "")) or p.query_selector("div.toast, div.alert-success") is not None,
                     timeout=25000,
                     error_msg="Ko-fi 提交超时未关闭发布窗口，作品可能已存为草稿，请前往网页确认"
                 )

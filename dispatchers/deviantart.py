@@ -710,18 +710,26 @@ class DeviantArtDispatcher(BaseDispatcher):
                     if err_txt:
                         logger.warning(f"[DeviantArt] 点击提交后捕获到表单拦截提示: {err_txt}")
 
-                # 真正的成功判定条件 (严格要求进入 /art/ 展示页或官方 Success 提示，严禁将模态框关闭误判为成功)
                 def is_da_submitted(p):
-                    curr_u = p.url.lower()
-                    # 核心成功判定 1: 页面 URL 成功跳转至正式作品展示页 (/art/ 或 /deviation/)
-                    if "/art/" in curr_u or "/deviation/" in curr_u:
-                        return True
-                    # 核心成功判定 2: 官方发布成功提示标识 (Toast 或 成功展示页)
-                    success_indicator = p.query_selector(
-                        "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
-                    )
-                    if success_indicator:
-                        return True
+                    try:
+                        curr_u = p.url.lower()
+                        # 核心成功判定 1: 页面 URL 成功跳转至正式作品展示页 (/art/ 或 /deviation/)
+                        if "/art/" in curr_u or "/deviation/" in curr_u:
+                            return True
+                        # 核心成功判定 2: 官方发布成功提示标识 (Toast 或 成功展示页)
+                        success_indicator = p.query_selector(
+                            "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
+                        )
+                        if success_indicator:
+                            return True
+                    except Exception as e_chk:
+                        logger.debug(f"[DeviantArt] 提交状态探测异常 (通常处于页面跳转瞬态): {e_chk}")
+                        try:
+                            curr_u = p.url.lower()
+                            if "/art/" in curr_u or "/deviation/" in curr_u:
+                                return True
+                        except Exception:
+                            pass
                     return False
 
                 # 阶段 1：首轮提交后 8 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
