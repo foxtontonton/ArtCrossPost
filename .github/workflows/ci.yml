@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff pytest numpy opencv-python-headless Pillow
+          pip install ruff pytest numpy opencv-python-headless Pillow PyQt5
 
       - name: Run Ruff Lint Checks
         run: |
@@ -31,6 +31,7 @@ jobs:
         run: |
           python -m py_compile app.py config.py censor_engine.py watermark_engine.py diagnostics.py logger.py x_text_utils.py make_release_zip.py
           python -m py_compile dispatchers/base.py dispatchers/deviantart.py dispatchers/monetization.py dispatchers/x_twitter.py dispatchers/__init__.py
+          python -m py_compile tests/test_x_text_utils.py tests/test_censor_engine.py tests/test_gif_optimizer.py tests/__init__.py
 
       - name: Run Unit Tests
         run: |

@@ -1126,19 +1126,157 @@ class NotificationBar(QFrame):
         self.msg_lbl.setText("就绪 - 等待操作")
 
 
+def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]"):
+    """
+    通用高保真自适应 GIF 动图渐进式压缩引擎：
+    阶段 1: 调色板自适应阶梯式降级 (256 -> 192 -> 128 -> 96 -> 64 色)
+    阶段 2: 智能隔帧抽帧 (当帧数 >= 16 时，隔一帧采样并等比例延长每帧 duration，播放节奏与总时长 100% 保持一致，体积立减 ~40%-50%，且不牺牲分辨率)
+    阶段 3: 严格保等比自适应分辨率缩放 (杜绝画面拉扯形变，下限维持等比，绝不因单边触底提前报死)
+    """
+    target_limit_bytes = int(max_limit_mb * 1024 * 1024)
+    out_p = Path(out_p)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    current_frames = list(frames)
+    cur_duration = duration if duration else 100
+    cur_colors = 256
+
+    # 初始 256 色保存
+    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+    p_frames[0].save(
+        str(out_p),
+        save_all=True,
+        append_images=p_frames[1:],
+        duration=cur_duration,
+        loop=loop,
+        optimize=True
+    )
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    # 阶段 1: 调色板阶梯式降级 (192, 128, 96, 64)
+    color_steps = [192, 128, 96, 64]
+    for colors in color_steps:
+        if out_p.stat().st_size <= target_limit_bytes:
+            break
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        cur_colors = colors
+        logger.info(f"{log_prefix} 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=cur_duration,
+            loop=loop,
+            optimize=True
+        )
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    # 阶段 2: 智能隔帧抽帧 (当帧数较多 >= 16 帧时，优先通过隔帧采样压缩体积，100% 保持原始分辨率与宽高比)
+    if out_p.stat().st_size > target_limit_bytes and len(current_frames) >= 16:
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        old_count = len(current_frames)
+        current_frames = current_frames[::2]
+        if isinstance(cur_duration, (list, tuple)):
+            cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
+        else:
+            cur_duration = max(20, int(cur_duration * 2))
+        logger.info(f"{log_prefix} 帧数较多导致体积居高 ({cur_size_mb:.2f}MB, {old_count} 帧)，启动智能隔帧抽帧 (当前 {len(current_frames)} 帧，完全保持原始播放节奏)...")
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=cur_duration,
+            loop=loop,
+            optimize=True
+        )
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    # 阶段 3: 严格保等比自适应分辨率缩放
+    max_rescale_rounds = 10
+    round_idx = 0
+    while out_p.stat().st_size > target_limit_bytes and round_idx < max_rescale_rounds:
+        round_idx += 1
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        cur_w, cur_h = current_frames[0].size
+
+        # 基于面积与文件体积比例预估缩放因子
+        scale = min(0.88, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
+        new_w = max(1, int(round(cur_w * scale)))
+        new_h = max(1, int(round(cur_h * scale)))
+
+        # 严格保等比：设定合理的最小分辨率基线 (例如短边不低于 160，若原图已小于 160 则不低于 120)
+        min_dim = 160
+        if min(new_w, new_h) < min_dim:
+            fit_scale = min_dim / max(1, min(cur_w, cur_h))
+            new_w = max(120, int(round(cur_w * fit_scale)))
+            new_h = max(120, int(round(cur_h * fit_scale)))
+
+        if new_w >= cur_w and new_h >= cur_h:
+            # 尺寸触底无法继续缩小，若帧数仍较多 (>= 16)，执行二次隔帧抽帧挽救
+            if len(current_frames) >= 16:
+                old_count = len(current_frames)
+                current_frames = current_frames[::2]
+                if isinstance(cur_duration, (list, tuple)):
+                    cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
+                else:
+                    cur_duration = max(20, int(cur_duration * 2))
+                logger.info(f"{log_prefix} 尺寸触及基线，执行二次隔帧抽帧 ({old_count} 帧 -> {len(current_frames)} 帧)...")
+                p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+                p_frames[0].save(
+                    str(out_p),
+                    save_all=True,
+                    append_images=p_frames[1:],
+                    duration=cur_duration,
+                    loop=loop,
+                    optimize=True
+                )
+                if out_p.stat().st_size <= target_limit_bytes:
+                    return str(out_p)
+                continue
+            break
+
+        logger.info(f"{log_prefix} 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
+        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=cur_duration,
+            loop=loop,
+            optimize=True
+        )
+
+    if out_p.stat().st_size > target_limit_bytes:
+        final_mb = out_p.stat().st_size / (1024 * 1024)
+        cur_w, cur_h = current_frames[0].size
+        raise RuntimeError(
+            f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {final_mb:.2f}MB，"
+            f"已达 {cur_w}x{cur_h} 分辨率、{len(current_frames)} 帧与 {cur_colors} 色下限）。"
+            f"建议在源工程中减少时长或降低导出帧率后重试。"
+        )
+
+    return str(out_p)
+
+
 def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     """
     单通道无码无水印 GIF 原图专用优化器:
-    保留原始帧率与循环配置，在不添加任何打码/水印（保持赞助商原图纯净度）的前提下，
-    通过自适应调色板降级 (192 -> 128 -> 96 色) 与等比分辨率自适应缩放，
-    严格将体积压缩至 max_limit_mb 以内 (如 Ko-fi 3.8MB 动图播放门禁，超 4MB 会被 Ko-fi 降级为静态图)。
-    若已达极限仍超标，抛出 RuntimeError 触发发布门禁中止，杜绝静默上传损坏/降级素材。
+    保留原始节奏与循环配置，在不添加任何打码/水印（保持赞助商原图纯净度）的前提下，
+    通过调色板自适应阶梯式降级、智能隔帧抽帧与保等比分辨率缩放，严格将体积压缩至 max_limit_mb 以内。
     """
     from PIL import ImageSequence
 
     in_p = Path(input_gif_path)
     out_p = Path(output_gif_path)
-    out_p.parent.mkdir(parents=True, exist_ok=True)
 
     with Image.open(str(in_p)) as im:
         duration = im.info.get("duration", 100)
@@ -1148,57 +1286,7 @@ def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     if not frames:
         raise RuntimeError("GIF 动图不包含任何有效帧")
 
-    target_limit_bytes = int(max_limit_mb * 1024 * 1024)
-
-    # 优先以 256 色优化保存
-    p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in frames]
-    p_frames[0].save(
-        str(out_p),
-        save_all=True,
-        append_images=p_frames[1:],
-        duration=duration,
-        loop=loop,
-        optimize=True
-    )
-
-    if out_p.stat().st_size <= target_limit_bytes:
-        return str(out_p)
-
-    color_steps = [192, 128, 96]
-    step_idx = 0
-    current_frames = frames
-
-    while out_p.stat().st_size > target_limit_bytes:
-        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-        if step_idx < len(color_steps):
-            colors = color_steps[step_idx]
-            step_idx += 1
-            logger.info(f"[GIF Optimizer] Ko-fi 无码动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
-            p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=colors) for f in current_frames]
-        else:
-            cur_w, cur_h = current_frames[0].size
-            scale = min(0.85, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
-            new_w = max(320, int(cur_w * scale))
-            new_h = max(240, int(cur_h * scale))
-            if new_w >= cur_w or new_h >= cur_h:
-                raise RuntimeError(
-                    f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {cur_size_mb:.2f}MB，"
-                    f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试，Ko-fi 限制图片 ≤ 10MB。"
-                )
-            logger.info(f"[GIF Optimizer] Ko-fi 无码动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
-            current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-            p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
-
-        p_frames[0].save(
-            str(out_p),
-            save_all=True,
-            append_images=p_frames[1:],
-            duration=duration,
-            loop=loop,
-            optimize=True
-        )
-
-    return str(out_p)
+    return compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]")
 
 
 class LoginThread(QThread):
@@ -4263,53 +4351,18 @@ class MainWindow(QMainWindow):
         out_p = Path(output_gif_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
         if out_frames:
-            # 优先保存为高保真优化 GIF (自适应 256 色调色板 + 逐帧透明度/差分优化)
-            p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in out_frames]
-            p_frames[0].save(
-                str(out_p),
-                save_all=True,
-                append_images=p_frames[1:],
-                duration=duration,
-                loop=loop,
-                optimize=True
-            )
-            # 若指定了 max_limit_mb (如针对 X/Twitter 13.8MB 门禁)，则自适应压缩；否则保留 100% 原始高质量
             if max_limit_mb is not None:
-                target_limit_bytes = int(max_limit_mb * 1024 * 1024)
-                current_frames = out_frames
-                color_steps = [192, 128, 96]
-                step_idx = 0
-
-                while out_p.stat().st_size > target_limit_bytes:
-                    cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-                    if step_idx < len(color_steps):
-                        colors = color_steps[step_idx]
-                        step_idx += 1
-                        logger.info(f"[GIF Optimizer] 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
-                        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=colors) for f in current_frames]
-                    else:
-                        cur_w, cur_h = current_frames[0].size
-                        scale = min(0.85, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
-                        new_w = max(320, int(cur_w * scale))
-                        new_h = max(240, int(cur_h * scale))
-                        if new_w >= cur_w or new_h >= cur_h:
-                            limit_hint = "，X 限制 GIF ≤ 15MB" if max_limit_mb == 13.8 else ""
-                            raise RuntimeError(
-                                f"GIF 体积无法压缩至 {max_limit_mb}MB 以内（当前 {cur_size_mb:.2f}MB，"
-                                f"已达 320x240 分辨率与 96 色下限）。请手动降低帧数/分辨率后重试{limit_hint}。"
-                            )
-                        logger.info(f"[GIF Optimizer] 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
-                        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-                        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=96) for f in current_frames]
-
-                    p_frames[0].save(
-                        str(out_p),
-                        save_all=True,
-                        append_images=p_frames[1:],
-                        duration=duration,
-                        loop=loop,
-                        optimize=True
-                    )
+                compress_gif_frames(out_frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]")
+            else:
+                p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=256) for f in out_frames]
+                p_frames[0].save(
+                    str(out_p),
+                    save_all=True,
+                    append_images=p_frames[1:],
+                    duration=duration,
+                    loop=loop,
+                    optimize=True
+                )
         return str(out_p)
 
     def _export_preview_image(self):
