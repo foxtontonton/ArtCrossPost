@@ -63,42 +63,53 @@ class NoWheelEventFilter(QObject):
     def _is_explicitly_allowed(self, obj):
         # 显式放行 SmartTagEdit、desc_input、log_drawer（或其 viewport），不走父链查找
         mw = self.main_window
-        if mw:
-            ti = getattr(mw, "tags_input", None)
-            if ti is not None:
-                if obj is ti or (hasattr(ti, "viewport") and obj is ti.viewport()):
-                    return True
-            di = getattr(mw, "desc_input", None)
-            if di is not None:
-                if obj is di or (hasattr(di, "viewport") and obj is di.viewport()):
-                    return True
-            nb = getattr(mw, "notification_bar", None)
-            ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
-            if ld is not None:
-                if obj is ld or (hasattr(ld, "viewport") and obj is ld.viewport()):
-                    return True
+        ti = getattr(mw, "tags_input", None) if mw else None
+        di = getattr(mw, "desc_input", None) if mw else None
+        nb = getattr(mw, "notification_bar", None) if mw else None
+        ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
+
+        ti_match = (obj is ti) or (hasattr(ti, "viewport") and obj is ti.viewport())
+        di_match = (obj is di) or (hasattr(di, "viewport") and obj is di.viewport())
+        ld_match = (obj is ld) or (hasattr(ld, "viewport") and obj is ld.viewport())
+
+        print(f"[WheelDBG-Step3] ti is None? {ti is None}, obj is ti.viewport()? {hasattr(ti, 'viewport') and obj is ti.viewport()}")
+        print(f"[WheelDBG-Step3] di is None? {di is None}, obj is di.viewport()? {hasattr(di, 'viewport') and obj is di.viewport()}")
+        print(f"[WheelDBG-Step3] ld is None? {ld is None}, obj is ld.viewport()? {hasattr(ld, 'viewport') and obj is ld.viewport()}")
+
+        if ti_match or di_match or ld_match:
+            print(f"[WheelDBG-Step3] -> explicitly allowed: True (matched ti/di/ld, obj={type(obj).__name__})")
+            return True
 
         if hasattr(obj, "__class__") and obj.__class__.__name__ == "SmartTagEdit":
+            print("[WheelDBG-Step3] -> explicitly allowed: True (matched SmartTagEdit class)")
             return True
         if hasattr(obj, "objectName"):
             name = obj.objectName()
             if name in ("tags_input", "desc_input", "log_drawer", "tags_input_viewport", "desc_input_viewport", "log_drawer_viewport", "SmartTagEdit"):
+                print(f"[WheelDBG-Step3] -> explicitly allowed: True (matched objectName={name})")
                 return True
+        print(f"[WheelDBG-Step3] -> explicitly allowed: False (obj={type(obj).__name__} name='{getattr(obj, 'objectName', lambda: '')()}')")
         return False
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel:
+            print(f"[WheelDBG] obj={type(obj).__name__} name='{obj.objectName()}'")
             # 1. 优先对 SmartTagEdit、desc_input、log_drawer（或其 viewport）显式放行，不走父链查找
             if self._is_explicitly_allowed(obj):
+                print("[WheelDBG] Step 1 explicitly allowed -> return False (pass)")
                 return False
 
             # 2. 其它滚动类容器沿父链查找放行
             target = obj
+            chain = []
             while isinstance(target, QWidget):
+                chain.append(type(target).__name__)
                 if isinstance(target, self._WHEEL_SCROLL_OK):
+                    print(f"[WheelDBG] Step 2 matched in chain {chain} -> return False (pass)")
                     return False  # 放行，交由控件原生处理
                 target = target.parent()
 
+            print(f"[WheelDBG] Step 3 chain={chain} not in scroll ok -> BLOCKED (return True)")
             # 3. 拦截 QComboBox / QSlider 等，防误触改变数值
             event.ignore()
             return True
@@ -135,7 +146,7 @@ def get_theme_stylesheet(theme_name="pure_dark", font_size=13):
     slider_handle = max(16, int(font_size * 0.75))
     slider_handle_margin = (slider_handle - slider_groove) // 2
 
-    return f"""
+    qss = f"""
 QMainWindow, QDialog {{
     background-color: {bg};
 }}
@@ -407,6 +418,14 @@ QTabBar::tab:hover:!selected {{
     color: #e2e8f0;
 }}
 """
+    lines = qss.splitlines()
+    for i, line_str in enumerate(lines):
+        if "QScrollBar::handle:vertical {" in line_str:
+            print("[QSSDBG] theme_name:", theme_name, "accent:", accent, "THEMES[theme]['accent']:", theme.get("accent"))
+            for sub_l in lines[i:i+4]:
+                print(f"[QSSDBG]   {sub_l}")
+            break
+    return qss
 
 DARK_STYLE = get_theme_stylesheet("pure_dark", 13)
 
