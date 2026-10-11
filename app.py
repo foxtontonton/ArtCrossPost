@@ -46,6 +46,72 @@ from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
 from x_text_utils import calculate_x_char_count, format_x_full_text
 
+
+class NoWheelEventFilter(QObject):
+    """
+    全局滚轮/中键事件过滤器（选择性拦截）：
+    - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider），保持防误触行为；
+    - 显式放行：SmartTagEdit、desc_input、log_drawer 三处控件（或其 viewport）显式放行，不走父链查找；
+    - 通用放行：其他以滚动浏览为主要用途的控件沿父链查找放行（QTextBrowser / QScrollArea / QListWidget 等）。
+    """
+    _WHEEL_SCROLL_OK = (QTextEdit, QTextBrowser, QScrollArea, QListWidget)
+
+    def __init__(self, main_window=None):
+        super().__init__(main_window)
+        self.main_window = main_window
+
+    def _is_explicitly_allowed(self, obj):
+        # 显式放行 SmartTagEdit、desc_input、log_drawer（或其 viewport），不走父链查找
+        mw = self.main_window
+        if mw:
+            ti = getattr(mw, "tags_input", None)
+            if ti is not None:
+                if obj is ti or (hasattr(ti, "viewport") and obj is ti.viewport()):
+                    return True
+            di = getattr(mw, "desc_input", None)
+            if di is not None:
+                if obj is di or (hasattr(di, "viewport") and obj is di.viewport()):
+                    return True
+            nb = getattr(mw, "notification_bar", None)
+            ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
+            if ld is not None:
+                if obj is ld or (hasattr(ld, "viewport") and obj is ld.viewport()):
+                    return True
+
+        if hasattr(obj, "__class__") and obj.__class__.__name__ == "SmartTagEdit":
+            return True
+        if hasattr(obj, "objectName"):
+            name = obj.objectName()
+            if name in ("tags_input", "desc_input", "log_drawer", "tags_input_viewport", "desc_input_viewport", "log_drawer_viewport", "SmartTagEdit"):
+                return True
+        return False
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel:
+            # 1. 优先对 SmartTagEdit、desc_input、log_drawer（或其 viewport）显式放行，不走父链查找
+            if self._is_explicitly_allowed(obj):
+                return False
+
+            # 2. 其它滚动类容器沿父链查找放行
+            target = obj
+            while isinstance(target, QWidget):
+                if isinstance(target, self._WHEEL_SCROLL_OK):
+                    return False  # 放行，交由控件原生处理
+                target = target.parent()
+
+            # 3. 拦截 QComboBox / QSlider 等，防误触改变数值
+            event.ignore()
+            return True
+
+        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease) and hasattr(event, "button"):
+            if event.button() == Qt.MidButton:
+                event.ignore()
+                return True
+        return super().eventFilter(obj, event)
+
+
+print("[VERSION_CHECK] _is_explicitly_allowed exists:", hasattr(NoWheelEventFilter, "_is_explicitly_allowed"))
+
 THEMES = {
     "pure_dark": {"name": "纯净极黑", "bg": "#121218", "card": "#181822", "border": "#2e2e3e", "accent": "#4f46e5", "accent_hover": "#6366f1"},
     "deep_navy": {"name": "深蓝夜色", "bg": "#0b0f19", "card": "#111827", "border": "#1f2937", "accent": "#2563eb", "accent_hover": "#3b82f6"},
@@ -1517,69 +1583,6 @@ class DiagnosticThread(QThread):
                 }]
             }
             self.finished_signal.emit(err_report, "")
-
-
-class NoWheelEventFilter(QObject):
-    """
-    全局滚轮/中键事件过滤器（选择性拦截）：
-    - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider），保持防误触行为；
-    - 显式放行：SmartTagEdit、desc_input、log_drawer 三处控件（或其 viewport）显式放行，不走父链查找；
-    - 通用放行：其他以滚动浏览为主要用途的控件沿父链查找放行（QTextBrowser / QScrollArea / QListWidget 等）。
-    """
-    _WHEEL_SCROLL_OK = (QTextEdit, QTextBrowser, QScrollArea, QListWidget)
-
-    def __init__(self, main_window=None):
-        super().__init__(main_window)
-        self.main_window = main_window
-
-    def _is_explicitly_allowed(self, obj):
-        # 显式放行 SmartTagEdit、desc_input、log_drawer（或其 viewport），不走父链查找
-        mw = self.main_window
-        if mw:
-            ti = getattr(mw, "tags_input", None)
-            if ti is not None:
-                if obj is ti or (hasattr(ti, "viewport") and obj is ti.viewport()):
-                    return True
-            di = getattr(mw, "desc_input", None)
-            if di is not None:
-                if obj is di or (hasattr(di, "viewport") and obj is di.viewport()):
-                    return True
-            nb = getattr(mw, "notification_bar", None)
-            ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
-            if ld is not None:
-                if obj is ld or (hasattr(ld, "viewport") and obj is ld.viewport()):
-                    return True
-
-        if isinstance(obj, SmartTagEdit):
-            return True
-        if hasattr(obj, "objectName"):
-            name = obj.objectName()
-            if name in ("tags_input", "desc_input", "log_drawer", "tags_input_viewport", "desc_input_viewport", "log_drawer_viewport", "SmartTagEdit"):
-                return True
-        return False
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Wheel:
-            # 1. 优先对 SmartTagEdit、desc_input、log_drawer（或其 viewport）显式放行，不走父链查找
-            if self._is_explicitly_allowed(obj):
-                return False
-
-            # 2. 其它滚动类容器沿父链查找放行
-            target = obj
-            while isinstance(target, QWidget):
-                if isinstance(target, self._WHEEL_SCROLL_OK):
-                    return False  # 放行，交由控件原生处理
-                target = target.parent()
-
-            # 3. 拦截 QComboBox / QSlider 等，防误触改变数值
-            event.ignore()
-            return True
-
-        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease) and hasattr(event, "button"):
-            if event.button() == Qt.MidButton:
-                event.ignore()
-                return True
-        return super().eventFilter(obj, event)
 
 
 def make_responsive_combo(combo: QComboBox):
