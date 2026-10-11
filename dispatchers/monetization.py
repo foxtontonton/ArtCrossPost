@@ -389,21 +389,40 @@ class PatreonDispatcher(BaseDispatcher):
                         img_post_type.evaluate("el => el.click()")
                     time.sleep(1.0)
 
-                # 2. 上传主媒体图至 Hero Media 通道 (必须优先 input#mainMedia，防止退化为普通下载附件)
-                file_input = page.query_selector("input#mainMedia, input#photosInput, input[type='file'][accept*='image'], input[type='file']")
-                if file_input:
-                    file_input.set_input_files(images)
-                    title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
-                    att_ok, att_msg = self.assert_attached(
-                        page,
-                        title_sel,
-                        timeout=35000,
-                        error_msg="Patreon 图片上传未完成或表单未渲染，已中止发布"
+                # 2. 上传主媒体图至 Hero Media 通道 (严禁通用回退，找不到时直接大声报错 abort)
+                file_input = page.query_selector("input#mainMedia, input#photosInput, input[type='file'][accept*='image']")
+                if not file_input:
+                    self.close_login_session(browser, context)
+                    return False, "Patreon 图片上传通道未找到", compliance
+
+                file_input.set_input_files(images)
+                title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
+                att_ok, att_msg = self.assert_attached(
+                    page,
+                    title_sel,
+                    timeout=35000,
+                    error_msg="Patreon 图片上传未完成或表单未渲染，已中止发布"
+                )
+                if not att_ok:
+                    self.close_login_session(browser, context)
+                    return False, att_msg, compliance
+                time.sleep(2)
+
+                # 上传后验证：必须确认是正文内嵌主媒体 (Hero media) 而非附件行
+                inline_media = None
+                for _ in range(15):
+                    inline_media = page.query_selector(
+                        "img[src*='patreon-media'], img[src*='patreonusercontent'], img[src*='blob:'], video, [data-tag='media-item']"
                     )
-                    if not att_ok:
-                        self.close_login_session(browser, context)
-                        return False, att_msg, compliance
-                    time.sleep(3)  # 等待图片渲染与上传完成
+                    if inline_media and inline_media.is_visible():
+                        break
+                    time.sleep(1.0)
+
+                if not inline_media:
+                    self.close_login_session(browser, context)
+                    return False, "Patreon 上传校验失败: 未检测到内嵌主媒体 (Hero media) 渲染，疑似退化为附件行或上传中断", compliance
+
+                logger.info("[Patreon] 上传校验通过: 已确认素材成功挂载为正文内嵌主媒体 (Hero media)")
 
                 # 3. 填写标题与正文
                 title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
@@ -530,24 +549,101 @@ class PatreonDispatcher(BaseDispatcher):
 
                 # 检查是否有二次确认弹窗中的发布按钮
                 time.sleep(1.5)
-                modal_pub_btn = page.query_selector("div[role='dialog'] button:has-text('Publish now'), div[role='dialog'] button:has-text('Publish')")
+                modal_pub_btn = page.query_selector("div[role='dialog'] button:has-text('Publish now'), div[role='dialog'] button:has-text('Publish'), [aria-modal='true'] button:has-text('Publish')")
                 if modal_pub_btn:
                     try:
                         modal_pub_btn.click(force=True)
                     except Exception:
                         modal_pub_btn.evaluate("el => el.click()")
 
-                sub_ok, sub_msg = self.assert_submitted(
-                    page,
-                    lambda p: ("/posts/" in p.url.lower() and "/edit" not in p.url.lower() and "/posts/new" not in p.url.lower()) or "/home" in p.url.lower() or "/creator-home" in p.url.lower(),
-                    timeout=60000,
-                    error_msg="Patreon 提交未确认，作品可能已存为草稿，请前往网页确认"
-                )
-                self.close_login_session(browser, context)
-                if not sub_ok:
-                    return False, sub_msg, compliance
+                # 实测对齐 Patreon 提交成功真实信号判定逻辑
+                def check_patreon_submitted(p):
+                    try:
+                        curr_u = p.url.lower()
+                        # 核心判定 1: 成功离开编辑器跳转至正式作品展示页 (/posts/<id> 且不含 /edit, /posts/new)
+                        if "/posts/" in curr_u and "/edit" not in curr_u and "/posts/new" not in curr_u:
+                            return True, f"页面已成功跳转至正式作品页 ({p.url})"
+                        if "/creator-home" in curr_u or (curr_u.endswith(".patreon.com/home") or "/home" in curr_u):
+                            return True, f"页面已成功跳转至主页 ({p.url})"
 
-                return True, "Patreon 发布成功 (已对齐无码原图分发、赞助者可见及 18+ 标记)", compliance
+                        # 核心判定 2: 原地已完成发布——React 发帖按钮由 Publish 切换为 Update (更新已发布作品)
+                        update_btn = p.query_selector(
+                            "button[data-tag='make-a-post-action-save_without_notifying'], button[data-tag='make-a-post-action-save'], button:has-text('Update')"
+                        )
+                        has_publish_btn = p.query_selector(
+                            "button[data-tag='make-a-post-action-publish'], button:has-text('Publish now')"
+                        )
+                        if update_btn and not has_publish_btn:
+                            clean_url = p.url.split("?")[0].replace("/edit", "")
+                            return True, f"发帖状态已确认为已发布 (按钮已转为 Update，作品链接: {clean_url})"
+
+                        # 核心判定 3: 官方 Toast / 提示条明确显示已发布
+                        toasts = p.query_selector_all("div[role='alert'], div[data-tag='toast'], div[class*='Toast'], div[class*='toast']")
+                        for t in toasts:
+                            txt = t.inner_text().strip().lower()
+                            if any(w in txt for w in ["published", "post is live", "congrats", "已发布"]):
+                                return True, f"捕获到官方发布成功提示: {txt[:40]}"
+                    except Exception as e_chk:
+                        logger.debug(f"[Patreon] 提交状态探测异常 (通常处于页面跳转瞬态): {e_chk}")
+                        try:
+                            curr_u = p.url.lower()
+                            if "/posts/" in curr_u and "/edit" not in curr_u and "/posts/new" not in curr_u:
+                                return True, f"页面已成功跳转至正式作品页 ({p.url})"
+                        except Exception:
+                            pass
+                    return False, ""
+
+                sub_passed = False
+                sub_reason = ""
+                wait_sub_start = time.time()
+                while time.time() - wait_sub_start < 45:
+                    ok, reason = check_patreon_submitted(page)
+                    if ok:
+                        sub_passed = True
+                        sub_reason = reason
+                        break
+                    time.sleep(1.0)
+
+                # 提取当前作品公开链接作为备查
+                import re
+                post_id_match = re.search(r'/posts/(?:[a-zA-Z0-9_-]+-)?(\d+)', page.url)
+                post_id = post_id_match.group(1) if post_id_match else None
+                public_post_url = f"https://www.patreon.com/posts/{post_id}" if post_id else page.url.split('?')[0].replace('/edit', '')
+
+                if not sub_passed:
+                    # 检查是否有显式页面报错提示 (如表单必填项拦截)
+                    err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+                    if err_elem and err_elem.is_visible():
+                        err_text = err_elem.inner_text().strip()
+                        if err_text:
+                            self.close_login_session(browser, context)
+                            compliance.append(self.verify_compliance_item("patreon", "submission_confirmed", True, False, f"表单提交拦截: {err_text}"))
+                            return False, f"Patreon 提交被页面拦截: {err_text}", compliance
+
+                    # 未捕获明确错误也未捕获跳转：只认明确信号，不确定时报 unknown 而非 false，避免误报导致重复发布
+                    self.close_login_session(browser, context)
+                    compliance.append(
+                        self.verify_compliance_item(
+                            "patreon",
+                            "submission_confirmed",
+                            True,
+                            None,
+                            f"未捕获明确跳转信号，状态记为 unknown 避免重复发帖 (预估作品地址: {public_post_url})"
+                        )
+                    )
+                    return True, f"Patreon 提交状态待网页确认 (状态: unknown，已执行提交，请前往 {public_post_url} 确认，切勿重复点击发布)", compliance
+
+                self.close_login_session(browser, context)
+                compliance.append(
+                    self.verify_compliance_item(
+                        "patreon",
+                        "submission_confirmed",
+                        True,
+                        True,
+                        f"已确认生效 ({sub_reason})"
+                    )
+                )
+                return True, f"Patreon 发布成功 ({sub_reason})", compliance
         except Exception as e:
             logger.error(f"[Patreon] 自动化发布异常: {e}")
             return False, f"Patreon 自动化发布异常: {e}", compliance
