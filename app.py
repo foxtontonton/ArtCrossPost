@@ -276,12 +276,12 @@ QScrollBar:vertical {{
     margin: 0;
 }}
 QScrollBar::handle:vertical {{
-    background: #2a2a3a;
+    background: {accent};
     border-radius: 4px;
     min-height: 24px;
 }}
 QScrollBar::handle:vertical:hover {{
-    background: {accent};
+    background: {accent_hover};
 }}
 QScrollBar:horizontal {{
     border: none;
@@ -290,12 +290,12 @@ QScrollBar:horizontal {{
     margin: 0;
 }}
 QScrollBar::handle:horizontal {{
-    background: #2a2a3a;
+    background: {accent};
     border-radius: 4px;
     min-width: 24px;
 }}
 QScrollBar::handle:horizontal:hover {{
-    background: {accent};
+    background: {accent_hover};
 }}
 QSplitter::handle {{
     background-color: #1c1c28;
@@ -1523,23 +1523,58 @@ class NoWheelEventFilter(QObject):
     """
     全局滚轮/中键事件过滤器（选择性拦截）：
     - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider），保持防误触行为；
-    - 放行：以滚动浏览为主要用途的控件（QTextEdit / QTextBrowser / QScrollArea / QListWidget），
-      例如日志抽屉需要滚轮翻阅日志。
-    注意：QTextEdit 等的滚轮事件实际发往其 viewport，需沿 parent 链向上查找所属控件。
-    未命中白名单的控件默认保持拦截（与旧行为一致，零回归风险）。
+    - 显式放行：SmartTagEdit、desc_input、log_drawer 三处控件（或其 viewport）显式放行，不走父链查找；
+    - 通用放行：其他以滚动浏览为主要用途的控件沿父链查找放行（QTextBrowser / QScrollArea / QListWidget 等）。
     """
-    # 滚轮=滚动浏览 → 放行白名单
     _WHEEL_SCROLL_OK = (QTextEdit, QTextBrowser, QScrollArea, QListWidget)
+
+    def __init__(self, main_window=None):
+        super().__init__(main_window)
+        self.main_window = main_window
+
+    def _is_explicitly_allowed(self, obj):
+        # 显式放行 SmartTagEdit、desc_input、log_drawer（或其 viewport），不走父链查找
+        mw = self.main_window
+        if mw:
+            ti = getattr(mw, "tags_input", None)
+            if ti is not None:
+                if obj is ti or (hasattr(ti, "viewport") and obj is ti.viewport()):
+                    return True
+            di = getattr(mw, "desc_input", None)
+            if di is not None:
+                if obj is di or (hasattr(di, "viewport") and obj is di.viewport()):
+                    return True
+            nb = getattr(mw, "notification_bar", None)
+            ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
+            if ld is not None:
+                if obj is ld or (hasattr(ld, "viewport") and obj is ld.viewport()):
+                    return True
+
+        if isinstance(obj, SmartTagEdit):
+            return True
+        if hasattr(obj, "objectName"):
+            name = obj.objectName()
+            if name in ("tags_input", "desc_input", "log_drawer", "tags_input_viewport", "desc_input_viewport", "log_drawer_viewport", "SmartTagEdit"):
+                return True
+        return False
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel:
+            # 1. 优先对 SmartTagEdit、desc_input、log_drawer（或其 viewport）显式放行，不走父链查找
+            if self._is_explicitly_allowed(obj):
+                return False
+
+            # 2. 其它滚动类容器沿父链查找放行
             target = obj
             while isinstance(target, QWidget):
                 if isinstance(target, self._WHEEL_SCROLL_OK):
-                    return super().eventFilter(obj, event)  # 放行，交由控件原生处理
+                    return False  # 放行，交由控件原生处理
                 target = target.parent()
+
+            # 3. 拦截 QComboBox / QSlider 等，防误触改变数值
             event.ignore()
-            return True  # 默认拦截，保持原有防误触行为
+            return True
+
         if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease) and hasattr(event, "button"):
             if event.button() == Qt.MidButton:
                 event.ignore()
@@ -2970,6 +3005,9 @@ class MainWindow(QMainWindow):
         tags_layout.addLayout(tags_header)
 
         self.tags_input = SmartTagEdit()
+        self.tags_input.setObjectName("tags_input")
+        if hasattr(self.tags_input, "viewport"):
+            self.tags_input.viewport().setObjectName("tags_input_viewport")
         self.tags_input.setPlaceholderText("通用标签 (输入空格、逗号或回车自动识别添加逗号，支持 # 识别)...")
         self.tags_input.setMinimumHeight(70)
         self.tags_input.textChanged.connect(self._update_x_char_counter)
@@ -2999,6 +3037,9 @@ class MainWindow(QMainWindow):
         desc_layout.setContentsMargins(6, 6, 6, 6)
         desc_layout.setSpacing(6)
         self.desc_input = QTextEdit()
+        self.desc_input.setObjectName("desc_input")
+        if hasattr(self.desc_input, "viewport"):
+            self.desc_input.viewport().setObjectName("desc_input_viewport")
         self.desc_input.setPlaceholderText("输入作品描述、剧情背景、世界观或想对粉丝说的话...")
         self.desc_input.setMinimumHeight(85)
         desc_layout.addWidget(self.desc_input)
@@ -3532,6 +3573,10 @@ class MainWindow(QMainWindow):
         # ==================== 底部嵌入式全局通知栏与事件日志 ====================
         init_log_expanded = self.config.get("log_drawer_expanded", True)
         self.notification_bar = NotificationBar(parent=self, is_expanded=init_log_expanded)
+        self.log_drawer = self.notification_bar.log_drawer
+        self.log_drawer.setObjectName("log_drawer")
+        if hasattr(self.log_drawer, "viewport"):
+            self.log_drawer.viewport().setObjectName("log_drawer_viewport")
         root_vlayout.addWidget(self.notification_bar)
 
         # 初始化 X 字符统计状态
