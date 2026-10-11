@@ -49,10 +49,9 @@ from x_text_utils import calculate_x_char_count, format_x_full_text
 
 class NoWheelEventFilter(QObject):
     """
-    全局滚轮/中键事件过滤器（选择性拦截）：
-    - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider），保持防误触行为；
-    - 显式放行：SmartTagEdit、desc_input、log_drawer 三处控件（或其 viewport）显式放行，不走父链查找；
-    - 通用放行：其他以滚动浏览为主要用途的控件沿父链查找放行（QTextBrowser / QScrollArea / QListWidget 等）。
+    全局滚轮/中键事件过滤器：
+    - 拦截：滚轮会误触改变数值的控件（QComboBox / QSlider / QSpinBox），保持防误触行为；
+    - 放行：其余所有控件原生放行（QTextEdit / QScrollArea / SmartTagEdit / 画布 / 标签 / 正文 / 日志等）。
     """
     _WHEEL_SCROLL_OK = (QTextEdit, QTextBrowser, QScrollArea, QListWidget)
 
@@ -61,67 +60,45 @@ class NoWheelEventFilter(QObject):
         self.main_window = main_window
 
     def _is_explicitly_allowed(self, obj):
-        # 显式放行 SmartTagEdit、desc_input、log_drawer（或其 viewport），不走父链查找
         mw = self.main_window
-        ti = getattr(mw, "tags_input", None) if mw else None
-        di = getattr(mw, "desc_input", None) if mw else None
-        nb = getattr(mw, "notification_bar", None) if mw else None
-        ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
-
-        ti_match = (obj is ti) or (hasattr(ti, "viewport") and obj is ti.viewport())
-        di_match = (obj is di) or (hasattr(di, "viewport") and obj is di.viewport())
-        ld_match = (obj is ld) or (hasattr(ld, "viewport") and obj is ld.viewport())
-
-        print(f"[WheelDBG-Step3] ti is None? {ti is None}, obj is ti.viewport()? {hasattr(ti, 'viewport') and obj is ti.viewport()}")
-        print(f"[WheelDBG-Step3] di is None? {di is None}, obj is di.viewport()? {hasattr(di, 'viewport') and obj is di.viewport()}")
-        print(f"[WheelDBG-Step3] ld is None? {ld is None}, obj is ld.viewport()? {hasattr(ld, 'viewport') and obj is ld.viewport()}")
-
-        if ti_match or di_match or ld_match:
-            print(f"[WheelDBG-Step3] -> explicitly allowed: True (matched ti/di/ld, obj={type(obj).__name__})")
-            return True
+        if mw:
+            ti = getattr(mw, "tags_input", None)
+            if ti is not None:
+                if obj is ti or (hasattr(ti, "viewport") and obj is ti.viewport()):
+                    return True
+            di = getattr(mw, "desc_input", None)
+            if di is not None:
+                if obj is di or (hasattr(di, "viewport") and obj is di.viewport()):
+                    return True
+            nb = getattr(mw, "notification_bar", None)
+            ld = getattr(mw, "log_drawer", None) or (getattr(nb, "log_drawer", None) if nb else None)
+            if ld is not None:
+                if obj is ld or (hasattr(ld, "viewport") and obj is ld.viewport()):
+                    return True
 
         if hasattr(obj, "__class__") and obj.__class__.__name__ == "SmartTagEdit":
-            print("[WheelDBG-Step3] -> explicitly allowed: True (matched SmartTagEdit class)")
             return True
         if hasattr(obj, "objectName"):
             name = obj.objectName()
             if name in ("tags_input", "desc_input", "log_drawer", "tags_input_viewport", "desc_input_viewport", "log_drawer_viewport", "SmartTagEdit"):
-                print(f"[WheelDBG-Step3] -> explicitly allowed: True (matched objectName={name})")
                 return True
-        print(f"[WheelDBG-Step3] -> explicitly allowed: False (obj={type(obj).__name__} name='{getattr(obj, 'objectName', lambda: '')()}')")
         return False
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Wheel:
-            print(f"[WheelDBG] obj={type(obj).__name__} name='{obj.objectName()}'")
-            # 1. 优先对 SmartTagEdit、desc_input、log_drawer（或其 viewport）显式放行，不走父链查找
-            if self._is_explicitly_allowed(obj):
-                print("[WheelDBG] Step 1 explicitly allowed -> return False (pass)")
-                return False
+            # 1. 拦截易误触的选项与数值控件
+            if isinstance(obj, (QComboBox, QSlider, QSpinBox)):
+                event.ignore()
+                return True
 
-            # 2. 其它滚动类容器沿父链查找放行
-            target = obj
-            chain = []
-            while isinstance(target, QWidget):
-                chain.append(type(target).__name__)
-                if isinstance(target, self._WHEEL_SCROLL_OK):
-                    print(f"[WheelDBG] Step 2 matched in chain {chain} -> return False (pass)")
-                    return False  # 放行，交由控件原生处理
-                target = target.parent()
-
-            print(f"[WheelDBG] Step 3 chain={chain} not in scroll ok -> BLOCKED (return True)")
-            # 3. 拦截 QComboBox / QSlider 等，防误触改变数值
-            event.ignore()
-            return True
+            # 2. 其余所有控件原生放行（SmartTagEdit、QTextEdit、QScrollArea、UnifiedPreviewCanvas 等）
+            return False
 
         if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease) and hasattr(event, "button"):
             if event.button() == Qt.MidButton:
                 event.ignore()
                 return True
         return super().eventFilter(obj, event)
-
-
-print("[VERSION_CHECK] _is_explicitly_allowed exists:", hasattr(NoWheelEventFilter, "_is_explicitly_allowed"))
 
 THEMES = {
     "pure_dark": {"name": "纯净极黑", "bg": "#121218", "card": "#181822", "border": "#2e2e3e", "accent": "#4f46e5", "accent_hover": "#6366f1"},
@@ -360,6 +337,14 @@ QScrollBar::handle:vertical {{
 QScrollBar::handle:vertical:hover {{
     background: {accent_hover};
 }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+    background: none;
+    border: none;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
 QScrollBar:horizontal {{
     border: none;
     background: {bg};
@@ -373,6 +358,23 @@ QScrollBar::handle:horizontal {{
 }}
 QScrollBar::handle:horizontal:hover {{
     background: {accent_hover};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0px;
+    background: none;
+    border: none;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
+}}
+QTextEdit#log_drawer {{
+    background-color: #0c0c12;
+    border: 1px solid #2a2a38;
+    border-radius: 6px;
+    font-family: 'Consolas', 'Segoe UI Mono', monospace;
+    font-size: {fs}px;
+    color: #cbd5e1;
+    padding: 6px;
 }}
 QSplitter::handle {{
     background-color: #1c1c28;
@@ -418,13 +420,6 @@ QTabBar::tab:hover:!selected {{
     color: #e2e8f0;
 }}
 """
-    lines = qss.splitlines()
-    for i, line_str in enumerate(lines):
-        if "QScrollBar::handle:vertical {" in line_str:
-            print("[QSSDBG] theme_name:", theme_name, "accent:", accent, "THEMES[theme]['accent']:", theme.get("accent"))
-            for sub_l in lines[i:i+4]:
-                print(f"[QSSDBG]   {sub_l}")
-            break
     return qss
 
 DARK_STYLE = get_theme_stylesheet("pure_dark", 13)
@@ -825,9 +820,6 @@ class UnifiedPreviewCanvas(QLabel):
             self.update()
         super().mouseReleaseEvent(event)
 
-    def wheelEvent(self, event):
-        event.ignore()
-
     def _show_box_context_menu(self, global_pos, idx):
         menu = QMenu(self)
         del_act = menu.addAction("🗑️ 删除此打码框 (Delete)")
@@ -1128,17 +1120,9 @@ class NotificationBar(QFrame):
 
         # 可展开的富文本日志抽屉
         self.log_drawer = QTextEdit()
+        self.log_drawer.setObjectName("log_drawer")
         self.log_drawer.setReadOnly(True)
         self.log_drawer.setFixedHeight(220)
-        self.log_drawer.setStyleSheet("""
-            background-color: #0c0c12;
-            border: 1px solid #2a2a38;
-            border-radius: 6px;
-            font-family: 'Consolas', 'Segoe UI Mono', monospace;
-            font-size: 13px;
-            color: #cbd5e1;
-            padding: 6px;
-        """)
         self.log_drawer.setVisible(is_expanded)
         layout.addWidget(self.log_drawer)
 
@@ -2772,9 +2756,6 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange:
             self._schedule_layout_save()
-
-    def wheelEvent(self, event):
-        event.ignore()
 
     def closeEvent(self, event):
         if hasattr(self, "_config_save_timer") and self._config_save_timer.isActive():
