@@ -2021,7 +2021,7 @@ class SettingsDialog(QDialog):
         self.font_spin.valueChanged.connect(self._on_font_spin_changed)
         slider_row.addWidget(self.font_spin)
 
-        reset_font_btn = QPushButton("默认 (13px)")
+        reset_font_btn = QPushButton("↺ 默认 (13px)")
         reset_font_btn.setObjectName("secondaryBtn")
         reset_font_btn.setToolTip("恢复默认标准字号 (13px)")
         reset_font_btn.clicked.connect(lambda: self.font_slider.setValue(13))
@@ -2906,7 +2906,7 @@ class MainWindow(QMainWindow):
         font_lbl.setStyleSheet("color: #9ca3af; font-weight: 500;")
         font_bar.addWidget(font_lbl)
 
-        self.zoom_out_btn = QPushButton("A-")
+        self.zoom_out_btn = QPushButton("➖")
         self.zoom_out_btn.setObjectName("secondaryBtn")
         self.zoom_out_btn.setToolTip("缩小界面字号 (-1px)")
         self.zoom_out_btn.setFixedWidth(34)
@@ -2925,7 +2925,7 @@ class MainWindow(QMainWindow):
         self.header_font_spin.valueChanged.connect(self._on_header_font_changed)
         font_bar.addWidget(self.header_font_spin)
 
-        self.zoom_in_btn = QPushButton("A+")
+        self.zoom_in_btn = QPushButton("➕")
         self.zoom_in_btn.setObjectName("secondaryBtn")
         self.zoom_in_btn.setToolTip("放大界面字号 (+1px)")
         self.zoom_in_btn.setFixedWidth(34)
@@ -2933,7 +2933,7 @@ class MainWindow(QMainWindow):
         self.zoom_in_btn.clicked.connect(lambda: self._adjust_ui_font_size(1))
         font_bar.addWidget(self.zoom_in_btn)
 
-        self.reset_font_btn = QPushButton("默认")
+        self.reset_font_btn = QPushButton("↺ 默认")
         self.reset_font_btn.setObjectName("secondaryBtn")
         self.reset_font_btn.setToolTip("一键恢复默认标准字号 (13px)")
         self.reset_font_btn.setMinimumHeight(28)
