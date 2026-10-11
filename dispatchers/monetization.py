@@ -341,6 +341,7 @@ class PatreonDispatcher(BaseDispatcher):
 
         title = payload.get("title", "") or "New Creation"
         desc = payload.get("description", "")
+        tags = payload.get("tags", [])
         is_adult = payload.get("is_nsfw", False)
         visibility = payload.get("platform_options", {}).get("patreon_visibility", "patrons")
 
@@ -348,7 +349,7 @@ class PatreonDispatcher(BaseDispatcher):
         if not cookies:
             return False, "Patreon 未登录，请先点击登录按钮获取会话", []
 
-        logger.info(f"[Patreon] 开始原生发布: 标题={title}, 无码原图={len(images)}张, 原生权限={visibility}, 原生Adult={is_adult}")
+        logger.info(f"[Patreon] 开始原生发布: 标题={title}, 媒体图片={len(images)}张, 原生权限={visibility}, 原生Adult={is_adult}")
         compliance = []
 
         try:
@@ -386,17 +387,17 @@ class PatreonDispatcher(BaseDispatcher):
                         img_post_type.click(timeout=2000, force=True)
                     except Exception:
                         img_post_type.evaluate("el => el.click()")
-                    time.sleep(0.5)
+                    time.sleep(1.0)
 
-                # 2. 上传无码高清原图至主媒体通道 (优先 photosInput)
-                file_input = page.query_selector("input#photosInput, input#mainMedia, input[type='file'][accept*='image'], input[type='file']")
+                # 2. 上传主媒体图至 Hero Media 通道 (必须优先 input#mainMedia，防止退化为普通下载附件)
+                file_input = page.query_selector("input#mainMedia, input#photosInput, input[type='file'][accept*='image'], input[type='file']")
                 if file_input:
                     file_input.set_input_files(images)
                     title_sel = "textarea[placeholder='Title'], textarea[name='title'], input[placeholder*='Post title'], input[name='title'], input[placeholder='Title']"
                     att_ok, att_msg = self.assert_attached(
                         page,
                         title_sel,
-                        timeout=25000,
+                        timeout=35000,
                         error_msg="Patreon 图片上传未完成或表单未渲染，已中止发布"
                     )
                     if not att_ok:
@@ -418,9 +419,47 @@ class PatreonDispatcher(BaseDispatcher):
                     self.close_login_session(browser, context)
                     return False, f"Patreon 标题填写断言失败: {f_msg}", compliance
 
+                # 正文描述 (若有标签，同时在描述文末追加 #标签)
+                full_desc = desc
+                if tags:
+                    tag_line = " ".join([f"#{t.lstrip('#')}" for t in tags if t.strip()])
+                    if tag_line and tag_line not in full_desc:
+                        full_desc = f"{full_desc}\n\n{tag_line}".strip() if full_desc else tag_line
+
                 desc_area = page.query_selector("div[contenteditable='true'], textarea:not([placeholder='Title'])")
-                if desc_area and desc:
-                    desc_area.fill(desc)
+                if desc_area and full_desc:
+                    desc_area.fill(full_desc)
+
+                # 3.5 添加原生标签 (Patreon 官方标签输入框)
+                if tags:
+                    try:
+                        add_tags_btn = page.query_selector("button:has-text('Add tags'), span:has-text('Add tags'), [data-tag*='tag']:has-text('Add tags')")
+                        if add_tags_btn:
+                            try:
+                                add_tags_btn.click()
+                            except Exception:
+                                add_tags_btn.evaluate("el => el.click()")
+                            time.sleep(0.5)
+
+                        tag_inp = page.query_selector("input[data-tag='tags-auto-complete'], input[placeholder*='Start typing']")
+                        if tag_inp:
+                            for t in tags[:10]:
+                                t_clean = t.lstrip('#').strip()
+                                if not t_clean:
+                                    continue
+                                tag_inp.fill(t_clean)
+                                time.sleep(0.2)
+                                tag_inp.press("Enter")
+                                time.sleep(0.3)
+                                opt = page.query_selector("[role='option'], div[data-tag='tags-auto-complete-option']")
+                                if opt:
+                                    try:
+                                        opt.click()
+                                    except Exception:
+                                        pass
+                                    time.sleep(0.2)
+                    except Exception as e:
+                        logger.debug(f"[Patreon] 添加原生标签异常: {e}")
 
                 # 4. 勾选官方原生 Adult Content (18+) 开关 (若创作者账号全局已是 18+ 则自动继承合规)
                 adult_selector = "label:has-text('Adult content') input, input[name*='adult_content'], input[type='checkbox'][name*='adult']"
@@ -468,7 +507,7 @@ class PatreonDispatcher(BaseDispatcher):
                 pub_sel = "[data-tag='make-a-post-action-publish'], button:has-text('Publish now'), button:has-text('Publish')"
                 publish_btn = None
                 wait_pub_start = time.time()
-                while time.time() - wait_pub_start < 30:
+                while time.time() - wait_pub_start < 45:
                     btn = page.query_selector(pub_sel)
                     if btn:
                         is_dis = btn.is_disabled() or btn.get_attribute("aria-disabled") == "true" or "isInactive" in (btn.get_attribute("class") or "")
@@ -501,7 +540,7 @@ class PatreonDispatcher(BaseDispatcher):
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     lambda p: ("/posts/" in p.url.lower() and "/edit" not in p.url.lower() and "/posts/new" not in p.url.lower()) or "/home" in p.url.lower() or "/creator-home" in p.url.lower(),
-                    timeout=25000,
+                    timeout=60000,
                     error_msg="Patreon 提交未确认，作品可能已存为草稿，请前往网页确认"
                 )
                 self.close_login_session(browser, context)
@@ -808,6 +847,7 @@ class KofiDispatcher(BaseDispatcher):
 
         title = payload.get("title", "") or "New Artwork"
         desc = payload.get("description", "")
+        tags = payload.get("tags", [])
         visibility = payload.get("platform_options", {}).get("kofi_visibility", "supporters")
         is_adult = payload.get("is_nsfw", False)
 
@@ -815,7 +855,7 @@ class KofiDispatcher(BaseDispatcher):
         if not cookies:
             return False, "Ko-fi 未登录，请先点击登录按钮获取会话", []
 
-        logger.info(f"[Ko-fi] 开始原生发布: 标题={title}, 无码原图={len(images)}张, 原生权限={visibility}")
+        logger.info(f"[Ko-fi] 开始原生发布: 标题={title}, 媒体图片={len(images)}张, 原生权限={visibility}")
         # Ko-fi 暂无自动化成人分级能力，明确记录未覆盖状态
         compliance = [
             self.verify_compliance_item(
@@ -911,9 +951,15 @@ class KofiDispatcher(BaseDispatcher):
                     self.close_login_session(browser, context)
                     return False, f"Ko-fi 标题填写断言失败: {f_msg}", compliance
 
+                full_desc = desc
+                if tags:
+                    tag_line = " ".join([f"#{t.lstrip('#')}" for t in tags if t.strip()])
+                    if tag_line and tag_line not in full_desc:
+                        full_desc = f"{full_desc}\n\n{tag_line}".strip() if full_desc else tag_line
+
                 desc_area = page.query_selector("#postImageDescription")
-                if desc_area and desc:
-                    desc_area.fill(desc)
+                if desc_area and full_desc:
+                    desc_area.fill(full_desc)
 
                 # 4. 设置 Audience (Everyone / Supporters)
                 try:
@@ -949,7 +995,7 @@ class KofiDispatcher(BaseDispatcher):
                 sub_ok, sub_msg = self.assert_submitted(
                     page,
                     lambda p: p.query_selector("#uploadModal[style*='display: none']") is not None or (p.query_selector("#uploadModal") and "in" not in (p.query_selector("#uploadModal").get_attribute("class") or "")) or p.query_selector("div.toast, div.alert-success") is not None,
-                    timeout=25000,
+                    timeout=35000,
                     error_msg="Ko-fi 提交超时未关闭发布窗口，作品可能已存为草稿，请前往网页确认"
                 )
                 self.close_login_session(browser, context)

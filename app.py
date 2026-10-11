@@ -4658,43 +4658,66 @@ class MainWindow(QMainWindow):
                     else:
                         pat_out_path = CACHE_DIR / f"{safe_title}_{idx}_pat_censor.gif"
                         try:
-                            self._generate_composite_gif(p, pat_out_path, censor_params=c_params, wm_params=None, max_limit_mb=None)
+                            self._generate_composite_gif(p, pat_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                         except RuntimeError as e:
                             self.notify(f"Patreon 打码 GIF 合成失败: {e}", level="error")
                             logger.error(f"[发布准备] {e}")
                             return
                         patreon_images.append(str(pat_out_path))
                 else:
-                    patreon_images.append(str(p))
+                    if wm_info:
+                        if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
+                            patreon_images.append(str(da_out_path))
+                        else:
+                            pat_out_path = CACHE_DIR / f"{safe_title}_{idx}_pat_wm.gif"
+                            try:
+                                self._generate_composite_gif(p, pat_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                            except RuntimeError as e:
+                                self.notify(f"Patreon 水印 GIF 合成失败: {e}", level="error")
+                                logger.error(f"[发布准备] {e}")
+                                return
+                            patreon_images.append(str(pat_out_path))
+                    else:
+                        patreon_images.append(str(p))
 
                 # 4. Ko-fi 动图 (严格 ≤ 3.8MB 门禁，保障官方动效播放)
                 if is_kofi_selected:
                     if is_kofi_censor:
                         kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_censor.gif"
                         try:
-                            self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=None, max_limit_mb=3.8)
+                            self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=3.8)
                             kofi_images.append(str(kofi_out_path))
                         except RuntimeError as e:
                             self.notify(f"Ko-fi 打码动图压缩超限失败: {e}", level="error")
                             logger.error(f"[Pre-publish Gate] [Ko-fi] 打码动图压缩超限失败: {e}")
                             return
                     else:
-                        p_stat = Path(p).stat().st_size
-                        if p_stat > 4.0 * 1024 * 1024:
-                            orig_mb = p_stat / (1024 * 1024)
-                            logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出动效上限 ({orig_mb:.2f}MB > 4.0MB)，启动无码 GIF 优化器 (目标 ≤ 3.8MB)...")
-                            kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                        if wm_info:
+                            kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_wm.gif"
                             try:
-                                optimize_raw_gif(p, kofi_out_path, max_limit_mb=3.8)
-                                new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
-                                logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 动效压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 3.8MB，合规就绪)")
+                                self._generate_composite_gif(p, kofi_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=3.8)
                                 kofi_images.append(str(kofi_out_path))
                             except RuntimeError as e:
-                                self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
-                                logger.error(f"[Pre-publish Gate] [Ko-fi] 动图压缩超限失败: {e}")
+                                self.notify(f"Ko-fi 水印动图压缩超限失败: {e}", level="error")
+                                logger.error(f"[Pre-publish Gate] [Ko-fi] 水印动图压缩超限失败: {e}")
                                 return
                         else:
-                            kofi_images.append(str(p))
+                            p_stat = Path(p).stat().st_size
+                            if p_stat > 4.0 * 1024 * 1024:
+                                orig_mb = p_stat / (1024 * 1024)
+                                logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出动效上限 ({orig_mb:.2f}MB > 4.0MB)，启动无码 GIF 优化器 (目标 ≤ 3.8MB)...")
+                                kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                                try:
+                                    optimize_raw_gif(p, kofi_out_path, max_limit_mb=3.8)
+                                    new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
+                                    logger.info(f"[Pre-publish Gate] [Ko-fi] GIF 动效压缩完成: {orig_mb:.2f}MB -> {new_mb:.2f}MB (≤ 3.8MB，合规就绪)")
+                                    kofi_images.append(str(kofi_out_path))
+                                except RuntimeError as e:
+                                    self.notify(f"Ko-fi 动图压缩超限失败: {e}", level="error")
+                                    logger.error(f"[Pre-publish Gate] [Ko-fi] 动图压缩超限失败: {e}")
+                                    return
+                            else:
+                                kofi_images.append(str(p))
                 else:
                     kofi_images.append(str(p))
             else:
@@ -4771,15 +4794,17 @@ class MainWindow(QMainWindow):
 
                 # Patreon 静态图
                 if is_pat_censor:
-                    patreon_images.append(str(clean_censor_path or pub_censor_path))
+                    pat_target = pub_censor_path if wm_info else (clean_censor_path or pub_censor_path)
                 else:
-                    patreon_images.append(str(p))
+                    pat_target = pub_raw_path if wm_info else Path(p)
+                patreon_images.append(str(pat_target))
 
                 # Ko-fi 静态图
                 if is_kofi_censor:
-                    kofi_images.append(str(clean_censor_path or pub_censor_path))
+                    kofi_target = pub_censor_path if wm_info else (clean_censor_path or pub_censor_path)
                 else:
-                    kofi_images.append(str(p))
+                    kofi_target = pub_raw_path if wm_info else Path(p)
+                kofi_images.append(str(kofi_target))
 
         tags = split_and_normalize_tags(self.tags_input.toPlainText())
 
