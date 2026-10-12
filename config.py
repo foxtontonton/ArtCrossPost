@@ -72,7 +72,10 @@ DEFAULT_CONFIG = {
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
-        "kofi_censor": False              # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
+        "kofi_censor": False,             # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
+        "reddit_subreddit": "BlackLatexMale",  # Reddit 默认目标分区 (可在单次发布中覆盖)
+        "reddit_nsfw": True,              # Reddit 发帖默认 NSFW 标记
+        "reddit_spoiler": True            # Reddit 发帖默认 spoiler 标记
     }
 }
 
