@@ -74,7 +74,10 @@ DEFAULT_CONFIG = {
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
         "kofi_censor": False,             # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_min_duration": 20,          # Ko-fi 发布耗时安全护栏阈值 (秒，低于此值直接判异常以防假阳性)
-        "x_wait_button_timeout": 120      # X (Twitter) 发帖按钮等待就绪超时 (秒，应对服务端转码延迟)
+        "x_wait_button_timeout": 120,     # X (Twitter) 发帖按钮等待就绪超时 (秒，应对服务端转码延迟)
+        "reddit_subreddit": "BlackLatexMale",  # Reddit 默认目标分区 (可在单次发布中覆盖)
+        "reddit_nsfw": True,              # Reddit 发帖默认 NSFW 标记
+        "reddit_spoiler": True            # Reddit 发帖默认 spoiler 标记
     }
 }
 
