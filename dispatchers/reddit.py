@@ -192,8 +192,8 @@ class RedditDispatcher(BaseDispatcher):
                 return True, f"已连接 (浏览器: u/{u})"
 
         if not secrets:
-            return False, f"Reddit 鉴权失败: {secrets_err}"
-        return False, "未登录 (请点击卡片登录按钮在 Edge 中登录 Reddit)"
+            return False, "未登录 (API 凭据未配置且未连接浏览器会话，请先在右侧 Reddit 卡片点击「登录」按钮)"
+        return False, "未登录 (请点击卡片「登录」按钮在 Edge 中登录 Reddit)"
 
     def probe_login(self):
         ok, detail = self.check_login()
