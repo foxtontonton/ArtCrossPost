@@ -27,8 +27,10 @@ payload 约定 (与其它分发器一致)：
   is_nsfw:           是否标记 NSFW
   platform_options:
     reddit_subreddit  目标分区名 (默认读配置项 defaults.reddit_subreddit)
-    reddit_flair_id   flair id (可选，直透 PRAW)
-    reddit_flair_text flair 文字 (可选，直透 PRAW)
+    reddit_post_to_profile 是否同时发到个人主页 u/<用户名> (默认读配置项
+                      defaults.reddit_post_to_profile，用户要求双投，默认为开)
+    reddit_flair_id   flair id (可选，直透 PRAW，仅分区帖生效)
+    reddit_flair_text flair 文字 (可选，直透 PRAW，仅分区帖生效)
     reddit_spoiler    是否 spoiler (默认 True)
     reddit_nsfw       是否 NSFW (默认取 payload is_nsfw)
 
@@ -91,6 +93,13 @@ class RedditDispatcher(BaseDispatcher):
         except ImportError:
             from ..config import load_config
         return (load_config().get("defaults", {}).get("reddit_subreddit") or "").strip()
+
+    def _default_post_to_profile(self):
+        try:
+            from config import load_config
+        except ImportError:
+            from ..config import load_config
+        return bool(load_config().get("defaults", {}).get("reddit_post_to_profile", True))
 
     def _get_client(self):
         secrets, err = self._load_secrets()
@@ -187,11 +196,33 @@ class RedditDispatcher(BaseDispatcher):
             return False, "Reddit 发布失败: 未找到可上传的图片文件", []
 
         opts = payload.get("platform_options", {}) or {}
+
+        secrets, secrets_err = self._load_secrets()
+        if not secrets:
+            return False, f"Reddit 发布失败: {secrets_err}", []
+        try:
+            reddit = self._get_client()
+        except Exception as e:
+            return False, f"Reddit 发布失败: {e}", []
+
+        # 目标：分区帖 + 个人主页帖 (u/<用户名>)，可各自开关
         subreddit_name = (opts.get("reddit_subreddit") or self._default_subreddit()).strip()
-        if not subreddit_name:
+        if "reddit_post_to_profile" in opts:
+            post_to_profile = bool(opts.get("reddit_post_to_profile"))
+        else:
+            post_to_profile = self._default_post_to_profile()
+
+        targets = []  # [(展示名, praw_target 名, 是否分区帖)]
+        if subreddit_name:
+            targets.append((f"r/{subreddit_name}", subreddit_name, True))
+        if post_to_profile:
+            profile_target = f"u_{secrets['username']}"
+            targets.append((f"u/{profile_target}", profile_target, False))
+        if not targets:
             return False, (
-                "Reddit 发布失败: 未指定目标分区。请在 platform_options.reddit_subreddit "
-                "中指定，或在配置 defaults.reddit_subreddit 中设置默认值。"
+                "Reddit 发布失败: 未指定目标分区且个人主页发布已关闭，"
+                "无处可发。请设置 platform_options.reddit_subreddit / "
+                "defaults.reddit_subreddit，或开启 reddit_post_to_profile。"
             ), []
 
         title = (payload.get("title", "") or "Untitled").strip()
@@ -201,59 +232,57 @@ class RedditDispatcher(BaseDispatcher):
         description = (payload.get("description", "") or "").strip()
         is_nsfw = bool(opts.get("reddit_nsfw", payload.get("is_nsfw", False)))
         spoiler = bool(opts.get("reddit_spoiler", True))
-        flair_id = opts.get("reddit_flair_id")
-        flair_text = opts.get("reddit_flair_text")
-
-        try:
-            reddit = self._get_client()
-        except Exception as e:
-            return False, f"Reddit 发布失败: {e}", []
 
         compliance = []
-        try:
-            subreddit = reddit.subreddit(subreddit_name)
-            # 预检：分区存在且可发帖 (私有/被封分区在此大声失败)
-            _ = subreddit.display_name
+        results = []  # [(展示名, 成功, url/错误)]
+        for label, target_name, is_subreddit in targets:
+            submit_kwargs = dict(title=title, nsfw=is_nsfw, spoiler=spoiler)
+            if is_subreddit:
+                # flair 仅分区帖支持，个人主页帖不支持
+                if opts.get("reddit_flair_id"):
+                    submit_kwargs["flair_id"] = opts["reddit_flair_id"]
+                if opts.get("reddit_flair_text"):
+                    submit_kwargs["flair_text"] = opts["reddit_flair_text"]
+            try:
+                target = reddit.subreddit(target_name)
+                _ = target.display_name  # 预检：分区/主页存在且可发帖
+                if len(images) == 1:
+                    submission = target.submit_image(images[0], **submit_kwargs)
+                else:
+                    gallery = [{"image_path": p} for p in images]
+                    submission = target.submit_gallery(title, gallery, **submit_kwargs)
+                    logger.info(f"[Reddit] {label} 以 gallery 形式发布 {len(images)} 张图片")
+                post_url = f"https://www.reddit.com{submission.permalink}"
+                logger.info(f"[Reddit] {label} 发布成功: {post_url}")
+                compliance.append(self.verify_compliance_item(
+                    "reddit", f"post_created:{label}", True, True,
+                    f"帖子已创建: {post_url}"))
+                if description:
+                    try:
+                        submission.reply(description[:10000])
+                    except Exception as e:
+                        logger.warning(f"[Reddit] {label} 描述评论发送失败 (主帖不受影响): {e}")
+                        compliance.append(self.verify_compliance_item(
+                            "reddit", f"desc_comment:{label}", True, False,
+                            f"描述评论失败: {e}"))
+                results.append((label, True, post_url))
+            except Exception as e:
+                logger.error(f"[Reddit] {label} 发布异常: {e}")
+                compliance.append(self.verify_compliance_item(
+                    "reddit", f"post_created:{label}", True, False, f"发布失败: {e}"))
+                results.append((label, False, str(e)))
 
-            submit_kwargs = dict(
-                title=title,
-                nsfw=is_nsfw,
-                spoiler=spoiler,
-            )
-            if flair_id:
-                submit_kwargs["flair_id"] = flair_id
-            if flair_text:
-                submit_kwargs["flair_text"] = flair_text
-
-            if len(images) == 1:
-                submission = subreddit.submit_image(images[0], **submit_kwargs)
-            else:
-                gallery = [{"image_path": p} for p in images]
-                submission = subreddit.submit_gallery(title, gallery, **submit_kwargs)
-                logger.info(f"[Reddit] 以 gallery 形式发布 {len(images)} 张图片")
-
-            post_url = f"https://www.reddit.com{submission.permalink}"
-            logger.info(f"[Reddit] 发布成功: {post_url}")
-
-            compliance.append(self.verify_compliance_item(
-                "reddit", "api_auth", True, True, "PRAW script 应用鉴权通过"))
-            compliance.append(self.verify_compliance_item(
-                "reddit", "post_created", True, True, f"帖子已创建: {post_url}"))
-            compliance.append(self.verify_compliance_item(
-                "reddit", "nsfw_flag", is_nsfw, True,
-                f"NSFW 标记={'开' if is_nsfw else '关'} (目标分区 r/{subreddit_name})"))
-
-            # description 无法放入图片帖正文：作为首条评论发出，失败不推翻主帖成功
-            if description:
-                try:
-                    submission.reply(description[:10000])
-                    logger.info("[Reddit] 描述已作为首条评论发出")
-                except Exception as e:
-                    logger.warning(f"[Reddit] 描述评论发送失败 (主帖不受影响): {e}")
-                    compliance.append(self.verify_compliance_item(
-                        "reddit", "desc_comment", True, False, f"描述评论失败: {e}"))
-
-            return True, f"Reddit 发布成功: {post_url}", compliance
-        except Exception as e:
-            logger.error(f"[Reddit] 发布异常: {e}")
-            return False, f"Reddit 发布失败: {e}", compliance
+        ok_all = all(r[1] for r in results)
+        detail = "; ".join(
+            f"{label} 成功 ({url})" if ok else f"{label} 失败 ({url})"
+            for label, ok, url in results
+        )
+        compliance.append(self.verify_compliance_item(
+            "reddit", "api_auth", True, True, "PRAW script 应用鉴权通过"))
+        compliance.append(self.verify_compliance_item(
+            "reddit", "nsfw_flag", is_nsfw, True,
+            f"NSFW 标记={'开' if is_nsfw else '关'}"))
+        if ok_all:
+            return True, f"Reddit 发布成功: {detail}", compliance
+        # 部分失败也大声报错，不让用户误以为双投都发出去了
+        return False, f"Reddit 部分发布失败: {detail}", compliance
