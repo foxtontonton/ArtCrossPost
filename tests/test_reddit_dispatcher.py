@@ -229,3 +229,60 @@ def test_reddit_prefers_reddit_images(tmp_path, monkeypatch):
     subreddit = targets["BlackLatexMale"]
     called_img = subreddit.submit_image.call_args.args[0]
     assert "reddit_custom.png" in called_img
+
+
+def test_reddit_humanity_challenge_detection_url(tmp_path):
+    """检测 URL 中的 challenge / captcha 特征"""
+    disp = _make_dispatcher(tmp_path)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.reddit.com/challenge/humanity"
+    mock_page.title.return_value = "Reddit"
+    challenged, reason = disp.check_humanity_challenge(mock_page)
+    assert challenged is True
+    assert "URL" in reason
+
+
+def test_reddit_humanity_challenge_detection_title(tmp_path):
+    """检测页面标题中的 Just a moment / challenge 特征"""
+    disp = _make_dispatcher(tmp_path)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.reddit.com/submit"
+    mock_page.title.return_value = "Just a moment... Attention Required!"
+    mock_page.query_selector.return_value = None
+    mock_page.inner_text.return_value = ""
+    challenged, reason = disp.check_humanity_challenge(mock_page)
+    assert challenged is True
+    assert "标题" in reason
+
+
+def test_reddit_humanity_challenge_detection_element(tmp_path):
+    """检测 Cloudflare / Prove your humanity 等可视元素"""
+    disp = _make_dispatcher(tmp_path)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.reddit.com/submit"
+    mock_page.title.return_value = "Submit to BlackLatexMale"
+
+    def fake_query(sel):
+        if "challenges.cloudflare" in sel or "Prove your humanity" in sel:
+            elem = MagicMock()
+            elem.is_visible.return_value = True
+            return elem
+        return None
+
+    mock_page.query_selector.side_effect = fake_query
+    challenged, reason = disp.check_humanity_challenge(mock_page)
+    assert challenged is True
+    assert "挑战元素" in reason
+
+
+def test_reddit_humanity_challenge_clean_page(tmp_path):
+    """正常页面不误报"""
+    disp = _make_dispatcher(tmp_path)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.reddit.com/r/BlackLatexMale/submit"
+    mock_page.title.return_value = "Submit post"
+    mock_page.query_selector.return_value = None
+    mock_page.inner_text.return_value = "Normal Reddit page text without challenges"
+    challenged, _ = disp.check_humanity_challenge(mock_page)
+    assert challenged is False
+
