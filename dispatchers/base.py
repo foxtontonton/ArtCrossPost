@@ -162,7 +162,7 @@ class BaseDispatcher(ABC):
         p_dir.mkdir(parents=True, exist_ok=True)
         return str(p_dir.resolve())
 
-    def create_persistent_stealth_context(self, p, user_data_dir, headless=False):
+    def create_persistent_stealth_context(self, p, user_data_dir, headless=False, extra_args=None):
         """
         使用 Edge 持久化上下文启动。
         抹去自动化特征，避免被识别为 bot，解决 '此浏览器或应用可能不安全'。
@@ -174,6 +174,8 @@ class BaseDispatcher(ABC):
             "--no-first-run",
             "--no-default-browser-check"
         ]
+        if extra_args:
+            stealth_args.extend(extra_args)
         return p.chromium.launch_persistent_context(
             user_data_dir,
             channel="msedge",
@@ -184,7 +186,7 @@ class BaseDispatcher(ABC):
             args=stealth_args
         )
 
-    def create_stealth_browser(self, p, headless=False):
+    def create_stealth_browser(self, p, headless=False, extra_args=None):
         """保留兼容：用于非持久化启动"""
         stealth_args = [
             "--disable-blink-features=AutomationControlled",
@@ -193,6 +195,8 @@ class BaseDispatcher(ABC):
             "--no-first-run",
             "--no-default-browser-check"
         ]
+        if extra_args:
+            stealth_args.extend(extra_args)
         try:
             return p.chromium.launch(
                 channel="msedge",
@@ -237,23 +241,32 @@ class BaseDispatcher(ABC):
         except Exception as e:
             logger.debug(f"[{self.name}] 清理冗余空白页异常: {e}")
 
-    def create_login_context(self, p, platform_name):
+    def create_login_context(self, p, platform_name, offscreen=False, extra_args=None):
         """
-        创建登录用浏览器上下文 (统一入口，各平台 login_interactive 必须经此创建)。
+        创建登录或发布用浏览器上下文 (统一入口，各平台 login_interactive 与发布经此创建)。
         1. 若本机 Edge 正在运行，为避免单例锁冲突 (Lock file Error 32) 以及在用户日常 Edge 中意外弹标签，
            直接使用各平台专属独立持久化环境 (data/browser_profiles/<platform>)；
         2. 若本机 Edge 未运行，优先尝试使用本机 Edge 真实用户配置 (持久化上下文)，复用已有会话；
         3. 若出现异常，平滑回退至各平台专属独立持久化环境；
-        4. 返回 (browser, context)：持久化模式下 browser 为 None，关闭时调用 close_login_session(browser, context)。
+        4. offscreen=True 时，自动附加 --window-position=-32000,-32000 与 --start-minimized，实现'运行但不打扰'，全程不抢焦点；
+        5. 返回 (browser, context)：持久化模式下 browser 为 None，关闭时调用 close_login_session(browser, context)。
         """
         browser, context = None, None
         edge_running = self.is_edge_running()
         user_data_dir = self.get_edge_user_data_dir()
 
+        merged_extra = list(extra_args or [])
+        if offscreen:
+            merged_extra.extend([
+                "--window-position=-32000,-32000",
+                "--start-minimized",
+                "--no-focus-on-map"
+            ])
+
         if user_data_dir and not edge_running:
             try:
                 logger.info(f"[{platform_name}] 检测到本机 Edge 未运行，尝试使用本机 Edge 真实用户配置启动登录窗口...")
-                context = self.create_persistent_stealth_context(p, user_data_dir, headless=False)
+                context = self.create_persistent_stealth_context(p, user_data_dir, headless=False, extra_args=merged_extra)
                 logger.info(f"[{platform_name}] 成功使用系统 Edge 原生配置！")
             except Exception as e:
                 err_msg = str(e).split("\n")[0]
@@ -266,11 +279,11 @@ class BaseDispatcher(ABC):
             # 专属独立持久化环境：永不锁死，保留 Google 会话与真实指纹，通过 Google 校验
             independent_dir = self.get_app_browser_profile_dir()
             try:
-                context = self.create_persistent_stealth_context(p, independent_dir, headless=False)
+                context = self.create_persistent_stealth_context(p, independent_dir, headless=False, extra_args=merged_extra)
             except Exception as e:
                 err_msg = str(e).split("\n")[0]
                 logger.warning(f"[{platform_name}] 专属持久化启动异常 ({err_msg})，回退至纯净浏览器模式...")
-                browser = self.create_stealth_browser(p, headless=False)
+                browser = self.create_stealth_browser(p, headless=False, extra_args=merged_extra)
                 context = browser.new_context()
 
         if context is not None:
