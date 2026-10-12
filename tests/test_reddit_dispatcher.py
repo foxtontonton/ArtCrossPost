@@ -208,3 +208,24 @@ def test_reddit_check_login_ok(tmp_path, monkeypatch):
     ok, msg = disp.check_login()
     assert ok is True
     assert "test_user" in msg
+
+
+def test_reddit_prefers_reddit_images(tmp_path, monkeypatch):
+    """优先使用 payload['reddit_images'] 覆盖默认 images"""
+    _, targets = _fake_praw(monkeypatch)
+    disp = _make_dispatcher(tmp_path, secrets=SECRETS)
+    img_raw = _img(tmp_path, "raw.png")
+    img_custom = _img(tmp_path, "reddit_custom.png")
+    ok, _, _ = disp.publish({
+        "images": [img_raw],
+        "reddit_images": [img_custom],
+        "title": "custom img test",
+        "platform_options": {
+            "reddit_subreddit": "BlackLatexMale",
+            "reddit_post_to_profile": False,
+        },
+    })
+    assert ok is True
+    subreddit = targets["BlackLatexMale"]
+    called_img = subreddit.submit_image.call_args.args[0]
+    assert "reddit_custom.png" in called_img
