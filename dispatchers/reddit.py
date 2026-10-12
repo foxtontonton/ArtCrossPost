@@ -373,8 +373,8 @@ class RedditDispatcher(BaseDispatcher):
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
-                # 严格有界面 (headless=False)
-                browser, context = self.create_login_context(p, "Reddit")
+                # 严格有界面 (headless=False) 且支持 offscreen 避免跳窗打扰用户
+                browser, context = self.create_login_context(p, "Reddit", offscreen=True)
                 cookies = self.get_cookies()
                 if cookies:
                     try:
@@ -394,7 +394,6 @@ class RedditDispatcher(BaseDispatcher):
 
                     logger.info(f"[Reddit] 正在导航至 {label} 发帖页面: {submit_url} ...")
                     self.safe_goto(page, submit_url, timeout=40000)
-                    time.sleep(2.5)
 
                     # 1. 严格检测人机验证墙 / Prove your humanity (大声报错，绝不重试)
                     challenged, reason = self.check_humanity_challenge(page)
@@ -409,72 +408,97 @@ class RedditDispatcher(BaseDispatcher):
 
                     # 检查是否被重定向至登录页
                     if "/login" in page.url.lower():
-                        err_msg = f"Reddit 登录态已失效 (被重定向至 {page.url})，请先点击卡片重新登录"
+                        err_msg = f"Reddit 登录态已失效 (被重定向至 {page.url})，请先在客户端卡片点击「登录」完成一次性登录"
                         logger.error(f"[Reddit] {err_msg}")
                         self.close_login_session(browser, context, page)
                         return False, err_msg, compliance
 
-                    # 2. 定位图片上传控件并提交文件 (兼容现代化 Shreddit Shadow DOM 与旧版多 Tab 结构)
-                    uploaded = False
-
-                    # 策略 A: 工具栏图片按钮触发文件选择器 (现代 Shreddit)
-                    toolbar_btn = page.locator(
-                        "post-composer-toolbar-button-image button, post-composer-toolbar-button-image, button[aria-label*='Image'], button[aria-label*='图片']"
+                    # 检查是否命中社区封禁/私人社区/登录权限阻拦
+                    banned_wall = page.locator(
+                        "text='已被静音', text='已被封禁', text='has been banned', text='这是私人社区', text='This community is private', button:has-text('请求加入'), button:has-text('Request to join'), button:has-text('浏览其他社区')"
                     ).first
-                    if toolbar_btn.count() > 0 and toolbar_btn.is_visible():
+                    if banned_wall.count() > 0 and banned_wall.is_visible():
+                        debug_path = self.data_dir / "reddit_submit_debug.png"
                         try:
-                            with page.expect_file_chooser(timeout=4000) as fc_info:
-                                toolbar_btn.click()
-                            file_chooser = fc_info.value
-                            file_chooser.set_files(images)
-                            uploaded = True
-                            logger.info(f"[Reddit] {label} 已通过工具栏文件选择器挂载 {len(images)} 张图片素材")
+                            page.screenshot(path=str(debug_path))
+                        except Exception:
+                            pass
+                        err_msg = (
+                            f"Reddit 目标分区 {label} 无法访问 (该社区已被 Reddit 封禁或设为私人社区，快照已存至 {debug_path})。"
+                            "请在浏览器中核验该社区状态或更换目标分区。"
+                        )
+                        logger.error(f"[Reddit] {err_msg}")
+                        results.append((label, False, err_msg))
+                        compliance.append(self.verify_compliance_item(
+                            "reddit", f"post_created:{label}", True, False, err_msg
+                        ))
+                        continue
+
+                    # 2. 定位图片上传控件并提交文件 (显式等待 tab 与 input[type=file])
+                    # 先显式等待并点击 "Images & Video" 标签页 (若存在多 Tab 结构)
+                    tab_selectors = [
+                        "button:has-text('Images & Video')",
+                        "[role='tab']:has-text('Images & Video')",
+                        "button:has-text('图片和视频')",
+                        "[role='tab']:has-text('图片和视频')",
+                        "button:has-text('Images')",
+                        "[role='tab']:has-text('Images')",
+                        "button:has-text('图片')",
+                        "[role='tab']:has-text('图片')",
+                        "button[aria-label*='Images']",
+                        "button[aria-label*='图片']"
+                    ]
+                    tab_loc = None
+                    for t_sel in tab_selectors:
+                        cand = page.locator(t_sel).first
+                        if cand.count() > 0:
+                            tab_loc = cand
+                            break
+
+                    if tab_loc:
+                        try:
+                            tab_loc.wait_for(state="visible", timeout=6000)
+                            tab_loc.click()
+                            logger.info(f"[Reddit] {label} 已显式点击 'Images & Video' 标签页")
                         except Exception as e:
-                            logger.debug(f"[Reddit] 工具栏文件选择器策略触发跳过: {e}")
+                            logger.debug(f"[Reddit] 点击 Images 标签页跳过或已激活: {e}")
 
-                    # 策略 B: 利用 Playwright Locator 自动穿透 Shadow Root 设置 input[type='file']
-                    if not uploaded:
-                        fi_locators = [
-                            "r-post-media-input input[type='file']",
-                            "post-composer-toolbar-button-image input[type='file']",
-                            "input[type='file'][accept*='image']",
-                            "input[type='file']"
-                        ]
-                        for fi_sel in fi_locators:
-                            loc = page.locator(fi_sel)
-                            if loc.count() > 0:
-                                try:
-                                    loc.first.set_input_files(images)
-                                    uploaded = True
-                                    logger.info(f"[Reddit] {label} 已通过 Shadow DOM 穿透控件设置 {len(images)} 张图片素材")
-                                    break
-                                except Exception as e:
-                                    logger.debug(f"[Reddit] 尝试穿透定位器 {fi_sel} 失败: {e}")
-
-                    # 策略 C: 旧版 Redesign Tab 切换策略
-                    if not uploaded:
-                        tab_selectors = [
-                            "button:has-text('Images & Video')",
-                            "button:has-text('Images')",
-                            "[role='tab']:has-text('Images')",
-                            "[role='tab']:has-text('Images & Video')",
-                            "button[aria-label*='Images']",
-                            "xpath=//button[contains(., 'Images')]"
-                        ]
-                        for t_sel in tab_selectors:
+                    # 显式等待 input[type=file] 出现在 DOM 里 (注意 file input 可能是隐藏的，等待 state='attached')
+                    uploaded = False
+                    fi_locators = [
+                        "input[type='file'][accept*='image']",
+                        "r-post-media-input input[type='file']",
+                        "post-composer-toolbar-button-image input[type='file']",
+                        "input[type='file']"
+                    ]
+                    for fi_sel in fi_locators:
+                        fi_loc = page.locator(fi_sel).first
+                        if fi_loc.count() > 0:
                             try:
-                                tab_btn = page.locator(t_sel).first
-                                if tab_btn.count() > 0 and tab_btn.is_visible():
-                                    tab_btn.click(timeout=2000)
-                                    time.sleep(1.5)
-                                    file_input = page.locator("input[type='file']").first
-                                    if file_input.count() > 0:
-                                        file_input.set_input_files(images)
-                                        uploaded = True
-                                        logger.info(f"[Reddit] {label} 已通过 Tab 切换激活文件上传")
-                                        break
-                            except Exception:
-                                continue
+                                fi_loc.wait_for(state="attached", timeout=8000)
+                                fi_loc.set_input_files(images)
+                                uploaded = True
+                                logger.info(f"[Reddit] {label} 已直接使用 set_input_files 设置 {len(images)} 张图片素材 (定位器: {fi_sel})")
+                                break
+                            except Exception as e:
+                                logger.debug(f"[Reddit] 尝试 set_input_files 异常: {e}")
+
+                    # 兼容现代化 Shreddit 富文本工具栏文件选择器
+                    if not uploaded:
+                        toolbar_btn = page.locator(
+                            "post-composer-toolbar-button-image button, post-composer-toolbar-button-image, button[aria-label*='Image'], button[aria-label*='图片']"
+                        ).first
+                        if toolbar_btn.count() > 0:
+                            try:
+                                toolbar_btn.wait_for(state="visible", timeout=4000)
+                                with page.expect_file_chooser(timeout=4000) as fc_info:
+                                    toolbar_btn.click()
+                                file_chooser = fc_info.value
+                                file_chooser.set_files(images)
+                                uploaded = True
+                                logger.info(f"[Reddit] {label} 已通过富文本工具栏文件选择器挂载 {len(images)} 张图片素材")
+                            except Exception as e:
+                                logger.debug(f"[Reddit] 工具栏选择器策略跳过: {e}")
 
                     if not uploaded:
                         debug_path = self.data_dir / "reddit_submit_debug.png"
@@ -482,7 +506,7 @@ class RedditDispatcher(BaseDispatcher):
                             page.screenshot(path=str(debug_path))
                         except Exception:
                             pass
-                        err_msg = f"Reddit {label} 未能定位到文件上传控件，已中止发布以防文字单独泄露 (快照: {debug_path})"
+                        err_msg = f"Reddit {label} 显式等待文件上传控件超时，未能定位到 input[type=file]，已中止发布以防文字单独泄露 (快照已存至 {debug_path})"
                         logger.error(f"[Reddit] {err_msg}")
                         results.append((label, False, err_msg))
                         compliance.append(self.verify_compliance_item(
@@ -490,13 +514,12 @@ class RedditDispatcher(BaseDispatcher):
                         ))
                         break
 
-                    # 等待图片渲染与附加断言
-                    time.sleep(3.0)
+                    # 显式等待图片附加完成与预览渲染 (超时 25 秒，大声报错，替代硬编码固定等待)
                     att_ok, att_msg = self.assert_attached(
                         page,
                         "r-post-media-input, post-composer-toolbar-button-image, img[src*='blob:'], img[src*='preview.redd.it'], img[src*='i.redd.it'], [aria-label*='Remove'], button[aria-label*='delete'], [data-testid*='media'], shreddit-media-item, button:has-text('添加到正文'), button:has-text('添加')",
                         timeout=25000,
-                        error_msg=f"Reddit {label} 图片上传未就绪或预览未渲染"
+                        error_msg=f"Reddit {label} 图片上传显式等待超时，预览未能在 25 秒内完成渲染"
                     )
                     if not att_ok:
                         results.append((label, False, att_msg))
@@ -653,19 +676,61 @@ class RedditDispatcher(BaseDispatcher):
                         # 情况 2: 现代 Shreddit 提交后重定向回分区首页或个人已投稿列表页
                         if left_submit:
                             time.sleep(2.5)  # 等待列表流注水渲染
-                            # 优先从新页面提取带帖子 ID 的评论详情永久链接
-                            links = page.locator("a[href*='/comments/']").all()
-                            for lk in links:
-                                try:
-                                    h = lk.get_attribute("href") or ""
-                                    if re.search(r"/comments/[a-z0-9]{4,}", h):
-                                        post_url = h if h.startswith("http") else f"https://www.reddit.com{h}"
-                                        break
-                                except Exception:
-                                    continue
+                            # 策略 A: 优先通过 API 探针获取当前用户刚创建的帖子精准永久链接
+                            try:
+                                sub_data = page.evaluate("""async (un) => {
+                                    try {
+                                        const res = await fetch(`https://www.reddit.com/user/${un}/submitted.json?limit=3`);
+                                        if (res.ok) return await res.json();
+                                    } catch (e) {}
+                                    return null;
+                                }""", username)
+                                if sub_data and "data" in sub_data and "children" in sub_data["data"]:
+                                    for child in sub_data["data"]["children"]:
+                                        c_data = child.get("data", {})
+                                        c_title = c_data.get("title", "")
+                                        if c_title and (c_title.strip() == title.strip() or title.strip() in c_title):
+                                            pl = c_data.get("permalink")
+                                            if pl:
+                                                post_url = f"https://www.reddit.com{pl}" if pl.startswith("/") else pl
+                                                break
+                            except Exception as eval_e:
+                                logger.debug(f"[Reddit] submitted.json 探针异常: {eval_e}")
+
+                            # 策略 B: 从新页面查找匹配当前帖子标题的 comments 永久链接
+                            if not post_url:
+                                links = page.locator("a[href*='/comments/']").all()
+                                for lk in links:
+                                    try:
+                                        t_text = lk.inner_text().strip()
+                                        if title.lower() in t_text.lower():
+                                            h = lk.get_attribute("href") or ""
+                                            if re.search(r"/comments/[a-z0-9]{4,}", h):
+                                                post_url = h if h.startswith("http") else f"https://www.reddit.com{h}"
+                                                break
+                                    except Exception:
+                                        continue
+
                             # 兜底使用跳转后的落地 URL
                             if not post_url:
                                 post_url = page.url
+                            break
+
+                        # 检查页面字段级报错 (如 PROFILE_SUBREDDIT_NOEXIST: 社区不存在)
+                        field_err = page.locator("text='社区不存在', text='Community does not exist', text='One or more field errors', div[class*='error']:has-text('不存在')").first
+                        if field_err.count() > 0 and field_err.is_visible():
+                            err_txt = field_err.inner_text().strip()
+                            debug_path = self.data_dir / "reddit_field_err_debug.png"
+                            try:
+                                page.screenshot(path=str(debug_path))
+                            except Exception:
+                                pass
+                            err_msg = f"Reddit {label} 发布被拒绝: {err_txt} (该分区或个人主页不存在，或账号已被限制，快照: {debug_path})"
+                            logger.error(f"[Reddit] {err_msg}")
+                            results.append((label, False, err_msg))
+                            compliance.append(self.verify_compliance_item(
+                                "reddit", f"post_created:{label}", True, False, err_msg
+                            ))
                             break
 
                         alert_el = page.locator("[role='alert'], div[class*='toast'], div:has-text('Something went wrong')").first
