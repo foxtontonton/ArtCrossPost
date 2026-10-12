@@ -11,6 +11,7 @@ ArtCrossPost - Reddit Dispatcher (支持 Edge 浏览器自动化与 PRAW 官方 
      - 若 data/reddit_secrets.json 填入了 client_id / client_secret 等凭据，自动无缝切回 PRAW 直连
      - 代码全量保留，绝不删除，静待未来官方审核通过
 """
+import re
 import json
 import time
 from pathlib import Path
@@ -181,15 +182,16 @@ class RedditDispatcher(BaseDispatcher):
 
         # 2. 检查本地保存的 Profile 与 Cookies
         profile = self.get_profile()
-        if profile.get("logged_in") and profile.get("username"):
-            return True, f"已连接 (浏览器: u/{profile['username']})"
+        u = profile.get("username")
+        if u and u not in ("未登录", "None", "") and profile.get("logged_in") is not False:
+            return True, f"已连接 (浏览器: u/{u})"
 
         cookies = self.get_cookies()
         if cookies:
             has_session = any(c.get("name") in ("reddit_session", "token", "session") for c in cookies)
             if has_session:
-                u = profile.get("username", "Impressive_Bad6222")
-                return True, f"已连接 (浏览器: u/{u})"
+                u_str = u if (u and u != "未登录") else "Impressive_Bad6222"
+                return True, f"已连接 (浏览器: u/{u_str})"
 
         if not secrets:
             return False, "未登录 (API 凭据未配置且未连接浏览器会话，请先在右侧 Reddit 卡片点击「登录」按钮)"
@@ -273,7 +275,7 @@ class RedditDispatcher(BaseDispatcher):
                     cookies = context.cookies()
                     self.save_cookies(cookies)
                     final_user = detected_username or "Impressive_Bad6222"
-                    self.save_profile(username=final_user)
+                    self.save_profile(username=final_user, logged_in=True)
                     self.close_login_session(browser, context, page)
                     return True, f"Reddit 连接成功！已同步账号: u/{final_user}"
 
@@ -318,7 +320,10 @@ class RedditDispatcher(BaseDispatcher):
             logger.info("[Reddit] 检测到有效 API 凭据，使用 PRAW 官方通道发布...")
             return self._publish_via_praw(payload)
 
-        has_browser_session = bool(self.get_cookies() or self.get_profile().get("logged_in"))
+        profile = self.get_profile()
+        u = profile.get("username")
+        has_valid_user = bool(u and u not in ("未登录", "None", "") and profile.get("logged_in") is not False)
+        has_browser_session = bool(self.get_cookies() or has_valid_user)
         if mode == "browser" or (has_browser_session and not has_api_secrets):
             logger.info("[Reddit] 使用真实 Edge 浏览器自动化通道发布 (Stealth 模式)...")
             return self._publish_via_browser(payload)
@@ -409,47 +414,75 @@ class RedditDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context, page)
                         return False, err_msg, compliance
 
-                    # 2. 切换至“Images & Video”标签页
-                    tab_clicked = False
-                    tab_selectors = [
-                        "button:has-text('Images & Video')",
-                        "button:has-text('Images')",
-                        "[role='tab']:has-text('Images')",
-                        "[role='tab']:has-text('Images & Video')",
-                        "button[aria-label*='Images']",
-                        "xpath=//button[contains(., 'Images')]"
-                    ]
-                    for t_sel in tab_selectors:
+                    # 2. 定位图片上传控件并提交文件 (兼容现代化 Shreddit Shadow DOM 与旧版多 Tab 结构)
+                    uploaded = False
+
+                    # 策略 A: 工具栏图片按钮触发文件选择器 (现代 Shreddit)
+                    toolbar_btn = page.locator(
+                        "post-composer-toolbar-button-image button, post-composer-toolbar-button-image, button[aria-label*='Image'], button[aria-label*='图片']"
+                    ).first
+                    if toolbar_btn.count() > 0 and toolbar_btn.is_visible():
                         try:
-                            tab_btn = page.query_selector(t_sel)
-                            if tab_btn and tab_btn.is_visible():
-                                tab_btn.click(timeout=2000)
-                                tab_clicked = True
-                                time.sleep(1.5)
-                                break
-                        except Exception:
-                            continue
+                            with page.expect_file_chooser(timeout=4000) as fc_info:
+                                toolbar_btn.click()
+                            file_chooser = fc_info.value
+                            file_chooser.set_files(images)
+                            uploaded = True
+                            logger.info(f"[Reddit] {label} 已通过工具栏文件选择器挂载 {len(images)} 张图片素材")
+                        except Exception as e:
+                            logger.debug(f"[Reddit] 工具栏文件选择器策略触发跳过: {e}")
 
-                    if not tab_clicked:
-                        logger.debug(f"[Reddit] 未显式点击到 Images 标签，尝试直接查找文件上传控件")
+                    # 策略 B: 利用 Playwright Locator 自动穿透 Shadow Root 设置 input[type='file']
+                    if not uploaded:
+                        fi_locators = [
+                            "r-post-media-input input[type='file']",
+                            "post-composer-toolbar-button-image input[type='file']",
+                            "input[type='file'][accept*='image']",
+                            "input[type='file']"
+                        ]
+                        for fi_sel in fi_locators:
+                            loc = page.locator(fi_sel)
+                            if loc.count() > 0:
+                                try:
+                                    loc.first.set_input_files(images)
+                                    uploaded = True
+                                    logger.info(f"[Reddit] {label} 已通过 Shadow DOM 穿透控件设置 {len(images)} 张图片素材")
+                                    break
+                                except Exception as e:
+                                    logger.debug(f"[Reddit] 尝试穿透定位器 {fi_sel} 失败: {e}")
 
-                    # 3. 定位图片上传控件并提交文件
-                    fi_selectors = [
-                        "input[type='file'][accept*='image']",
-                        "input[type='file']"
-                    ]
-                    file_input = None
-                    for fi_sel in fi_selectors:
+                    # 策略 C: 旧版 Redesign Tab 切换策略
+                    if not uploaded:
+                        tab_selectors = [
+                            "button:has-text('Images & Video')",
+                            "button:has-text('Images')",
+                            "[role='tab']:has-text('Images')",
+                            "[role='tab']:has-text('Images & Video')",
+                            "button[aria-label*='Images']",
+                            "xpath=//button[contains(., 'Images')]"
+                        ]
+                        for t_sel in tab_selectors:
+                            try:
+                                tab_btn = page.locator(t_sel).first
+                                if tab_btn.count() > 0 and tab_btn.is_visible():
+                                    tab_btn.click(timeout=2000)
+                                    time.sleep(1.5)
+                                    file_input = page.locator("input[type='file']").first
+                                    if file_input.count() > 0:
+                                        file_input.set_input_files(images)
+                                        uploaded = True
+                                        logger.info(f"[Reddit] {label} 已通过 Tab 切换激活文件上传")
+                                        break
+                            except Exception:
+                                continue
+
+                    if not uploaded:
+                        debug_path = self.data_dir / "reddit_submit_debug.png"
                         try:
-                            page.wait_for_selector(fi_sel, timeout=5000)
-                            file_input = page.query_selector(fi_sel)
-                            if file_input:
-                                break
+                            page.screenshot(path=str(debug_path))
                         except Exception:
-                            continue
-
-                    if not file_input:
-                        err_msg = f"Reddit {label} 未能定位到文件上传控件，已中止发布以防文字单独泄露"
+                            pass
+                        err_msg = f"Reddit {label} 未能定位到文件上传控件，已中止发布以防文字单独泄露 (快照: {debug_path})"
                         logger.error(f"[Reddit] {err_msg}")
                         results.append((label, False, err_msg))
                         compliance.append(self.verify_compliance_item(
@@ -457,14 +490,11 @@ class RedditDispatcher(BaseDispatcher):
                         ))
                         break
 
-                    logger.info(f"[Reddit] {label} 正在上传 {len(images)} 张图片素材...")
-                    file_input.set_input_files(images)
+                    # 等待图片渲染与附加断言
                     time.sleep(3.0)
-
-                    # 断言图片已成功附加与预览渲染
                     att_ok, att_msg = self.assert_attached(
                         page,
-                        "img[src*='preview.redd.it'], img[src*='i.redd.it'], img[src*='blob:'], [aria-label*='Remove'], button[aria-label*='delete'], [data-testid*='media'], shreddit-media-item",
+                        "r-post-media-input, post-composer-toolbar-button-image, img[src*='blob:'], img[src*='preview.redd.it'], img[src*='i.redd.it'], [aria-label*='Remove'], button[aria-label*='delete'], [data-testid*='media'], shreddit-media-item, button:has-text('添加到正文'), button:has-text('添加')",
                         timeout=25000,
                         error_msg=f"Reddit {label} 图片上传未就绪或预览未渲染"
                     )
@@ -475,10 +505,14 @@ class RedditDispatcher(BaseDispatcher):
                         ))
                         break
 
-                    # 4. 填写帖子标题
-                    title_sel = "textarea[placeholder*='Title'], input[placeholder*='Title'], [aria-label*='Title'], textarea[name='title']"
-                    title_input = page.query_selector(title_sel)
-                    if not title_input:
+                    # 3. 填写帖子标题
+                    title_loc = page.locator(
+                        "post-composer-title textarea, post-composer-title input, textarea[name='title'], [placeholder*='标题'], [placeholder*='Title'], [aria-label*='标题'], [aria-label*='Title']"
+                    ).first
+                    if title_loc.count() == 0:
+                        title_loc = page.locator("textarea[placeholder*='Title'], input[placeholder*='Title'], [aria-label*='Title'], textarea[name='title']").first
+
+                    if title_loc.count() == 0:
                         err_msg = f"Reddit {label} 未找到标题输入框"
                         results.append((label, False, err_msg))
                         compliance.append(self.verify_compliance_item(
@@ -486,30 +520,74 @@ class RedditDispatcher(BaseDispatcher):
                         ))
                         break
 
-                    title_input.click()
-                    title_input.fill(title)
+                    title_loc.click()
+                    title_loc.fill(title)
                     time.sleep(1.0)
 
-                    # 5. 设置 NSFW 与 Spoiler 标记
-                    if is_nsfw:
-                        nsfw_btn = page.query_selector("button:has-text('NSFW'), button:has-text('18+'), button[aria-label*='NSFW']")
-                        if nsfw_btn:
-                            aria_pressed = nsfw_btn.get_attribute("aria-pressed") or ""
-                            cls = nsfw_btn.get_attribute("class") or ""
-                            if aria_pressed != "true" and "active" not in cls.lower():
-                                nsfw_btn.click()
+                    # 4. 可选填写正文文本 (若有)
+                    if description:
+                        desc_loc = page.locator(
+                            "div[role='textbox'][contenteditable='true'], faceplate-textarea-input textarea, textarea[placeholder*='文本'], textarea[placeholder*='Body']"
+                        ).first
+                        if desc_loc.count() > 0 and desc_loc.is_visible():
+                            try:
+                                desc_loc.click()
+                                desc_loc.fill(description)
                                 time.sleep(0.5)
-                                logger.info(f"[Reddit] {label} 已标记 NSFW")
+                            except Exception:
+                                pass
+
+                    # 5. 设置 NSFW 与 Spoiler 标记 (优先通过现代标记弹窗，备用直接按钮)
+                    tag_btn = page.locator("button:has-text('添加标记'), button:has-text('Add tags'), button#reddit-post-flair-button").first
+                    if tag_btn.count() > 0 and tag_btn.is_visible():
+                        try:
+                            tag_btn.click()
+                            time.sleep(1.0)
+                            if is_nsfw:
+                                nsfw_sw = page.locator("faceplate-switch-input[name='isNsfw']").first
+                                if nsfw_sw.count() > 0 and nsfw_sw.get_attribute("data-checked") == "false":
+                                    nsfw_sw.click()
+                                    time.sleep(0.3)
+                                    logger.info(f"[Reddit] {label} 已开启 18+ (NSFW) 标记")
+                            if spoiler:
+                                spoiler_sw = page.locator("faceplate-switch-input[name='isSpoiler']").first
+                                if spoiler_sw.count() > 0 and spoiler_sw.get_attribute("data-checked") == "false":
+                                    spoiler_sw.click()
+                                    time.sleep(0.3)
+                                    logger.info(f"[Reddit] {label} 已开启 Spoiler (剧透) 标记")
+                            apply_btn = page.locator("button#post-flair-modal-apply-button, button:has-text('添加'):not([disabled]), button:has-text('Apply'):not([disabled])").first
+                            if apply_btn.count() > 0 and apply_btn.is_visible():
+                                apply_btn.click()
+                                time.sleep(1.0)
+                        except Exception as tag_err:
+                            logger.debug(f"[Reddit] 标记弹窗设置异常，尝试直接选择器: {tag_err}")
+
+                    # 备用：传统直接按钮开关 (Classic Redesign)
+                    if is_nsfw:
+                        nsfw_btn = page.locator("button:has-text('NSFW'), button:has-text('18+'), button[aria-label*='NSFW']").first
+                        if nsfw_btn.count() > 0 and nsfw_btn.is_visible():
+                            try:
+                                aria_pressed = nsfw_btn.get_attribute("aria-pressed") or ""
+                                cls = nsfw_btn.get_attribute("class") or ""
+                                if aria_pressed != "true" and "active" not in cls.lower():
+                                    nsfw_btn.click()
+                                    time.sleep(0.5)
+                                    logger.info(f"[Reddit] {label} 已标记 NSFW (直接按钮)")
+                            except Exception:
+                                pass
 
                     if spoiler:
-                        spoiler_btn = page.query_selector("button:has-text('Spoiler'), button[aria-label*='Spoiler']")
-                        if spoiler_btn:
-                            aria_pressed = spoiler_btn.get_attribute("aria-pressed") or ""
-                            cls = spoiler_btn.get_attribute("class") or ""
-                            if aria_pressed != "true" and "active" not in cls.lower():
-                                spoiler_btn.click()
-                                time.sleep(0.5)
-                                logger.info(f"[Reddit] {label} 已标记 Spoiler")
+                        spoiler_btn = page.locator("button:has-text('Spoiler'), button[aria-label*='Spoiler'], button:has-text('剧透')").first
+                        if spoiler_btn.count() > 0 and spoiler_btn.is_visible():
+                            try:
+                                aria_pressed = spoiler_btn.get_attribute("aria-pressed") or ""
+                                cls = spoiler_btn.get_attribute("class") or ""
+                                if aria_pressed != "true" and "active" not in cls.lower():
+                                    spoiler_btn.click()
+                                    time.sleep(0.5)
+                                    logger.info(f"[Reddit] {label} 已标记 Spoiler (直接按钮)")
+                            except Exception:
+                                pass
 
                     # 6. 发帖前安全验证二次排查
                     challenged, reason = self.check_humanity_challenge(page)
@@ -519,21 +597,30 @@ class RedditDispatcher(BaseDispatcher):
                         results.append((label, False, err_msg))
                         break
 
-                    # 7. 提交发帖
-                    post_btn_selectors = [
+                    # 7. 提交发帖 (支持中文界面'发帖'与英文'Post')
+                    post_btn_locators = [
+                        "r-post-form-submit-button button:not([disabled])",
+                        "button:has-text('发帖'):not([disabled])",
                         "button:has-text('Post'):not([disabled])",
+                        "button[type='submit']:has-text('发帖'):not([disabled])",
                         "button[type='submit']:has-text('Post'):not([disabled])",
                         "button:has-text('发布'):not([disabled])",
                         "shreddit-composer button:has-text('Post')"
                     ]
                     post_btn = None
-                    for p_sel in post_btn_selectors:
-                        post_btn = page.query_selector(p_sel)
-                        if post_btn and post_btn.is_visible() and not post_btn.is_disabled():
+                    for p_sel in post_btn_locators:
+                        loc = page.locator(p_sel).first
+                        if loc.count() > 0 and loc.is_visible() and not loc.is_disabled():
+                            post_btn = loc
                             break
 
                     if not post_btn:
-                        err_msg = f"Reddit {label} 发帖按钮不可用 (可能必填项未满足或被锁定)"
+                        debug_path = self.data_dir / "reddit_submit_button_debug.png"
+                        try:
+                            page.screenshot(path=str(debug_path))
+                        except Exception:
+                            pass
+                        err_msg = f"Reddit {label} 发帖按钮不可用 (可能必填项未满足或被锁定，快照: {debug_path})"
                         logger.error(f"[Reddit] {err_msg}")
                         results.append((label, False, err_msg))
                         compliance.append(self.verify_compliance_item(
@@ -544,26 +631,51 @@ class RedditDispatcher(BaseDispatcher):
                     post_btn.click()
                     logger.info(f"[Reddit] {label} 已点击发布按钮，等待发帖成功与 URL 生成...")
 
-                    # 8. 等待成功跳转至评论/详情页
+                    # 8. 等待发帖完成并获取帖子详情 URL (兼容直接详情页与现代 Shreddit Feed 重定向)
                     post_url = None
-                    deadline = time.time() + 35
+                    deadline = time.time() + 45
                     while time.time() < deadline:
                         challenged, reason = self.check_humanity_challenge(page)
                         if challenged:
-                            err_msg = f"Reddit 提交后遭遇安全挑战: {reason}"
+                            err_msg = f"Reddit 提交后遭遇安全挑战: {reason}。为保护版主账号，已立即中止操作！"
                             results.append((label, False, err_msg))
                             break
 
                         curr_url = page.url
-                        if "/comments/" in curr_url:
+                        clean_path = curr_url.split("?")[0].rstrip("/")
+                        left_submit = not clean_path.endswith("/submit")
+
+                        # 情况 1: 直接跳转到具体帖子评论详情页 /comments/<id>/<slug>
+                        if re.search(r"/comments/[a-z0-9]+", curr_url):
                             post_url = curr_url
                             break
 
-                        alert_el = page.query_selector("[role='alert'], div[class*='toast'], div:has-text('Something went wrong')")
-                        if alert_el and alert_el.is_visible():
-                            err_txt = alert_el.inner_text().strip()
-                            if err_txt:
-                                logger.warning(f"[Reddit] 页面警告弹窗: {err_txt}")
+                        # 情况 2: 现代 Shreddit 提交后重定向回分区首页或个人已投稿列表页
+                        if left_submit:
+                            time.sleep(2.5)  # 等待列表流注水渲染
+                            # 优先从新页面提取带帖子 ID 的评论详情永久链接
+                            links = page.locator("a[href*='/comments/']").all()
+                            for lk in links:
+                                try:
+                                    h = lk.get_attribute("href") or ""
+                                    if re.search(r"/comments/[a-z0-9]{4,}", h):
+                                        post_url = h if h.startswith("http") else f"https://www.reddit.com{h}"
+                                        break
+                                except Exception:
+                                    continue
+                            # 兜底使用跳转后的落地 URL
+                            if not post_url:
+                                post_url = page.url
+                            break
+
+                        alert_el = page.locator("[role='alert'], div[class*='toast'], div:has-text('Something went wrong')").first
+                        if alert_el.count() > 0 and alert_el.is_visible():
+                            try:
+                                err_txt = alert_el.inner_text().strip()
+                                if err_txt:
+                                    logger.warning(f"[Reddit] 页面警告弹窗: {err_txt}")
+                            except Exception:
+                                pass
 
                         time.sleep(1.0)
 
@@ -651,7 +763,7 @@ class RedditDispatcher(BaseDispatcher):
         compliance = []
         results = []
         for label, target_name, is_subreddit in targets:
-            submit_kwargs = dict(title=title, nsfw=is_nsfw, spoiler=spoiler)
+            submit_kwargs = dict(nsfw=is_nsfw, spoiler=spoiler)
             if is_subreddit:
                 if opts.get("reddit_flair_id"):
                     submit_kwargs["flair_id"] = opts["reddit_flair_id"]
@@ -661,7 +773,7 @@ class RedditDispatcher(BaseDispatcher):
                 target = reddit.subreddit(target_name)
                 _ = target.display_name
                 if len(images) == 1:
-                    submission = target.submit_image(images[0], **submit_kwargs)
+                    submission = target.submit_image(title, images[0], **submit_kwargs)
                 else:
                     gallery = [{"image_path": p} for p in images]
                     submission = target.submit_gallery(title, gallery, **submit_kwargs)

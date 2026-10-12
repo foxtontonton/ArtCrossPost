@@ -198,7 +198,7 @@ def test_reddit_title_truncated(tmp_path, monkeypatch):
     assert ok is True
     subreddit = targets["BlackLatexMale"]
     sent_title = subreddit.submit_image.call_args.kwargs.get("title") \
-        or subreddit.submit_image.call_args.args[1]
+        or subreddit.submit_image.call_args.args[0]
     assert len(sent_title) == 300
 
 
@@ -227,7 +227,7 @@ def test_reddit_prefers_reddit_images(tmp_path, monkeypatch):
     })
     assert ok is True
     subreddit = targets["BlackLatexMale"]
-    called_img = subreddit.submit_image.call_args.args[0]
+    called_img = subreddit.submit_image.call_args.args[1] if len(subreddit.submit_image.call_args.args) > 1 else subreddit.submit_image.call_args.args[0]
     assert "reddit_custom.png" in called_img
 
 
