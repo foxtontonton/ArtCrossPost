@@ -190,7 +190,8 @@ class RedditDispatcher(BaseDispatcher):
         return []
 
     def publish(self, payload):
-        images = [str(Path(x).resolve()) for x in payload.get("images", [])
+        raw_images = payload.get("reddit_images") or payload.get("images", [])
+        images = [str(Path(x).resolve()) for x in raw_images
                   if Path(x).exists()]
         if not images:
             return False, "Reddit 发布失败: 未找到可上传的图片文件", []

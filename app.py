@@ -1414,6 +1414,8 @@ class PublishThread(QThread):
                 disp_images = self.payload.get("x_images") or images
             elif disp.name == "deviantart":
                 disp_images = self.payload.get("da_images") or images
+            elif disp.name == "reddit":
+                disp_images = self.payload.get("reddit_images") or raw_images
             else:
                 disp_images = images
 
@@ -1491,6 +1493,10 @@ class PublishThread(QThread):
                     elif disp.name == "deviantart":
                         if p_obj.suffix.lower() == ".gif" and f_size > 200 * 1024 * 1024:
                             asset_err = f"DeviantArt 限制 GIF ≤ 200MB (当前 {f_size / 1024 / 1024:.2f}MB)"
+                            break
+                    elif disp.name == "reddit":
+                        if f_size > 20 * 1024 * 1024:
+                            asset_err = f"Reddit 限制单张素材 ≤ 20MB (当前 {f_size / 1024 / 1024:.2f}MB)"
                             break
 
             if asset_err:
@@ -2878,6 +2884,20 @@ class MainWindow(QMainWindow):
                         idx = kofi_opts["visibility"].currentIndex()
                         self.config["defaults"]["kofi_visibility"] = kofi_map.get(idx, "supporters")
 
+                # Reddit
+                if "reddit" in self.platform_controls:
+                    reddit_opts = self.platform_controls["reddit"]["options"]
+                    if "censor" in reddit_opts:
+                        self.config["defaults"]["reddit_censor"] = reddit_opts["censor"].isChecked()
+                    if "subreddit" in reddit_opts:
+                        self.config["defaults"]["reddit_subreddit"] = reddit_opts["subreddit"].text().strip()
+                    if "post_to_profile" in reddit_opts:
+                        self.config["defaults"]["reddit_post_to_profile"] = reddit_opts["post_to_profile"].isChecked()
+                    if "nsfw" in reddit_opts:
+                        self.config["defaults"]["reddit_nsfw"] = reddit_opts["nsfw"].isChecked()
+                    if "spoiler" in reddit_opts:
+                        self.config["defaults"]["reddit_spoiler"] = reddit_opts["spoiler"].isChecked()
+
             save_config(self.config)
             logger.debug("[Config] 界面配置已成功持久化至 presets.json")
         except Exception as e:
@@ -3811,6 +3831,43 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(kofi_ai)
             opts["ai"] = kofi_ai
 
+        elif disp.name == "reddit":
+            reddit_censor = QCheckBox("打码保护")
+            reddit_censor.setChecked(self.config.get("defaults", {}).get("reddit_censor", False))
+            reddit_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            reddit_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(reddit_censor)
+            opts["censor"] = reddit_censor
+
+            opts_layout.addWidget(QLabel("目标分区:"))
+            reddit_sub_input = QLineEdit()
+            reddit_sub_input.setPlaceholderText("BlackLatexMale")
+            reddit_sub_input.setText(self.config.get("defaults", {}).get("reddit_subreddit", "BlackLatexMale"))
+            reddit_sub_input.setFixedWidth(130)
+            reddit_sub_input.setStyleSheet("background-color: #272738; color: #e2e8f0; border: 1px solid #3f3f46; border-radius: 4px; padding: 2px 6px;")
+            reddit_sub_input.textChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(reddit_sub_input)
+            opts["subreddit"] = reddit_sub_input
+
+            reddit_profile_cb = QCheckBox("双投主页 (u/)")
+            reddit_profile_cb.setToolTip("开启后将同时发布到您的个人主页 u/<用户名>")
+            reddit_profile_cb.setChecked(self.config.get("defaults", {}).get("reddit_post_to_profile", True))
+            reddit_profile_cb.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(reddit_profile_cb)
+            opts["post_to_profile"] = reddit_profile_cb
+
+            reddit_nsfw_cb = QCheckBox("NSFW")
+            reddit_nsfw_cb.setChecked(self.config.get("defaults", {}).get("reddit_nsfw", True))
+            reddit_nsfw_cb.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(reddit_nsfw_cb)
+            opts["nsfw"] = reddit_nsfw_cb
+
+            reddit_spoiler_cb = QCheckBox("Spoiler")
+            reddit_spoiler_cb.setChecked(self.config.get("defaults", {}).get("reddit_spoiler", True))
+            reddit_spoiler_cb.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(reddit_spoiler_cb)
+            opts["spoiler"] = reddit_spoiler_cb
+
         layout.addLayout(opts_layout)
 
         self.platform_controls[disp.name] = {
@@ -3985,6 +4042,8 @@ class MainWindow(QMainWindow):
             self.platform_controls["x_twitter"]["options"]["sensitive"].setChecked(is_nsfw)
         if "deviantart" in self.platform_controls and "mature" in self.platform_controls["deviantart"]["options"]:
             self.platform_controls["deviantart"]["options"]["mature"].setCurrentIndex(0 if is_nsfw else 2)
+        if "reddit" in self.platform_controls and "nsfw" in self.platform_controls["reddit"]["options"]:
+            self.platform_controls["reddit"]["options"]["nsfw"].setChecked(is_nsfw)
         self.notify(f"已同步更新各平台敏感/分级设定为: {'成人/敏感' if is_nsfw else '全年龄'}", level="info")
         self._schedule_config_save()
 
@@ -4593,6 +4652,7 @@ class MainWindow(QMainWindow):
         x_images = []
         patreon_images = []
         kofi_images = []
+        reddit_images = []
 
         censor_enabled = self.auto_censor_cb.isChecked()
         wm_enabled = self.watermark_enabled_cb.isChecked()
@@ -4600,11 +4660,13 @@ class MainWindow(QMainWindow):
 
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         is_kofi_selected = any(d.name == "kofi" for d in selected)
+        is_reddit_selected = any(d.name == "reddit" for d in selected)
 
         is_da_censor = censor_enabled and self._is_platform_censor_checked("deviantart")
         is_x_censor = censor_enabled and self._is_platform_censor_checked("x_twitter")
         is_pat_censor = censor_enabled and self._is_platform_censor_checked("patreon")
         is_kofi_censor = censor_enabled and self._is_platform_censor_checked("kofi")
+        is_reddit_censor = censor_enabled and self._is_platform_censor_checked("reddit")
 
         style, mode, ratio = self._get_current_censor_params()
         wm_text = self.watermark_text_input.text().strip()
@@ -4645,7 +4707,7 @@ class MainWindow(QMainWindow):
             } if (wm_enabled and apply_wm_publish and wm_text) else None
 
             if is_gif:
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_reddit_censor])
                 c_params = None
                 if any_censor:
                     orig_w, orig_h = 800, 600
@@ -4768,9 +4830,41 @@ class MainWindow(QMainWindow):
                                 kofi_images.append(str(p))
                 else:
                     kofi_images.append(str(p))
+
+                # 5. Reddit 动图
+                if is_reddit_selected:
+                    if is_reddit_censor:
+                        if da_out_path and is_da_censor and Path(da_out_path).exists():
+                            reddit_images.append(str(da_out_path))
+                        else:
+                            red_out_path = CACHE_DIR / f"{safe_title}_{idx}_reddit_censor.gif"
+                            try:
+                                self._generate_composite_gif(p, red_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=20.0)
+                            except RuntimeError as e:
+                                self.notify(f"Reddit 打码 GIF 合成失败: {e}", level="error")
+                                logger.error(f"[发布准备] {e}")
+                                return
+                            reddit_images.append(str(red_out_path))
+                    else:
+                        if wm_info:
+                            if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
+                                reddit_images.append(str(da_out_path))
+                            else:
+                                red_out_path = CACHE_DIR / f"{safe_title}_{idx}_reddit_wm.gif"
+                                try:
+                                    self._generate_composite_gif(p, red_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=20.0)
+                                except RuntimeError as e:
+                                    self.notify(f"Reddit 水印 GIF 合成失败: {e}", level="error")
+                                    logger.error(f"[发布准备] {e}")
+                                    return
+                                reddit_images.append(str(red_out_path))
+                        else:
+                            reddit_images.append(str(p))
+                else:
+                    reddit_images.append(str(p))
             else:
                 # 静态图片处理
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_reddit_censor])
                 pub_censor_path = None
                 clean_censor_path = None
 
@@ -4854,6 +4948,13 @@ class MainWindow(QMainWindow):
                     kofi_target = pub_raw_path if wm_info else Path(p)
                 kofi_images.append(str(kofi_target))
 
+                # Reddit 静态图
+                if is_reddit_censor:
+                    reddit_target = pub_censor_path if wm_info else (clean_censor_path or pub_censor_path)
+                else:
+                    reddit_target = pub_raw_path if wm_info else Path(p)
+                reddit_images.append(str(reddit_target))
+
         tags = split_and_normalize_tags(self.tags_input.toPlainText())
 
         platform_options = {
@@ -4911,6 +5012,17 @@ class MainWindow(QMainWindow):
             if "ai" in opts:
                 platform_options["kofi_ai"] = opts["ai"].isChecked()
 
+        if "reddit" in self.platform_controls:
+            opts = self.platform_controls["reddit"]["options"]
+            if "subreddit" in opts:
+                platform_options["reddit_subreddit"] = opts["subreddit"].text().strip().lstrip("r/").lstrip("/")
+            if "post_to_profile" in opts:
+                platform_options["reddit_post_to_profile"] = opts["post_to_profile"].isChecked()
+            if "nsfw" in opts:
+                platform_options["reddit_nsfw"] = opts["nsfw"].isChecked()
+            if "spoiler" in opts:
+                platform_options["reddit_spoiler"] = opts["spoiler"].isChecked()
+
         # 针对 X (Twitter) 进行字数超限决策检查
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         title_val = self.title_input.text().strip()
@@ -4953,6 +5065,7 @@ class MainWindow(QMainWindow):
             "x_images": x_images,               # X (Twitter) 专属图 (按 X 打码选项与体积限制)
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
+            "reddit_images": reddit_images,     # Reddit 专属图 (按 Reddit 打码选项)
             "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
