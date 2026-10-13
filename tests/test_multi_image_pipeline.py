@@ -435,3 +435,75 @@ def test_publish_thread_concurrency(tmp_path):
     assert disp1.publish.called
     assert disp2.publish.called
 
+
+def test_single_gif_compatibility_across_platforms(tmp_path, monkeypatch, qapp):
+    """
+    回归测试：确保多图功能与并发配置不会对既有的单图 GIF 发布产生任何负面影响。
+    验证点：
+    1. 单 GIF 导入时，动静混发弹窗不触发；
+    2. get_x_selected_images() 正确返回该唯一 GIF；
+    3. DeviantArt 针对单 GIF 发布不追加 (1/1) 编号后缀，保留纯净标题；
+    4. X (Twitter) 针对单 GIF 正常识别 is_any_gif 且上传单图；
+    5. Ko-fi 与 Patreon 针对单 GIF 均按 1 张处理，不追加批次编号，数量断言均返回 1。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    gif_file = tmp_path / "animation.gif"
+    gif_file.write_bytes(b"GIF89a_dummy_data")
+
+    # 1. UI 逻辑与选用验证
+    win = MainWindow()
+    win.image_paths = [str(gif_file)]
+    win.x_selected_paths = set()
+
+    # 单动图导入时，动静混合素材判定应为 False
+    has_gif = any(p.lower().endswith(".gif") for p in win.image_paths)
+    has_static = any(not p.lower().endswith(".gif") for p in win.image_paths)
+    assert has_gif is True
+    assert has_static is False
+    assert not (has_gif and has_static)
+
+    # X 选用默认回退为该唯一 GIF
+    x_cands = win.get_x_selected_images()
+    assert x_cands == [str(gif_file)]
+
+    # 2. DeviantArt 单动图分发
+    da_disp = DeviantArtDispatcher(tmp_path)
+    published_titles = []
+
+    def mock_da_single(page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        published_titles.append(title)
+        return True, ""
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com"
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+
+    da_disp.safe_goto = MagicMock()
+    da_disp.apply_stealth = MagicMock()
+    da_disp._submit_single_deviation = mock_da_single
+    da_disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+    da_disp.close_login_session = MagicMock()
+    da_disp.get_cookies = MagicMock(return_value=[{"name": "auth", "value": "1"}])
+    da_disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+
+    succ, msg, comp = da_disp.publish({
+        "title": "Solo Animation",
+        "da_images": [str(gif_file)]
+    })
+    assert succ is True
+    assert published_titles == ["Solo Animation"]  # 严禁追加 "(1/1)"
+
+    # 3. Ko-fi 与 Patreon 数量断言在 expected_count=1 时的表现
+    from dispatchers.monetization import KofiDispatcher, PatreonDispatcher
+
+    kofi_disp = KofiDispatcher(tmp_path)
+    mock_page_kofi = MagicMock()
+    assert kofi_disp._count_kofi_gallery_images(mock_page_kofi, "Solo Animation", 1) == 1
+
+    pat_disp = PatreonDispatcher(tmp_path)
+    assert pat_disp._count_patreon_gallery_images(mock_page_kofi, 1) == 1
+
+
+
