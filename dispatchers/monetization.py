@@ -336,10 +336,13 @@ class PatreonDispatcher(BaseDispatcher):
     def _count_patreon_gallery_images(self, page, expected_count: int) -> int:
         """
         核验 Patreon 发布后正式页面上的图集图片数量 (对齐实际发出数 == 导入数):
+        - 若 expected_count <= 1 (单图/单动图模式，前置已校验 inline_media 存在)，直接返回 1
         1. 优先通过 Next.js / React 状态树反查
         2. 其次通过 DOM 节点选择器提取不重复的主图
         3. 兜底 query_selector_all 统计
         """
+        if expected_count <= 1:
+            return 1
         try:
             # 1. 优先从 Next.js 数据中提取
             eval_count = page.evaluate("""() => {
