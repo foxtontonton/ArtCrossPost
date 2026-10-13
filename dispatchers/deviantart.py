@@ -613,23 +613,33 @@ class DeviantArtDispatcher(BaseDispatcher):
                                         logger.debug(f"[DeviantArt] 尝试相册触发器 {g_sel} 异常: {e_click}")
 
                         if not gallery_matched:
-                            logger.warning(f"[DeviantArt] 未找到相册 '{gallery}'，使用默认相册继续")
+                            logger.error(f"[DeviantArt] 未找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
+                            self.close_login_session(browser, context)
+                            return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册", compliance
                         else:
-                            # 3. 选择后回读确认选中项文本 (失败只记 warning，不计入合规项)
-                            try:
-                                page.wait_for_timeout(300)
-                                confirmed = page.evaluate("""(g) => {
-                                    const modal = document.querySelector('.ReactModal__Content') || document.body;
-                                    return modal.innerText.toLowerCase().includes(g.toLowerCase());
-                                }""", gallery)
-                                if confirmed:
-                                    logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
-                                else:
-                                    logger.warning(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，使用默认/当前相册继续")
-                            except Exception as e_verify:
-                                logger.warning(f"[DeviantArt] 回读确认相册文本异常: {e_verify}")
+                            # 3. 选择后回读确认选中项文本 (严格阻断式回读校验)
+                            confirmed = False
+                            for _ in range(6):
+                                page.wait_for_timeout(500)
+                                try:
+                                    confirmed = page.evaluate("""(g) => {
+                                        const modal = document.querySelector('.ReactModal__Content') || document.body;
+                                        return modal.innerText.toLowerCase().includes(g.toLowerCase());
+                                    }""", gallery)
+                                    if confirmed:
+                                        break
+                                except Exception:
+                                    pass
+                            if confirmed:
+                                logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
+                            else:
+                                logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
+                                self.close_login_session(browser, context)
+                                return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册", compliance
                     except Exception as e_gallery:
-                        logger.warning(f"[DeviantArt] 设置相册过程发生异常: {e_gallery}，使用默认相册继续")
+                        logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
+                        self.close_login_session(browser, context)
+                        return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册", compliance
 
                 # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
                 logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
@@ -811,6 +821,17 @@ class DeviantArtDispatcher(BaseDispatcher):
                 # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
                 logger.info("[DeviantArt] 投稿主页已确认跳转作品页！等待 10 秒供 DA 后台完成数据库索引与草稿销毁...")
                 time.sleep(10)
+
+                # 作品展示页实际相册反查 (若指定相册，反向核验页面文本)
+                if gallery and ("/art/" in page.url.lower() or "/deviation/" in page.url.lower()):
+                    try:
+                        dev_text = (page.inner_text("body") or "").lower()
+                        if gallery.lower() in dev_text:
+                            logger.info(f"[DeviantArt] 作品展示页相册反查成功: 页面已确认归属相册 '{gallery}'")
+                        else:
+                            logger.warning(f"[DeviantArt] 作品展示页相册反查提示: 页面文本未显式包含 '{gallery}' (可能收起在集合卡片中)")
+                    except Exception as ge:
+                        logger.debug(f"[DeviantArt] 作品展示页反查相册提示: {ge}")
 
                 # 成功离开 /submit 后的最终真发布核验：访问 Studio Drafts 验证草稿彻底销毁与出库
                 logger.info("[DeviantArt] 正在对 DeviantArt Studio 草稿箱执行反向核验 (验证草稿是否彻底销毁/出库)...")

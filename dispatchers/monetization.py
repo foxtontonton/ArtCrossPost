@@ -14,6 +14,11 @@ try:
 except ImportError:
     from ..logger import get_logger
 
+try:
+    from config import load_config
+except ImportError:
+    from ..config import load_config
+
 logger = get_logger("Monetization")
 
 class PatreonDispatcher(BaseDispatcher):
@@ -951,7 +956,10 @@ class KofiDispatcher(BaseDispatcher):
         if not cookies:
             return False, "Ko-fi 未登录，请先点击登录按钮获取会话", []
 
-        logger.info(f"[Ko-fi] 开始原生发布: 标题={title}, 媒体图片={len(images)}张, 原生权限={visibility}")
+        cfg = load_config()
+        min_publish_duration = payload.get("kofi_min_duration", cfg.get("defaults", {}).get("kofi_min_duration", 20))
+
+        logger.info(f"[Ko-fi] 开始原生发布: 标题={title}, 媒体图片={len(images)}张, 原生权限={visibility}, 耗时护栏={min_publish_duration}s")
         # Ko-fi 暂无自动化成人分级能力，明确记录未覆盖状态
         compliance = [
             self.verify_compliance_item(
@@ -985,10 +993,15 @@ class KofiDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://ko-fi.com/manage/mypage", timeout=40000)
                 page.wait_for_timeout(2000)
 
+                curr_url = page.url.lower()
+                if "/account/login" in curr_url or "/login" in curr_url:
+                    self.close_login_session(browser, context)
+                    return False, "Ko-fi 会话已失效，页面已重定向至登录页，请在主界面重新点击登录", compliance
+
                 # 1. 打开 Add Image 弹窗 (优先查找可视 Image 按钮，其次调用 openAddImage)
                 modal_opened = False
                 for b in page.query_selector_all("button, a, div[role='button']"):
-                    if b.is_visible() and b.inner_text().strip() == "Image":
+                    if b.is_visible() and b.inner_text().strip() in ["Image", "Add image"]:
                         try:
                             b.click()
                             modal_opened = True
@@ -1004,7 +1017,9 @@ class KofiDispatcher(BaseDispatcher):
                         }
                         return false;
                     }""")
-                    if not opened:
+                    if opened:
+                        modal_opened = True
+                    else:
                         add_btn = page.query_selector("a[onclick*='openAddImage'], button[onclick*='openAddImage'], button:has-text('Add image'), a:has-text('Add something')")
                         if add_btn:
                             add_btn.click()
@@ -1012,35 +1027,43 @@ class KofiDispatcher(BaseDispatcher):
                             img_opt = page.query_selector("a[onclick*='openAddImage'], a:has-text('Image')")
                             if img_opt:
                                 img_opt.click()
+                                modal_opened = True
 
                 try:
-                    page.wait_for_selector("#postImageTitle, #uploadModal", timeout=15000)
+                    page.wait_for_selector("#postImageTitle, #uploadModal", timeout=15000, state="visible")
                 except Exception as e:
-                    logger.debug(f"[Ko-fi] 等待上传弹窗渲染超时: {e}")
+                    self.close_login_session(browser, context)
+                    return False, f"Ko-fi 未能打开图片上传弹窗 (未检测到可见 #uploadModal 或 #postImageTitle): {e}", compliance
 
                 # 2. 上传无码原图至 Dropzone (精准匹配画廊发帖专用的 .dz-hidden-input)
                 file_input = page.query_selector("input.dz-hidden-input[accept*='.gif'], input.dz-hidden-input[accept*='.png'], input.dz-hidden-input")
                 if not file_input:
                     file_input = page.query_selector("#uploadModal input[type='file'], input[type='file']")
-                if file_input:
-                    file_input.set_input_files(images[0])
-                    att_ok, att_msg = self.assert_attached(
-                        page,
-                        "#postImageTitle",
-                        timeout=25000,
-                        error_msg="Ko-fi 图片上传未完成或标题框未渲染，已中止发布"
-                    )
-                    if not att_ok:
-                        self.close_login_session(browser, context)
-                        return False, att_msg, compliance
-                    time.sleep(3)  # 等待图片在 Dropzone 挂载与缩略图生成
+                if not file_input:
+                    self.close_login_session(browser, context)
+                    return False, "Ko-fi 未能定位到文件上传控件 (未找到 Dropzone 上传输入框)，已中止发布以防空发", compliance
+
+                file_input.set_input_files(images[0])
+                att_ok, att_msg = self.assert_attached(
+                    page,
+                    "#postImageTitle",
+                    timeout=25000,
+                    error_msg="Ko-fi 图片上传未完成或标题框未渲染，已中止发布"
+                )
+                if not att_ok:
+                    self.close_login_session(browser, context)
+                    return False, att_msg, compliance
+                time.sleep(3)  # 等待图片在 Dropzone 挂载与缩略图生成
 
                 # 3. 填写标题与描述
                 title_sel = "#postImageTitle"
                 title_input = page.query_selector(title_sel)
-                if title_input:
-                    title_input.fill(title)
-                    time.sleep(0.3)
+                if not title_input:
+                    self.close_login_session(browser, context)
+                    return False, "Ko-fi 未能定位到标题输入框 (#postImageTitle)，已中止发布", compliance
+
+                title_input.fill(title)
+                time.sleep(0.3)
 
                 f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
                 if not f_ok:
@@ -1083,22 +1106,75 @@ class KofiDispatcher(BaseDispatcher):
                         break
                     time.sleep(0.5)
 
+                publish_click_time = time.time()
                 try:
                     publish_btn.click()
                 except Exception:
                     publish_btn.evaluate("el => el.click()")
 
-                sub_ok, sub_msg = self.assert_submitted(
-                    page,
-                    lambda p: p.query_selector("#uploadModal[style*='display: none']") is not None or (p.query_selector("#uploadModal") and "in" not in (p.query_selector("#uploadModal").get_attribute("class") or "")) or p.query_selector("div.toast, div.alert-success") is not None,
-                    timeout=35000,
-                    error_msg="Ko-fi 提交超时未关闭发布窗口，作品可能已存为草稿，请前往网页确认"
-                )
-                self.close_login_session(browser, context)
-                if not sub_ok:
-                    return False, sub_msg, compliance
+                # 6. 等待上传弹窗关闭或出现完成状态
+                modal_closed = False
+                wait_submit_start = time.time()
+                while time.time() - wait_submit_start < 35:
+                    modal_el = page.query_selector("#uploadModal")
+                    is_visible = False
+                    if modal_el:
+                        try:
+                            is_visible = modal_el.is_visible()
+                        except Exception:
+                            pass
+                    if not modal_el or not is_visible:
+                        modal_closed = True
+                        break
+                    toast = page.query_selector("div.toast, div.alert-success")
+                    if toast and toast.is_visible():
+                        modal_closed = True
+                        break
+                    time.sleep(1)
 
-                return True, "Ko-fi 发布成功 (已对齐无码原图分发与受众权限)", compliance
+                if not modal_closed:
+                    self.close_login_session(browser, context)
+                    return False, "Ko-fi 提交超时未关闭发布弹窗，作品可能已存为草稿，请前往网页确认", compliance
+
+                # 7. 真实成功断言：跳转主页与管理动态反查刚刚发布的作品标题
+                logger.info("[Ko-fi] 上传弹窗已关闭，正在前往个人管理主页与后台 feed 执行真实作品存在性断言...")
+                time.sleep(2)
+                self.safe_goto(page, "https://ko-fi.com/manage/mypage", timeout=35000)
+                page.wait_for_timeout(2000)
+
+                clean_title = (title or "").strip().lower()
+                post_found = False
+                try:
+                    page_text = (page.inner_text("body") or "").lower()
+                    if clean_title and clean_title in page_text:
+                        post_found = True
+                except Exception as pe:
+                    logger.debug(f"[Ko-fi] 读取 mypage 正文异常: {pe}")
+
+                if not post_found:
+                    logger.info("[Ko-fi] /manage/mypage 未直接检出标题，正在前往 /manage/posts 进一步核实...")
+                    self.safe_goto(page, "https://ko-fi.com/manage/posts", timeout=30000)
+                    try:
+                        page.wait_for_timeout(2000)
+                        posts_text = (page.inner_text("body") or "").lower()
+                        if clean_title and clean_title in posts_text:
+                            post_found = True
+                    except Exception as pe:
+                        logger.debug(f"[Ko-fi] 检查 manage/posts 异常: {pe}")
+
+                if not post_found:
+                    self.close_login_session(browser, context)
+                    return False, f"Ko-fi 真实成功断言失败: 在管理主页 (/manage/mypage) 与管理动态 (/manage/posts) 均未检索到刚刚发布的作品标题 '{title}'，发布未能确认生效，已判定为失败", compliance
+
+                # 8. 耗时安全护栏校验: 从点击发布到断言通过少于 min_publish_duration 直接判异常
+                elapsed_publish = time.time() - publish_click_time
+                if elapsed_publish < min_publish_duration:
+                    logger.error(f"[Ko-fi] 发布耗时异常护栏触发: 从点击发布到断言通过仅耗时 {elapsed_publish:.1f}s (低于安全阈值 {min_publish_duration}s)")
+                    self.close_login_session(browser, context)
+                    return False, f"Ko-fi 发布耗时异常护栏拦截: 点击发布到断言通过仅耗时 {elapsed_publish:.1f} 秒 (安全护栏阈值: {min_publish_duration} 秒)，疑似命中历史同名残留或未完成真实上传，已判定为失败以防静默漏发", compliance
+
+                self.close_login_session(browser, context)
+                return True, f"Ko-fi 发布成功 (已通过管理主页真实作品断言校验，耗时 {elapsed_publish:.1f}s)", compliance
         except Exception as e:
             logger.error(f"[Ko-fi] 自动化发布异常: {e}")
             return False, f"Ko-fi 自动化发布异常: {e}", compliance
