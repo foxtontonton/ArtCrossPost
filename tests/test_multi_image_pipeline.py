@@ -68,6 +68,22 @@ def test_optimize_static_image_size_reduction(tmp_path):
     assert out_size_mb <= 0.5
 
 
+def test_optimize_static_image_preserves_uncompressed_when_under_limit(tmp_path):
+    """测试原图已为 JPEG 且未超过上限时，保持原始无损放行，不发生二次有损过度压缩"""
+    in_img = tmp_path / "original_1mb.jpg"
+    out_img = tmp_path / "out_1mb.jpg"
+
+    # 生成一个约 300KB 的 JPEG
+    im = Image.new("RGB", (800, 800), color=(120, 80, 200))
+    im.save(in_img, "JPEG", quality=95)
+    orig_bytes = in_img.stat().st_size
+
+    # 当设定上限 4.8MB 且 compress_only_when_over_limit=True 时，字节数必须完全保持一致 (无重编码损耗)
+    res = optimize_static_image(in_img, out_img, max_limit_mb=4.8, quality=88, compress_only_when_over_limit=True)
+    assert Path(res).exists()
+    assert Path(res).stat().st_size == orig_bytes
+
+
 # ==================== 2. Multi-image Selection & Ordering (验收标准 2) ====================
 
 from PyQt5.QtWidgets import QApplication
@@ -381,3 +397,41 @@ def test_x_dispatcher_4_images_publishing(tmp_path, monkeypatch):
     assert len(count_comp) == 1
     assert count_comp[0]["verified"] is True
     assert "4/4" in count_comp[0]["detail"]
+
+
+def test_publish_thread_concurrency(tmp_path):
+    """测试 PublishThread 支持并发多平台分发，单个平台不拖死整体"""
+    from app import PublishThread
+
+    disp1 = MagicMock()
+    disp1.name = "disp1"
+    disp1.display_name = "Platform 1"
+    disp1.publish.return_value = (True, "发布成功", [])
+
+    disp2 = MagicMock()
+    disp2.name = "disp2"
+    disp2.display_name = "Platform 2"
+    disp2.publish.return_value = (True, "发布成功", [])
+
+    test_img = tmp_path / "art.jpg"
+    test_img.write_bytes(b"dummy")
+
+    payload = {
+        "title": "Concurrent Art",
+        "images": [str(test_img)],
+        "publish_concurrency": 2
+    }
+
+    thread = PublishThread([disp1, disp2], payload)
+    results_holder = []
+    thread.completed_signal.connect(lambda res: results_holder.append(res))
+
+    thread.run()
+
+    assert len(results_holder) == 1
+    res = results_holder[0]
+    assert "disp1" in res and res["disp1"][0] is True
+    assert "disp2" in res and res["disp2"][0] is True
+    assert disp1.publish.called
+    assert disp2.publish.called
+

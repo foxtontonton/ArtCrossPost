@@ -1592,17 +1592,31 @@ def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     return compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]")
 
 
-def optimize_static_image(input_img_path, output_img_path, max_limit_mb=None, quality=88):
+def optimize_static_image(input_img_path, output_img_path, max_limit_mb=None, quality=88, compress_only_when_over_limit=True):
     """
     静态图 (JPEG/PNG/WEBP) 专用压缩优化分支:
     - 现有管线逐张复用：JPEG 走静态图压缩分支
-    - 将静态图片转码并压缩为高质量 JPEG (RGB)，优化色度采样子带
+    - compress_only_when_over_limit=True 时：若原图已是 JPEG 且未超过 max_limit_mb，则保持原始画质放行，严禁无损变有损过度压缩
+    - 若原图为 PNG/WEBP 或体积超限，则转码并压缩为高质量 JPEG (RGB)，优化色度采样子带
     - 若配置了 max_limit_mb 且输出超限，则自适应梯度调节 quality (88 -> 80 -> 72 -> 65)
       或等比微调缩放尺寸，确保体积严格满足限制。
     """
+    import shutil
     in_p = Path(input_img_path)
     out_p = Path(output_img_path)
     out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    in_size = in_p.stat().st_size
+    is_jpeg = in_p.suffix.lower() in (".jpg", ".jpeg")
+
+    # 保护原始画质：原图已是 JPEG 且体积未超限时，直接复制无损放行
+    if compress_only_when_over_limit and is_jpeg and max_limit_mb is not None:
+        max_bytes = max_limit_mb * 1024 * 1024
+        if in_size <= max_bytes:
+            if str(in_p.resolve()) != str(out_p.resolve()):
+                shutil.copy2(str(in_p), str(out_p))
+            logger.info(f"[Image Optimizer] 静态图体积 ({in_size / 1024 / 1024:.2f}MB) 未超过上限 ({max_limit_mb:.2f}MB)，保持原始无损放行")
+            return str(out_p)
 
     with Image.open(str(in_p)) as im:
         # 处理透明通道转换为白色背景 RGB
@@ -1802,12 +1816,17 @@ class PublishThread(QThread):
             self.progress_signal.emit(5, f"门禁已拦截 {gate_skipped_count} 个未就绪平台，继续为剩余 {len(valid_dispatchers)} 个平台发布...")
             self.msleep(800)
 
-        # ---------------- 针对通过门禁的平台正式分发 ----------------
+        # ---------------- 针对通过门禁的平台正式分发 (并发发布架构) ----------------
         valid_total = len(valid_dispatchers)
-        for idx, disp in enumerate(valid_dispatchers):
-            step = 5 + int(((idx) / max(1, valid_total)) * 90)
-            self.progress_signal.emit(step, f"正在向 {disp.display_name} 发布内容...")
+        cfg = load_config()
+        concurrency = self.payload.get("publish_concurrency") or cfg.get("publish_concurrency", 2)
+        concurrency = max(1, min(valid_total, int(concurrency)))
 
+        self.progress_signal.emit(5, f"开始并行分发至 {valid_total} 个平台 (并发数: {concurrency})...")
+        logger.info(f"[PublishThread] 启动并发分发: 平台总数={valid_total}, 并发数={concurrency}")
+
+        def _publish_worker(disp):
+            logger.info(f"[{disp.display_name}] 并发发布任务启动...")
             try:
                 ret = disp.publish(self.payload)
                 if isinstance(ret, tuple) and len(ret) >= 3:
@@ -1823,8 +1842,7 @@ class PublishThread(QThread):
             # 针对网络/超时类异常自动重试 1 次 (P1-7)
             if not success and any(err_k in str(msg).lower() for err_k in ["timeout", "timed out", "net::err", "connection", "err_aborted"]):
                 logger.warning(f"[{disp.display_name}] 捕获网络/超时波动 ({msg})，触发自动重试 (1/1)...")
-                self.progress_signal.emit(step, f"[{disp.display_name}] 网络波动，正在自动重试 (1/1)...")
-                self.msleep(1500)
+                time.sleep(1.5)
                 try:
                     ret_retry = disp.publish(self.payload)
                     if isinstance(ret_retry, tuple) and len(ret_retry) >= 3:
@@ -1840,8 +1858,20 @@ class PublishThread(QThread):
                     success, msg, compliance = False, f"重试后依然失败: {e2}", []
                     logger.error(f"[{disp.display_name}] 自动重试异常: {e2}")
 
-            results[disp.name] = (success, msg, compliance)
-            self.msleep(600)
+            logger.info(f"[{disp.display_name}] 发布流程结束: 成功={success}")
+            return disp.name, disp.display_name, success, msg, compliance
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_disp = {executor.submit(_publish_worker, d): d for d in valid_dispatchers}
+            for future in as_completed(future_to_disp):
+                disp_name, disp_title, success, msg, compliance = future.result()
+                results[disp_name] = (success, msg, compliance)
+                completed_count += 1
+                progress_val = 5 + int((completed_count / valid_total) * 90)
+                status_str = "成功" if success else "未完成"
+                self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
 
         self.progress_signal.emit(100, "全平台分发已完成！")
         self.completed_signal.emit(results)
@@ -5033,6 +5063,34 @@ class MainWindow(QMainWindow):
             self.notify("⚠️ 发布前门禁拦截: 请先填写作品标题！", level="warning")
             return
 
+        # 需求 4.c: 混合素材 (GIF + 静态图) 自动按平台能力拆分与发布前确认
+        has_gif = any(p.lower().endswith(".gif") for p in self.image_paths)
+        has_static = any(not p.lower().endswith(".gif") for p in self.image_paths)
+        if has_gif and has_static:
+            logger.info("[发布检查] 检测到包含动图与静态图片的混合素材批次")
+            try:
+                from PyQt5.QtWidgets import QMessageBox
+                if QApplication.instance() and hasattr(self, "isVisible") and self.isVisible():
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("混合素材发布确认")
+                    msg_box.setIcon(QMessageBox.Question)
+                    msg_box.setText(
+                        "检测到当前导入了包含动图与静态图的【混合素材】。\n\n"
+                        "各平台将按最佳兼容能力自动分发：\n"
+                        "• X (Twitter)：平台限制单帖不能混发动静图，将优先选用已选素材；\n"
+                        "• DeviantArt：平台为单图发布，将逐张按序号发布；\n"
+                        "• Patreon / Ko-fi：支持图集画廊展示。\n\n"
+                        "是否确认按各平台最佳策略继续分发？"
+                    )
+                    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+                    msg_box.setDefaultButton(QMessageBox.Yes)
+                    ret = msg_box.exec_()
+                    if ret != QMessageBox.Yes:
+                        self.notify("用户已取消混合素材分发", level="info")
+                        return
+            except Exception as me:
+                logger.debug(f"[混合素材确认] 提示: {me}")
+
         # 准备分发图片资源
         raw_images = [str(p) for p in self.image_paths]
         da_images = []
@@ -5275,10 +5333,14 @@ class MainWindow(QMainWindow):
                 x_target = pub_censor_path if is_x_censor else pub_raw_path
                 if is_x_selected:
                     opt_jpg = CACHE_DIR / f"{safe_title}_{idx}_xopt.jpg"
+                    cfg_comp = load_config().get("compression", {})
+                    x_limit = cfg_comp.get("x_max_limit_mb", 4.8)
+                    x_quality = cfg_comp.get("jpeg_quality", 88)
+                    x_only_over = cfg_comp.get("compress_only_when_over_limit", True)
                     try:
-                        optimize_static_image(x_target, opt_jpg, max_limit_mb=4.8)
+                        optimize_static_image(x_target, opt_jpg, max_limit_mb=x_limit, quality=x_quality, compress_only_when_over_limit=x_only_over)
                         x_images_map[p] = str(opt_jpg)
-                        logger.info(f"[Image Optimizer] X 静态图已执行高质量 JPEG 压缩分支: {Path(x_target).stat().st_size / 1024 / 1024:.2f}MB -> {Path(opt_jpg).stat().st_size / 1024 / 1024:.2f}MB")
+                        logger.info(f"[Image Optimizer] X 静态图处理就绪: {Path(x_target).stat().st_size / 1024 / 1024:.2f}MB -> {Path(opt_jpg).stat().st_size / 1024 / 1024:.2f}MB (门禁: ≤{x_limit}MB, 策略: 仅超限压缩={x_only_over})")
                     except Exception as e:
                         logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
                         x_images_map[p] = str(x_target)
