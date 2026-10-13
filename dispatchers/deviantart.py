@@ -344,9 +344,524 @@ class DeviantArtDispatcher(BaseDispatcher):
             logger.error(f"[DeviantArt] 登录遇到异常: {e}")
             return False, f"登录遇到异常: {e}"
 
+    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        # 2. 直达投稿入口
+        self.safe_goto(page, "https://www.deviantart.com/submit", timeout=45000)
+        try:
+            page.wait_for_selector("input[type='file']", timeout=25000)
+        except Exception as e:
+            logger.debug(f"[DeviantArt] 等待上传文件控件超时: {e}")
+
+        all_fis = page.query_selector_all("input[type='file']")
+        if not all_fis:
+            return False, "DeviantArt 投稿页未能定位到文件上传控件 (请检查网络代理或重新登录)", []
+
+        # 3. 按素材格式智能分发 (动图 GIF 匹配 accept='image/gif'，静态图匹配 accept='image/png|jpg')
+        is_gif = img_path.lower().endswith(".gif")
+        target_fi = None
+        for fi in all_fis:
+            acc = (fi.get_attribute("accept") or "").lower()
+            if is_gif and "gif" in acc:
+                target_fi = fi
+                break
+            elif not is_gif and ("png" in acc or "jpg" in acc or "jpeg" in acc):
+                target_fi = fi
+                break
+
+        if not target_fi:
+            for fi in all_fis:
+                acc = (fi.get_attribute("accept") or "").lower()
+                if "image" in acc:
+                    target_fi = fi
+                    break
+        if not target_fi:
+            target_fi = all_fis[-1]
+
+        target_fi.set_input_files(img_path)
+        logger.info(f"[DeviantArt] 文件已提交 ({'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Studio 弹窗渲染...")
+
+        # 4. 等待上传与表单渲染 (大动图有羊驼动画，放宽等待时间至 75 秒)
+        title_sel = "input[name='title'], input[placeholder*='Add your title here'], div[role='dialog'] input[type='text']:not([placeholder*='Search'])"
+        att_ok, att_msg = self.assert_attached(
+            page,
+            title_sel,
+            timeout=75000,
+            error_msg="DeviantArt 素材上传超时或 Studio 模态框未渲染，已中止发布 (避免存为无图草稿)"
+        )
+        if not att_ok:
+            return False, att_msg
+
+        page.wait_for_timeout(1000)
+
+        # 5. 填写标题 (彻底覆盖默认填充的文件名，如 Public Send 0)
+        title_input = page.query_selector(title_sel)
+        if title_input:
+            title_input.click()
+            title_input.fill(title)
+            page.wait_for_timeout(400)
+            logger.info(f"[DeviantArt] 标题已填入: {title}")
+
+        f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
+        if not f_ok:
+            return False, f"DeviantArt 标题断言失败: {f_msg}"
+
+        # 6. 填写描述
+        desc_area = page.query_selector(
+            "div.tiptap[contenteditable='true'], div[role='textbox'], textarea[name='description'], div[contenteditable='true']"
+        )
+        if desc_area and desc:
+            desc_area.click()
+            desc_area.fill(desc)
+            page.wait_for_timeout(300)
+
+        # 7. 勾选官方专用 AI 创作标识: "Created using AI tools"
+        ai_selector = "input[type='checkbox'][name='isAiGenerated'], input[name='isAiGenerated'], label:has-text('Created using AI tools') input"
+        try:
+            ai_checkbox = page.query_selector(ai_selector)
+            if not ai_checkbox:
+                ai_checkbox = page.query_selector("label:has-text('Created using AI tools')")
+            if ai_checkbox:
+                is_chk = ai_checkbox.is_checked() if hasattr(ai_checkbox, "is_checked") else False
+                if is_ai and not is_chk:
+                    ai_checkbox.evaluate("el => el.click()")
+                elif not is_ai and is_chk:
+                    ai_checkbox.evaluate("el => el.click()")
+                page.wait_for_timeout(300)
+        except Exception as e:
+            logger.warning(f"[DeviantArt] 勾选 Created using AI tools 异常: {e}")
+
+        # 回读验证 AI 标识
+        v_res, v_det = self.check_selector_state(page, ai_selector, expected=is_ai)
+        compliance.append(self.verify_compliance_item("deviantart", "ai_generated", is_ai, v_res if is_ai else True, v_det))
+
+        # 8. 勾选官方 Mature Content 成人内容设置 (对齐 DA 原生表单规范，补全二级分类必选)
+        def is_element_checked(el):
+            try:
+                aria_chk = el.get_attribute("aria-checked")
+                if aria_chk == "true":
+                    return True
+                if aria_chk == "false":
+                    return False
+                tag = (el.evaluate("e => e.tagName") or "").lower()
+                if tag == "input":
+                    return el.is_checked()
+                return el.evaluate("""e => {
+                    if (e.getAttribute('aria-checked') === 'true') return true;
+                    if (e.classList.contains('active') || e.classList.contains('selected') || e.classList.contains('checked')) return true;
+                    const inp = e.querySelector('input');
+                    if (inp && inp.checked) return true;
+                    return false;
+                }""")
+            except Exception:
+                return False
+
+        def click_safely(el):
+            try:
+                el.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            try:
+                el.click()
+            except Exception:
+                el.evaluate("e => e.click()")
+
+        mature_selector = ".ReactModal__Content input[name='matureContent'], input[name='matureContent']"
+        try:
+            mature_elem = page.query_selector(mature_selector)
+            if not mature_elem:
+                mature_elem = page.query_selector("label:has-text('Mature'), button:has-text('Mature')")
+            if mature_elem:
+                is_chk = is_element_checked(mature_elem)
+                if is_mature and not is_chk:
+                    page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
+                elif not is_mature and is_chk:
+                    page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
+                page.wait_for_timeout(300)
+            logger.info(f"[DeviantArt] Mature 内容设置完成: 开启={is_mature}")
+        except Exception as e:
+            logger.warning(f"[DeviantArt] 设置 Mature Content 异常: {e}")
+
+        # 回读验证 Mature 状态
+        v_mat_res, v_mat_det = self.check_selector_state(page, mature_selector, expected=is_mature)
+        compliance.append(self.verify_compliance_item("deviantart", "mature_content", is_mature, v_mat_res if is_mature else True, v_mat_det))
+
+        # 8.5 相册选择 (Gallery Selection: 为空跳过，非空时在 Submit 前设置相册)
+        gallery = (gallery or "").strip()
+        if gallery:
+            logger.info(f"[DeviantArt] 正在定位相册选择器并选择相册: '{gallery}'...")
+            gallery_matched = False
+            try:
+                # 1. <select> 模糊匹配与选择
+                select_els = page.query_selector_all(".ReactModal__Content select, form select, select")
+                for s_el in select_els:
+                    try:
+                        options = s_el.query_selector_all("option")
+                        opt_map = {}
+                        for opt in options:
+                            t = (opt.inner_text() or "").strip()
+                            v = opt.get_attribute("value") or t
+                            if t:
+                                opt_map[t] = v
+                        matched_val = None
+                        for t, v in opt_map.items():
+                            if gallery.lower() in t.lower() or t.lower() in gallery.lower():
+                                matched_val = v
+                                break
+                        if matched_val is not None:
+                            s_el.select_option(value=matched_val)
+                            gallery_matched = True
+                            logger.info(f"[DeviantArt] 通过 <select> 成功匹配并选择相册: '{gallery}'")
+                            break
+                    except Exception as e_sel:
+                        logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
+
+                # 2. 按钮/弹窗式选择器定位与匹配
+                if not gallery_matched:
+                    gallery_triggers = [
+                        ".ReactModal__Content button:has-text('Gallery')",
+                        ".ReactModal__Content button:has-text('Galleries')",
+                        "button:has-text('Add to Gallery')",
+                        "button:has-text('Choose gallery')",
+                        "button:has-text('Featured')",
+                        "[data-testid*='gallery' i]",
+                        "[aria-label*='gallery' i]",
+                        "div[role='combobox']:has-text('Gallery')",
+                        ".ReactModal__Content div[role='button']:has-text('Gallery')"
+                    ]
+                    for g_sel in gallery_triggers:
+                        g_btn = page.query_selector(g_sel)
+                        if g_btn and g_btn.is_visible():
+                            try:
+                                click_safely(g_btn)
+                                page.wait_for_timeout(600)
+                                item_sels = [
+                                    f"[role='option']:has-text('{gallery}')",
+                                    f"[role='menuitem']:has-text('{gallery}')",
+                                    f"[role='checkbox']:has-text('{gallery}')",
+                                    f"li:has-text('{gallery}')",
+                                    f"button:has-text('{gallery}')",
+                                    f"label:has-text('{gallery}')",
+                                    f"div:has-text('{gallery}')"
+                                ]
+                                for it_sel in item_sels:
+                                    items = page.query_selector_all(it_sel)
+                                    for it in reversed(items):
+                                        it_txt = (it.inner_text() or "").strip()
+                                        if gallery.lower() in it_txt.lower():
+                                            click_safely(it)
+                                            page.wait_for_timeout(400)
+                                            gallery_matched = True
+                                            logger.info(f"[DeviantArt] 通过列表项成功匹配并点击相册: '{gallery}'")
+                                            break
+                                    if gallery_matched:
+                                        break
+
+                                # 检查并点击确认/完成按钮 (Done / Select)
+                                confirm_btn = page.query_selector(".ReactModal__Content button:has-text('Done'), button:has-text('Done'), button:has-text('Select')")
+                                if confirm_btn and confirm_btn.is_visible():
+                                    click_safely(confirm_btn)
+                                    page.wait_for_timeout(300)
+
+                                if gallery_matched:
+                                    break
+                            except Exception as e_click:
+                                logger.debug(f"[DeviantArt] 尝试相册触发器 {g_sel} 异常: {e_click}")
+
+                if not gallery_matched:
+                    logger.error(f"[DeviantArt] 未找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
+                    return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
+                else:
+                    # 3. 选择后回读确认选中项文本 (严格阻断式回读校验)
+                    confirmed = False
+                    for _ in range(6):
+                        page.wait_for_timeout(500)
+                        try:
+                            confirmed = page.evaluate("""(g) => {
+                                const modal = document.querySelector('.ReactModal__Content') || document.body;
+                                return modal.innerText.toLowerCase().includes(g.toLowerCase());
+                            }""", gallery)
+                            if confirmed:
+                                break
+                        except Exception:
+                            pass
+                    if confirmed:
+                        logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
+                    else:
+                        logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
+                        return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册"
+            except Exception as e_gallery:
+                logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
+                return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册"
+
+        # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
+        logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
+        submit_btn = None
+        candidate_sels = [
+            ".ReactModal__Content button:text-is('Submit')",
+            "button:text-is('Submit')",
+            ".ReactModal__Content button:has-text('Submit'):not(:has-text('Studio')):not(:has-text('Group')):not(:has-text('subscriber')):not(:has-text('Gallery'))",
+            "button:has-text('Submit Now')",
+            "button:has-text('Submit')"
+        ]
+        for sel in candidate_sels:
+            btns = page.query_selector_all(sel)
+            for b in btns:
+                txt = b.inner_text().strip().lower()
+                # 严禁误触存草稿或取消
+                if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
+                    continue
+                if "submit" in txt:
+                    submit_btn = b
+                    break
+            if submit_btn:
+                break
+
+        if not submit_btn:
+            return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已保留在草稿中未发布"
+
+        # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
+        btn_ready = False
+        wait_btn_start = time.time()
+        while time.time() - wait_btn_start < 60:
+            if submit_btn.is_enabled() and submit_btn.get_attribute("aria-disabled") != "true":
+                btn_ready = True
+                break
+            elapsed = int(time.time() - wait_btn_start)
+            if elapsed > 0 and elapsed % 10 == 0:
+                logger.info(f"[DeviantArt] 正在等待素材转码完成与发布按钮激活 ({elapsed}s)...")
+            time.sleep(1.0)
+
+        if not btn_ready:
+            # 采集页面是否有未满足的必填校验错误
+            err_hint = ""
+            err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+            if err_elem:
+                err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
+            return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止以防存为半成品草稿"
+
+        # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
+        try:
+            import json as _json
+            page.evaluate(f"""() => {{
+                const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
+                if (el) {{
+                    el.value = {_json.dumps(title)};
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                }}
+            }}""")
+            logger.info(f"[DeviantArt] 提交前二次强行回填真实标题完成: {title}")
+        except Exception as te:
+            logger.warning(f"[DeviantArt] 提交前二次回填标题提示: {te}")
+
+        logger.info("[DeviantArt] 发布按钮就绪，正在点击提交正式发布...")
+        # 穿透点击优先，规避 ReactModal__Overlay 拦截指针事件
+        try:
+            submit_btn.evaluate("el => el.click()")
+        except Exception as e:
+            logger.debug(f"[DeviantArt] evaluate 点击异常，尝试普通点击: {e}")
+            submit_btn.click()
+
+        # 点击后等待 1 秒并检查是否有立即弹出的表单错误提示 (如分类未选或受限)
+        time.sleep(1.0)
+        err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+        if err_box:
+            err_txt = (err_box.inner_text() or "").strip()
+            if err_txt:
+                logger.warning(f"[DeviantArt] 点击提交后捕获到表单拦截提示: {err_txt}")
+
+        def is_da_submitted(p):
+            try:
+                curr_u = p.url.lower()
+                # 核心成功判定 1: 页面 URL 成功跳转至正式作品展示页 (/art/ 或 /deviation/)
+                if "/art/" in curr_u or "/deviation/" in curr_u:
+                    return True
+                # 核心成功判定 2: 官方发布成功提示标识 (Toast 或 成功展示页)
+                success_indicator = p.query_selector(
+                    "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
+                )
+                if success_indicator:
+                    return True
+            except Exception as e_chk:
+                logger.debug(f"[DeviantArt] 提交状态探测异常 (通常处于页面跳转瞬态): {e_chk}")
+                try:
+                    curr_u = p.url.lower()
+                    if "/art/" in curr_u or "/deviation/" in curr_u:
+                        return True
+                except Exception:
+                    pass
+            return False
+
+        # 阶段 1：首轮提交后 8 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
+        logger.info("[DeviantArt] 正在等待提交响应并跳转至作品页 (/art/)...")
+        first_submit_passed = False
+        for _ in range(8):
+            time.sleep(1.0)
+            if is_da_submitted(page):
+                first_submit_passed = True
+                break
+
+        if not first_submit_passed:
+            err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+            if err_box:
+                logger.warning(f"[DeviantArt] 首次点击未完成跳转，页面显示提示: {err_box.inner_text().strip()}")
+            logger.warning("[DeviantArt] 首次点击 8 秒内未离开投稿页或跳转作品页，触发自动二次补全与挽救提交...")
+            # 1. 确保 Mature Content 保持选中
+            if is_mature:
+                try:
+                    page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\"); if (el && !el.checked) el.click(); }")
+                except Exception:
+                    pass
+
+            # 2. 重新强制回填标题
+            try:
+                import json as _json
+                page.evaluate(f"""() => {{
+                    const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
+                    if (el) {{
+                        el.value = {_json.dumps(title)};
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }}""")
+                logger.info(f"[DeviantArt] 自愈阶段已强制回填标题: {title}")
+            except Exception as te:
+                logger.debug(f"[DeviantArt] 自愈阶段标题回填提示: {te}")
+
+            # 3. 重新穿透点击 Submit 按钮
+            re_submit_btn = None
+            for sel in candidate_sels:
+                btns = page.query_selector_all(sel)
+                for b in btns:
+                    txt = b.inner_text().strip().lower()
+                    if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
+                        continue
+                    if "submit" in txt:
+                        re_submit_btn = b
+                        break
+                if re_submit_btn:
+                    break
+
+            if re_submit_btn:
+                try:
+                    re_submit_btn.evaluate("el => el.click()")
+                except Exception as e:
+                    logger.debug(f"[DeviantArt] 自愈阶段点击异常: {e}")
+                logger.info("[DeviantArt] 自愈补全完毕，已执行第二次挽救提交！")
+
+        logger.info("[DeviantArt] 等待发布结果确认 (等待跳转至 /art/ 作品页或官方提示)...")
+        sub_ok, sub_msg = self.assert_submitted(
+            page,
+            is_da_submitted,
+            timeout=45000,
+            error_msg="DeviantArt 提交超时未跳转至作品展示页 (/art/)，作品可能仅存为草稿箱，请前往网页确认发布"
+        )
+
+        if not sub_ok:
+            err_detail = ""
+            try:
+                err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
+                if err_elem:
+                    err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
+            except Exception:
+                pass
+            return False, f"{sub_msg}{err_detail}"
+
+        # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
+        logger.info("[DeviantArt] 投稿主页已确认跳转作品页！等待 10 秒供 DA 后台完成数据库索引与草稿销毁...")
+        time.sleep(10)
+
+        # 作品展示页实际相册反查 (若指定相册，反向核验页面文本)
+        if gallery and ("/art/" in page.url.lower() or "/deviation/" in page.url.lower()):
+            try:
+                dev_text = (page.inner_text("body") or "").lower()
+                if gallery.lower() in dev_text:
+                    logger.info(f"[DeviantArt] 作品展示页相册反查成功: 页面已确认归属相册 '{gallery}'")
+                else:
+                    logger.warning(f"[DeviantArt] 作品展示页相册反查提示: 页面文本未显式包含 '{gallery}' (可能收起在集合卡片中)")
+            except Exception as ge:
+                logger.debug(f"[DeviantArt] 作品展示页反查相册提示: {ge}")
+
+        # 成功离开 /submit 后的最终真发布核验：访问 Studio Drafts 验证草稿彻底销毁与出库
+        logger.info("[DeviantArt] 正在对 DeviantArt Studio 草稿箱执行反向核验 (验证草稿是否彻底销毁/出库)...")
+        draft_cleared = False
+        studio_page = None
+        try:
+            studio_page = context.new_page()
+            self.apply_stealth(studio_page)
+            self.safe_goto(studio_page, "https://www.deviantart.com/studio", timeout=25000)
+            studio_page.wait_for_timeout(2000)
+
+            # 尝试点击 Drafts 标签页
+            try:
+                drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
+                if drafts_tab:
+                    drafts_tab.click()
+                    studio_page.wait_for_timeout(1500)
+            except Exception as dte:
+                logger.debug(f"[DeviantArt] Studio 点击 Drafts 标签页提示: {dte}")
+
+            import re
+            clean_title = title.strip()
+            safe_slug = re.sub(r'[\\/*?:"<>|\s]+', '_', clean_title)
+            keywords_to_check = [clean_title]
+            if safe_slug and safe_slug != clean_title:
+                keywords_to_check.append(safe_slug)
+
+            studio_text = studio_page.inner_text("body")
+            title_in_drafts = any(kw.lower() in studio_text.lower() for kw in keywords_to_check if kw)
+
+            if title_in_drafts:
+                # 缓冲 5 秒刷新复核 (防止 DA 异步数据库索引毫秒级微小延迟，总缓冲达 15+ 秒)
+                logger.info("[DeviantArt] 探测到草稿暂存，等待 5 秒后执行最终状态复核...")
+                time.sleep(5)
+                studio_page.reload()
+                studio_page.wait_for_timeout(2000)
+                try:
+                    drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
+                    if drafts_tab:
+                        drafts_tab.click()
+                        studio_page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+                studio_text_retry = studio_page.inner_text("body")
+                still_in_drafts = any(kw.lower() in studio_text_retry.lower() for kw in keywords_to_check if kw)
+                if still_in_drafts:
+                    logger.error(f"[DeviantArt] 草稿箱反向核验失败: 作品 '{title}' 依然滞留在 Studio Drafts 中未完成出库！")
+                    draft_cleared = False
+                else:
+                    logger.info("[DeviantArt] 复核通过：作品已从 Studio Drafts 彻底出库！")
+                    draft_cleared = True
+            else:
+                logger.info("[DeviantArt] 草稿箱反向核验通过：Studio Drafts 中已无同名草稿，作品已正式销毁草稿并出库！")
+                draft_cleared = True
+
+        except Exception as se:
+            logger.warning(f"[DeviantArt] 草稿箱反向核验网络异常 ({se})，以投稿主页面成功跳转为准")
+            draft_cleared = True
+        finally:
+            if studio_page:
+                try:
+                    studio_page.close()
+                except Exception:
+                    pass
+
+        if not draft_cleared:
+            return False, f"DeviantArt 提交未能正式出库，作品 '{title}' 仍在草稿箱 (Drafts) 中未成功发布，已拦截虚假成功报告"
+
+        logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
+        time.sleep(3)
+
+        self.close_login_session(browser, context, page)
+        logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
+        time.sleep(3)
+        return True, ""
+
     def publish(self, payload):
         """
-        通过 Playwright 执行 DeviantArt 原生发布后台操作
+        通过 Playwright 执行 DeviantArt 原生发布后台操作:
+        - 单 deviation 只支持单图，多图=连续发多个 deviation，间隔随机 3–8 分钟，标题加序号。
+        - 成功断言核验: 实际发出数 == 导入数，断言失败一律报 FAILED。
         """
         images = payload.get("da_images") or payload.get("images", [])
         if not images:
@@ -359,12 +874,14 @@ class DeviantArtDispatcher(BaseDispatcher):
         is_mature = (da_mature_opt != "none")
         mature_level = "moderate" if da_mature_opt == "moderate" else "strict"
         is_ai = payload.get("platform_options", {}).get("deviantart_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
+        gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
 
         cookies = self.get_cookies()
         if not cookies:
             return False, "DeviantArt 未登录，请先点击登录按钮获取会话", []
 
-        logger.info(f"[DeviantArt] 开始原生投稿: 标题={title}, 原生AI开关={is_ai}, 原生Mature={is_mature} ({mature_level})")
+        total_images = len(images)
+        logger.info(f"[DeviantArt] 开始原生投稿 (共 {total_images} 张): 标题={title}, 原生AI开关={is_ai}, 原生Mature={is_mature} ({mature_level})")
         compliance = []
 
         try:
@@ -387,525 +904,49 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://www.deviantart.com", timeout=30000)
                 page.wait_for_timeout(1500)
 
-                # 2. 直达投稿入口
-                self.safe_goto(page, "https://www.deviantart.com/submit", timeout=45000)
-                try:
-                    page.wait_for_selector("input[type='file']", timeout=25000)
-                except Exception as e:
-                    logger.debug(f"[DeviantArt] 等待上传文件控件超时: {e}")
+                published_count = 0
+                import random
 
-                all_fis = page.query_selector_all("input[type='file']")
-                if not all_fis:
-                    self.close_login_session(browser, context)
-                    return False, "DeviantArt 投稿页未能定位到文件上传控件 (请检查网络代理或重新登录)", []
+                for img_idx, img_path in enumerate(images):
+                    current_title = f"{title} ({img_idx + 1}/{total_images})" if total_images > 1 else title
+                    logger.info(f"[DeviantArt] 正在发布第 {img_idx + 1}/{total_images} 张作品: '{current_title}'...")
 
-                # 3. 按素材格式智能分发 (动图 GIF 匹配 accept='image/gif'，静态图匹配 accept='image/png|jpg')
-                is_gif = images[0].lower().endswith(".gif")
-                target_fi = None
-                for fi in all_fis:
-                    acc = (fi.get_attribute("accept") or "").lower()
-                    if is_gif and "gif" in acc:
-                        target_fi = fi
-                        break
-                    elif not is_gif and ("png" in acc or "jpg" in acc or "jpeg" in acc):
-                        target_fi = fi
-                        break
-
-                if not target_fi:
-                    for fi in all_fis:
-                        acc = (fi.get_attribute("accept") or "").lower()
-                        if "image" in acc:
-                            target_fi = fi
-                            break
-                if not target_fi:
-                    target_fi = all_fis[-1]
-
-                target_fi.set_input_files(images[0])
-                logger.info(f"[DeviantArt] 文件已提交 ({'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Studio 弹窗渲染...")
-
-                # 4. 等待上传与表单渲染 (大动图有羊驼动画，放宽等待时间至 75 秒)
-                title_sel = "input[name='title'], input[placeholder*='Add your title here'], div[role='dialog'] input[type='text']:not([placeholder*='Search'])"
-                att_ok, att_msg = self.assert_attached(
-                    page,
-                    title_sel,
-                    timeout=75000,
-                    error_msg="DeviantArt 素材上传超时或 Studio 模态框未渲染，已中止发布 (避免存为无图草稿)"
-                )
-                if not att_ok:
-                    self.close_login_session(browser, context)
-                    return False, att_msg, compliance
-
-                page.wait_for_timeout(1000)
-
-                # 5. 填写标题 (彻底覆盖默认填充的文件名，如 Public Send 0)
-                title_input = page.query_selector(title_sel)
-                if title_input:
-                    title_input.click()
-                    title_input.fill(title)
-                    page.wait_for_timeout(400)
-                    logger.info(f"[DeviantArt] 标题已填入: {title}")
-
-                f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
-                if not f_ok:
-                    self.close_login_session(browser, context)
-                    return False, f"DeviantArt 标题断言失败: {f_msg}", compliance
-
-                # 6. 填写描述
-                desc_area = page.query_selector(
-                    "div.tiptap[contenteditable='true'], div[role='textbox'], textarea[name='description'], div[contenteditable='true']"
-                )
-                if desc_area and desc:
-                    desc_area.click()
-                    desc_area.fill(desc)
-                    page.wait_for_timeout(300)
-
-                # 7. 勾选官方专用 AI 创作标识: "Created using AI tools"
-                ai_selector = "input[type='checkbox'][name='isAiGenerated'], input[name='isAiGenerated'], label:has-text('Created using AI tools') input"
-                try:
-                    ai_checkbox = page.query_selector(ai_selector)
-                    if not ai_checkbox:
-                        ai_checkbox = page.query_selector("label:has-text('Created using AI tools')")
-                    if ai_checkbox:
-                        is_chk = ai_checkbox.is_checked() if hasattr(ai_checkbox, "is_checked") else False
-                        if is_ai and not is_chk:
-                            ai_checkbox.evaluate("el => el.click()")
-                        elif not is_ai and is_chk:
-                            ai_checkbox.evaluate("el => el.click()")
-                        page.wait_for_timeout(300)
-                except Exception as e:
-                    logger.warning(f"[DeviantArt] 勾选 Created using AI tools 异常: {e}")
-
-                # 回读验证 AI 标识
-                v_res, v_det = self.check_selector_state(page, ai_selector, expected=is_ai)
-                compliance.append(self.verify_compliance_item("deviantart", "ai_generated", is_ai, v_res if is_ai else True, v_det))
-
-                # 8. 勾选官方 Mature Content 成人内容设置 (对齐 DA 原生表单规范，补全二级分类必选)
-                def is_element_checked(el):
-                    try:
-                        aria_chk = el.get_attribute("aria-checked")
-                        if aria_chk == "true":
-                            return True
-                        if aria_chk == "false":
-                            return False
-                        tag = (el.evaluate("e => e.tagName") or "").lower()
-                        if tag == "input":
-                            return el.is_checked()
-                        return el.evaluate("""e => {
-                            if (e.getAttribute('aria-checked') === 'true') return true;
-                            if (e.classList.contains('active') || e.classList.contains('selected') || e.classList.contains('checked')) return true;
-                            const inp = e.querySelector('input');
-                            if (inp && inp.checked) return true;
-                            return false;
-                        }""")
-                    except Exception:
-                        return False
-
-                def click_safely(el):
-                    try:
-                        el.scroll_into_view_if_needed()
-                    except Exception:
-                        pass
-                    try:
-                        el.click()
-                    except Exception:
-                        el.evaluate("e => e.click()")
-
-                mature_selector = ".ReactModal__Content input[name='matureContent'], input[name='matureContent']"
-                try:
-                    mature_elem = page.query_selector(mature_selector)
-                    if not mature_elem:
-                        mature_elem = page.query_selector("label:has-text('Mature'), button:has-text('Mature')")
-                    if mature_elem:
-                        is_chk = is_element_checked(mature_elem)
-                        if is_mature and not is_chk:
-                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
-                        elif not is_mature and is_chk:
-                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\") || document.querySelector(\"input[name='matureContent']\"); if (el) el.click(); }")
-                        page.wait_for_timeout(300)
-                    logger.info(f"[DeviantArt] Mature 内容设置完成: 开启={is_mature}")
-                except Exception as e:
-                    logger.warning(f"[DeviantArt] 设置 Mature Content 异常: {e}")
-
-                # 回读验证 Mature 状态
-                v_mat_res, v_mat_det = self.check_selector_state(page, mature_selector, expected=is_mature)
-                compliance.append(self.verify_compliance_item("deviantart", "mature_content", is_mature, v_mat_res if is_mature else True, v_mat_det))
-
-                # 8.5 相册选择 (Gallery Selection: 为空跳过，非空时在 Submit 前设置相册)
-                gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
-                if gallery:
-                    logger.info(f"[DeviantArt] 正在定位相册选择器并选择相册: '{gallery}'...")
-                    gallery_matched = False
-                    try:
-                        # 1. <select> 模糊匹配与选择
-                        select_els = page.query_selector_all(".ReactModal__Content select, form select, select")
-                        for s_el in select_els:
-                            try:
-                                options = s_el.query_selector_all("option")
-                                opt_map = {}
-                                for opt in options:
-                                    t = (opt.inner_text() or "").strip()
-                                    v = opt.get_attribute("value") or t
-                                    if t:
-                                        opt_map[t] = v
-                                matched_val = None
-                                for t, v in opt_map.items():
-                                    if gallery.lower() in t.lower() or t.lower() in gallery.lower():
-                                        matched_val = v
-                                        break
-                                if matched_val is not None:
-                                    s_el.select_option(value=matched_val)
-                                    gallery_matched = True
-                                    logger.info(f"[DeviantArt] 通过 <select> 成功匹配并选择相册: '{gallery}'")
-                                    break
-                            except Exception as e_sel:
-                                logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
-
-                        # 2. 按钮/弹窗式选择器定位与匹配
-                        if not gallery_matched:
-                            gallery_triggers = [
-                                ".ReactModal__Content button:has-text('Gallery')",
-                                ".ReactModal__Content button:has-text('Galleries')",
-                                "button:has-text('Add to Gallery')",
-                                "button:has-text('Choose gallery')",
-                                "button:has-text('Featured')",
-                                "[data-testid*='gallery' i]",
-                                "[aria-label*='gallery' i]",
-                                "div[role='combobox']:has-text('Gallery')",
-                                ".ReactModal__Content div[role='button']:has-text('Gallery')"
-                            ]
-                            for g_sel in gallery_triggers:
-                                g_btn = page.query_selector(g_sel)
-                                if g_btn and g_btn.is_visible():
-                                    try:
-                                        click_safely(g_btn)
-                                        page.wait_for_timeout(600)
-                                        item_sels = [
-                                            f"[role='option']:has-text('{gallery}')",
-                                            f"[role='menuitem']:has-text('{gallery}')",
-                                            f"[role='checkbox']:has-text('{gallery}')",
-                                            f"li:has-text('{gallery}')",
-                                            f"button:has-text('{gallery}')",
-                                            f"label:has-text('{gallery}')",
-                                            f"div:has-text('{gallery}')"
-                                        ]
-                                        for it_sel in item_sels:
-                                            items = page.query_selector_all(it_sel)
-                                            for it in reversed(items):
-                                                it_txt = (it.inner_text() or "").strip()
-                                                if gallery.lower() in it_txt.lower():
-                                                    click_safely(it)
-                                                    page.wait_for_timeout(400)
-                                                    gallery_matched = True
-                                                    logger.info(f"[DeviantArt] 通过列表项成功匹配并点击相册: '{gallery}'")
-                                                    break
-                                            if gallery_matched:
-                                                break
-
-                                        # 检查并点击确认/完成按钮 (Done / Select)
-                                        confirm_btn = page.query_selector(".ReactModal__Content button:has-text('Done'), button:has-text('Done'), button:has-text('Select')")
-                                        if confirm_btn and confirm_btn.is_visible():
-                                            click_safely(confirm_btn)
-                                            page.wait_for_timeout(300)
-
-                                        if gallery_matched:
-                                            break
-                                    except Exception as e_click:
-                                        logger.debug(f"[DeviantArt] 尝试相册触发器 {g_sel} 异常: {e_click}")
-
-                        if not gallery_matched:
-                            logger.error(f"[DeviantArt] 未找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
-                            self.close_login_session(browser, context)
-                            return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册", compliance
-                        else:
-                            # 3. 选择后回读确认选中项文本 (严格阻断式回读校验)
-                            confirmed = False
-                            for _ in range(6):
-                                page.wait_for_timeout(500)
-                                try:
-                                    confirmed = page.evaluate("""(g) => {
-                                        const modal = document.querySelector('.ReactModal__Content') || document.body;
-                                        return modal.innerText.toLowerCase().includes(g.toLowerCase());
-                                    }""", gallery)
-                                    if confirmed:
-                                        break
-                                except Exception:
-                                    pass
-                            if confirmed:
-                                logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
-                            else:
-                                logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
-                                self.close_login_session(browser, context)
-                                return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册", compliance
-                    except Exception as e_gallery:
-                        logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
-                        self.close_login_session(browser, context)
-                        return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册", compliance
-
-                # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
-                logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
-                submit_btn = None
-                candidate_sels = [
-                    ".ReactModal__Content button:text-is('Submit')",
-                    "button:text-is('Submit')",
-                    ".ReactModal__Content button:has-text('Submit'):not(:has-text('Studio')):not(:has-text('Group')):not(:has-text('subscriber')):not(:has-text('Gallery'))",
-                    "button:has-text('Submit Now')",
-                    "button:has-text('Submit')"
-                ]
-                for sel in candidate_sels:
-                    btns = page.query_selector_all(sel)
-                    for b in btns:
-                        txt = b.inner_text().strip().lower()
-                        # 严禁误触存草稿或取消
-                        if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
-                            continue
-                        if "submit" in txt:
-                            submit_btn = b
-                            break
-                    if submit_btn:
-                        break
-
-                if not submit_btn:
-                    self.close_login_session(browser, context)
-                    return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已保留在草稿中未发布", compliance
-
-                # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
-                btn_ready = False
-                wait_btn_start = time.time()
-                while time.time() - wait_btn_start < 60:
-                    if submit_btn.is_enabled() and submit_btn.get_attribute("aria-disabled") != "true":
-                        btn_ready = True
-                        break
-                    elapsed = int(time.time() - wait_btn_start)
-                    if elapsed > 0 and elapsed % 10 == 0:
-                        logger.info(f"[DeviantArt] 正在等待素材转码完成与发布按钮激活 ({elapsed}s)...")
-                    time.sleep(1.0)
-
-                if not btn_ready:
-                    # 采集页面是否有未满足的必填校验错误
-                    err_hint = ""
-                    err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
-                    if err_elem:
-                        err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
-                    self.close_login_session(browser, context)
-                    return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止以防存为半成品草稿", compliance
-
-                # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
-                try:
-                    import json as _json
-                    page.evaluate(f"""() => {{
-                        const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
-                        if (el) {{
-                            el.value = {_json.dumps(title)};
-                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        }}
-                    }}""")
-                    logger.info(f"[DeviantArt] 提交前二次强行回填真实标题完成: {title}")
-                except Exception as te:
-                    logger.warning(f"[DeviantArt] 提交前二次回填标题提示: {te}")
-
-                logger.info("[DeviantArt] 发布按钮就绪，正在点击提交正式发布...")
-                # 穿透点击优先，规避 ReactModal__Overlay 拦截指针事件
-                try:
-                    submit_btn.evaluate("el => el.click()")
-                except Exception as e:
-                    logger.debug(f"[DeviantArt] evaluate 点击异常，尝试普通点击: {e}")
-                    submit_btn.click()
-
-                # 点击后等待 1 秒并检查是否有立即弹出的表单错误提示 (如分类未选或受限)
-                time.sleep(1.0)
-                err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
-                if err_box:
-                    err_txt = (err_box.inner_text() or "").strip()
-                    if err_txt:
-                        logger.warning(f"[DeviantArt] 点击提交后捕获到表单拦截提示: {err_txt}")
-
-                def is_da_submitted(p):
-                    try:
-                        curr_u = p.url.lower()
-                        # 核心成功判定 1: 页面 URL 成功跳转至正式作品展示页 (/art/ 或 /deviation/)
-                        if "/art/" in curr_u or "/deviation/" in curr_u:
-                            return True
-                        # 核心成功判定 2: 官方发布成功提示标识 (Toast 或 成功展示页)
-                        success_indicator = p.query_selector(
-                            "div:has-text('Your deviation has been submitted'), div:has-text('Published'), h1:has-text('Success'), div[data-testid='toast']:has-text('submitted')"
+                    sub_ok, sub_msg = self._submit_single_deviation(
+                        page, context, img_path, current_title, desc, _tags,
+                        is_mature, mature_level, is_ai, gallery, compliance
+                    )
+                    if not sub_ok:
+                        self.close_login_session(browser, context, page)
+                        compliance.append(
+                            self.verify_compliance_item(
+                                "deviantart",
+                                "gallery_count",
+                                True,
+                                False,
+                                f"多图连续投稿中断: 第 {img_idx + 1}/{total_images} 张失败 (已成功 {published_count}/{total_images} 张)"
+                            )
                         )
-                        if success_indicator:
-                            return True
-                    except Exception as e_chk:
-                        logger.debug(f"[DeviantArt] 提交状态探测异常 (通常处于页面跳转瞬态): {e_chk}")
-                        try:
-                            curr_u = p.url.lower()
-                            if "/art/" in curr_u or "/deviation/" in curr_u:
-                                return True
-                        except Exception:
-                            pass
-                    return False
+                        return False, f"DeviantArt 连续发布第 {img_idx + 1}/{total_images} 张失败: {sub_msg} (已成功 {published_count}/{total_images} 张)", compliance
 
-                # 阶段 1：首轮提交后 8 秒监测。若未离开 /submit 则触发自愈补全与二次挽救提交
-                logger.info("[DeviantArt] 正在等待提交响应并跳转至作品页 (/art/)...")
-                first_submit_passed = False
-                for _ in range(8):
-                    time.sleep(1.0)
-                    if is_da_submitted(page):
-                        first_submit_passed = True
-                        break
-
-                if not first_submit_passed:
-                    err_box = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
-                    if err_box:
-                        logger.warning(f"[DeviantArt] 首次点击未完成跳转，页面显示提示: {err_box.inner_text().strip()}")
-                    logger.warning("[DeviantArt] 首次点击 8 秒内未离开投稿页或跳转作品页，触发自动二次补全与挽救提交...")
-                    # 1. 确保 Mature Content 保持选中
-                    if is_mature:
-                        try:
-                            page.evaluate("() => { const el = document.querySelector(\".ReactModal__Content input[name='matureContent']\"); if (el && !el.checked) el.click(); }")
-                        except Exception:
-                            pass
-
-                    # 2. 重新强制回填标题
-                    try:
-                        import json as _json
-                        page.evaluate(f"""() => {{
-                            const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("{title_sel}");
-                            if (el) {{
-                                el.value = {_json.dumps(title)};
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            }}
-                        }}""")
-                        logger.info(f"[DeviantArt] 自愈阶段已强制回填标题: {title}")
-                    except Exception as te:
-                        logger.debug(f"[DeviantArt] 自愈阶段标题回填提示: {te}")
-
-                    # 3. 重新穿透点击 Submit 按钮
-                    re_submit_btn = None
-                    for sel in candidate_sels:
-                        btns = page.query_selector_all(sel)
-                        for b in btns:
-                            txt = b.inner_text().strip().lower()
-                            if any(kw in txt for kw in ["stash", "draft", "cancel", "save", "studio", "group", "gallery", "subscriber"]):
-                                continue
-                            if "submit" in txt:
-                                re_submit_btn = b
-                                break
-                        if re_submit_btn:
-                            break
-
-                    if re_submit_btn:
-                        try:
-                            re_submit_btn.evaluate("el => el.click()")
-                        except Exception as e:
-                            logger.debug(f"[DeviantArt] 自愈阶段点击异常: {e}")
-                        logger.info("[DeviantArt] 自愈补全完毕，已执行第二次挽救提交！")
-
-                logger.info("[DeviantArt] 等待发布结果确认 (等待跳转至 /art/ 作品页或官方提示)...")
-                sub_ok, sub_msg = self.assert_submitted(
-                    page,
-                    is_da_submitted,
-                    timeout=45000,
-                    error_msg="DeviantArt 提交超时未跳转至作品展示页 (/art/)，作品可能仅存为草稿箱，请前往网页确认发布"
-                )
-
-                if not sub_ok:
-                    err_detail = ""
-                    try:
-                        err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
-                        if err_elem:
-                            err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
-                    except Exception:
-                        pass
-                    self.close_login_session(browser, context, page)
-                    return False, f"{sub_msg}{err_detail}", compliance
-
-                # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
-                logger.info("[DeviantArt] 投稿主页已确认跳转作品页！等待 10 秒供 DA 后台完成数据库索引与草稿销毁...")
-                time.sleep(10)
-
-                # 作品展示页实际相册反查 (若指定相册，反向核验页面文本)
-                if gallery and ("/art/" in page.url.lower() or "/deviation/" in page.url.lower()):
-                    try:
-                        dev_text = (page.inner_text("body") or "").lower()
-                        if gallery.lower() in dev_text:
-                            logger.info(f"[DeviantArt] 作品展示页相册反查成功: 页面已确认归属相册 '{gallery}'")
-                        else:
-                            logger.warning(f"[DeviantArt] 作品展示页相册反查提示: 页面文本未显式包含 '{gallery}' (可能收起在集合卡片中)")
-                    except Exception as ge:
-                        logger.debug(f"[DeviantArt] 作品展示页反查相册提示: {ge}")
-
-                # 成功离开 /submit 后的最终真发布核验：访问 Studio Drafts 验证草稿彻底销毁与出库
-                logger.info("[DeviantArt] 正在对 DeviantArt Studio 草稿箱执行反向核验 (验证草稿是否彻底销毁/出库)...")
-                draft_cleared = False
-                studio_page = None
-                try:
-                    studio_page = context.new_page()
-                    self.apply_stealth(studio_page)
-                    self.safe_goto(studio_page, "https://www.deviantart.com/studio", timeout=25000)
-                    studio_page.wait_for_timeout(2000)
-
-                    # 尝试点击 Drafts 标签页
-                    try:
-                        drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
-                        if drafts_tab:
-                            drafts_tab.click()
-                            studio_page.wait_for_timeout(1500)
-                    except Exception as dte:
-                        logger.debug(f"[DeviantArt] Studio 点击 Drafts 标签页提示: {dte}")
-
-                    import re
-                    clean_title = title.strip()
-                    safe_slug = re.sub(r'[\\/*?:"<>|\s]+', '_', clean_title)
-                    keywords_to_check = [clean_title]
-                    if safe_slug and safe_slug != clean_title:
-                        keywords_to_check.append(safe_slug)
-
-                    studio_text = studio_page.inner_text("body")
-                    title_in_drafts = any(kw.lower() in studio_text.lower() for kw in keywords_to_check if kw)
-
-                    if title_in_drafts:
-                        # 缓冲 5 秒刷新复核 (防止 DA 异步数据库索引毫秒级微小延迟，总缓冲达 15+ 秒)
-                        logger.info("[DeviantArt] 探测到草稿暂存，等待 5 秒后执行最终状态复核...")
-                        time.sleep(5)
-                        studio_page.reload()
-                        studio_page.wait_for_timeout(2000)
-                        try:
-                            drafts_tab = studio_page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
-                            if drafts_tab:
-                                drafts_tab.click()
-                                studio_page.wait_for_timeout(1500)
-                        except Exception:
-                            pass
-                        studio_text_retry = studio_page.inner_text("body")
-                        still_in_drafts = any(kw.lower() in studio_text_retry.lower() for kw in keywords_to_check if kw)
-                        if still_in_drafts:
-                            logger.error(f"[DeviantArt] 草稿箱反向核验失败: 作品 '{title}' 依然滞留在 Studio Drafts 中未完成出库！")
-                            draft_cleared = False
-                        else:
-                            logger.info("[DeviantArt] 复核通过：作品已从 Studio Drafts 彻底出库！")
-                            draft_cleared = True
-                    else:
-                        logger.info("[DeviantArt] 草稿箱反向核验通过：Studio Drafts 中已无同名草稿，作品已正式销毁草稿并出库！")
-                        draft_cleared = True
-
-                except Exception as se:
-                    logger.warning(f"[DeviantArt] 草稿箱反向核验网络异常 ({se})，以投稿主页面成功跳转为准")
-                    draft_cleared = True
-                finally:
-                    if studio_page:
-                        try:
-                            studio_page.close()
-                        except Exception:
-                            pass
-
-                if not draft_cleared:
-                    self.close_login_session(browser, context, page)
-                    return False, f"DeviantArt 提交未能正式出库，作品 '{title}' 仍在草稿箱 (Drafts) 中未成功发布，已拦截虚假成功报告", compliance
-
-                logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
-                time.sleep(3)
+                    published_count += 1
+                    if img_idx < total_images - 1:
+                        default_interval = random.uniform(180, 480)
+                        interval = payload.get("da_interval_seconds", default_interval)
+                        logger.info(f"[DeviantArt] 第 {img_idx + 1}/{total_images} 张发布成功，安全等待间隔 {interval:.1f} 秒后发布下一张...")
+                        time.sleep(interval)
 
                 self.close_login_session(browser, context, page)
-                return True, "DeviantArt 已正式发布并出库 (草稿箱已销毁，作品正式上架)", compliance
+                compliance.append(
+                    self.verify_compliance_item(
+                        "deviantart",
+                        "gallery_count",
+                        True,
+                        True,
+                        f"多图连续投稿核验通过 (成功 {published_count}/{total_images} 张)"
+                    )
+                )
+                return True, f"DeviantArt 发布成功 (连续发布成功 {published_count}/{total_images} 张)", compliance
         except Exception as e:
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")
             return False, f"DeviantArt 自动化发布异常: {e}", compliance
+
