@@ -8,9 +8,16 @@ ArtCrossPost - Watermark Engine (作品文字水印与防盗印渲染引擎)
 4. 与 CensorEngine 无缝桥接 (接收路径、BGR numpy 数组或 PIL 图像，输出混合图像)
 """
 import os
-import winreg
+import platform
 from pathlib import Path
 from typing import Union, Tuple, Optional, List, Dict
+
+# winreg is Windows-only; import safely
+try:
+    import winreg  # type: ignore
+except Exception:
+    winreg = None
+
 import numpy as np
 import cv2
 from PIL import Image, ImageDraw, ImageFont
@@ -22,7 +29,10 @@ except Exception:
     import logging
     logger = logging.getLogger("WatermarkEngine")
 
-FONTS_DIR = Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts"
+if platform.system() == "Windows":
+    FONTS_DIR = Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts"
+else:
+    FONTS_DIR = Path(os.environ.get("FONTS_DIR", "/usr/share/fonts"))
 
 # 常用高质量艺术家中英文字体速查映射 (含 Qt Family 映射与粗体特征)
 CURATED_FONTS_DETAIL = {
@@ -74,21 +84,32 @@ class WatermarkEngine:
             return self._system_fonts_cache
 
         fonts_map = {}
-        try:
-            key = winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-            )
-            count = winreg.QueryInfoKey(key)[1]
-            for i in range(count):
-                val_name, val_data, _ = winreg.EnumValue(key, i)
-                clean_name = val_name.replace(" (TrueType)", "").replace(" (OpenType)", "").strip()
-                font_file = val_data if os.path.isabs(val_data) else str(FONTS_DIR / val_data)
-                if os.path.exists(font_file):
-                    fonts_map[clean_name] = font_file
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+        if winreg is not None:
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+                )
+                count = winreg.QueryInfoKey(key)[1]
+                for i in range(count):
+                    val_name, val_data, _ = winreg.EnumValue(key, i)
+                    clean_name = val_name.replace(" (TrueType)", "").replace(" (OpenType)", "").strip()
+                    font_file = val_data if os.path.isabs(val_data) else str(FONTS_DIR / val_data)
+                    if os.path.exists(font_file):
+                        fonts_map[clean_name] = font_file
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+
+        # If not Windows or registry gave nothing, scan FONTS_DIR if it exists
+        if not fonts_map and FONTS_DIR.exists():
+            try:
+                for p in FONTS_DIR.rglob("*"):
+                    if p.suffix.lower() in {".ttf", ".ttc", ".otf"}:
+                        fonts_map[p.stem] = str(p)
+            except Exception:
+                pass
+
         self._system_fonts_cache = fonts_map
         return fonts_map
 
