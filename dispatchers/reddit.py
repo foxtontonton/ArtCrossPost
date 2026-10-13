@@ -414,17 +414,32 @@ class RedditDispatcher(BaseDispatcher):
                         return False, err_msg, compliance
 
                     # 检查是否命中社区封禁/私人社区/登录权限阻拦
-                    banned_wall = page.locator(
-                        "text='已被静音', text='已被封禁', text='has been banned', text='这是私人社区', text='This community is private', button:has-text('请求加入'), button:has-text('Request to join'), button:has-text('浏览其他社区')"
-                    ).first
-                    if banned_wall.count() > 0 and banned_wall.is_visible():
+                    banned_selectors = [
+                        "text=已被静音",
+                        "text=已被封禁",
+                        "text=has been banned",
+                        "text=这是私人社区",
+                        "text=This community is private",
+                        "button:has-text('请求加入')",
+                        "button:has-text('Request to join')",
+                        "button:has-text('浏览其他社区')",
+                        "div:has-text('This community was banned')"
+                    ]
+                    banned_matched = None
+                    for b_sel in banned_selectors:
+                        cand = page.locator(b_sel).first
+                        if cand.count() > 0 and cand.is_visible():
+                            banned_matched = b_sel
+                            break
+
+                    if banned_matched:
                         debug_path = self.data_dir / "reddit_submit_debug.png"
                         try:
                             page.screenshot(path=str(debug_path))
                         except Exception:
                             pass
                         err_msg = (
-                            f"Reddit 目标分区 {label} 无法访问 (该社区已被 Reddit 封禁或设为私人社区，快照已存至 {debug_path})。"
+                            f"Reddit 目标分区 {label} 无法访问 (该社区已被 Reddit 封禁或设为私人社区，检测到拦截: {banned_matched}，快照已存至 {debug_path})。"
                             "请在浏览器中核验该社区状态或更换目标分区。"
                         )
                         logger.error(f"[Reddit] {err_msg}")
@@ -717,9 +732,22 @@ class RedditDispatcher(BaseDispatcher):
                             break
 
                         # 检查页面字段级报错 (如 PROFILE_SUBREDDIT_NOEXIST: 社区不存在)
-                        field_err = page.locator("text='社区不存在', text='Community does not exist', text='One or more field errors', div[class*='error']:has-text('不存在')").first
-                        if field_err.count() > 0 and field_err.is_visible():
-                            err_txt = field_err.inner_text().strip()
+                        field_err_selectors = [
+                            "text=社区不存在",
+                            "text=Community does not exist",
+                            "text=One or more field errors",
+                            "div[class*='error']:has-text('不存在')",
+                            "div[class*='error']:has-text('not exist')"
+                        ]
+                        field_err_loc = None
+                        for fe_sel in field_err_selectors:
+                            loc = page.locator(fe_sel).first
+                            if loc.count() > 0 and loc.is_visible():
+                                field_err_loc = loc
+                                break
+
+                        if field_err_loc:
+                            err_txt = field_err_loc.inner_text().strip()
                             debug_path = self.data_dir / "reddit_field_err_debug.png"
                             try:
                                 page.screenshot(path=str(debug_path))
