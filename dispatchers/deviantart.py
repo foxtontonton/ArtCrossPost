@@ -463,8 +463,20 @@ class DeviantArtDispatcher(BaseDispatcher):
         if title_input:
             title_input.click()
             title_input.fill(title)
+            try:
+                page.evaluate("""(val) => {
+                    const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("input[name='title'], input[placeholder*='Add your title']");
+                    if (el) {
+                        el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.blur();
+                    }
+                }""", title)
+            except Exception as e:
+                logger.debug(f"[DeviantArt] 标题事件派发异常: {e}")
             page.wait_for_timeout(400)
-            logger.info(f"[DeviantArt] 标题已填入: {title}")
+            logger.info(f"[DeviantArt] 标题已填入并触发持久化: {title}")
 
         f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
         if not f_ok:

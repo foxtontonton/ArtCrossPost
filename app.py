@@ -5168,25 +5168,33 @@ class MainWindow(QMainWindow):
 
                 # 1. DeviantArt 动图
                 da_out_path = None
+                clean_da_gif_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_gif = CACHE_DIR / f"{clean_da_gif_stem}.gif"
                 if is_da_censor:
                     da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
                     try:
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
+                        import shutil
+                        if str(clean_da_gif) != str(da_out_path):
+                            shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                        da_images.append(str(clean_da_gif))
                     except RuntimeError as e:
                         self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
                         logger.error(f"[发布准备] {e}")
                         return
-                    da_images.append(str(da_out_path))
                 else:
                     if wm_info:
                         da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_wm.gif"
                         try:
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                            import shutil
+                            if str(clean_da_gif) != str(da_out_path):
+                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            da_images.append(str(clean_da_gif))
                         except RuntimeError as e:
                             self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
                             logger.error(f"[发布准备] {e}")
                             return
-                        da_images.append(str(da_out_path))
                     else:
                         da_images.append(str(p))
 
@@ -5325,9 +5333,20 @@ class MainWindow(QMainWindow):
                 else:
                     pub_raw_path = Path(p)
 
-                # DeviantArt 静态图
+                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
-                da_images.append(str(da_target))
+                clean_da_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
+                try:
+                    if Path(da_target).exists():
+                        import shutil
+                        if str(clean_da_path) != str(da_target):
+                            shutil.copyfile(str(da_target), str(clean_da_path))
+                        da_images.append(str(clean_da_path))
+                    else:
+                        da_images.append(str(da_target))
+                except Exception:
+                    da_images.append(str(da_target))
 
                 # X (Twitter) 静态图与体积门禁 (JPEG 压缩分支)
                 x_target = pub_censor_path if is_x_censor else pub_raw_path
