@@ -9,6 +9,7 @@ ArtCrossPost - DeviantArt Dispatcher (对齐 DA 投稿后台原生设置)
 """
 import os
 import time
+from pathlib import Path
 from .base import BaseDispatcher
 try:
     from logger import get_logger
@@ -342,7 +343,71 @@ class DeviantArtDispatcher(BaseDispatcher):
                 return True, f"登录成功，已同步 DeviantArt 账号: {user_name}！"
         except Exception as e:
             logger.error(f"[DeviantArt] 登录遇到异常: {e}")
-            return False, f"登录遇到异常: {e}"
+    def _cleanup_orphan_draft(self, page, title, img_path):
+        """
+        清理由于发布中断/异常而在 DA Studio 留下的孤儿草稿:
+        - 尝试先关闭当前 Modal (点击 Discard / Cancel / Close)
+        - 导航至 https://www.deviantart.com/studio
+        - 切换至 Drafts 选项卡
+        - 查找匹配 title 或文件名 (Path(img_path).stem) 的草稿卡片
+        - 点击 More -> Delete Draft 并确认
+        """
+        if not page:
+            return
+        logger.info(f"[DeviantArt] 正在执行孤儿草稿自动清理 (针对 '{title}' / '{Path(img_path).stem}')...")
+        try:
+            # 1. 尝试关闭当前弹窗
+            try:
+                close_btn = page.query_selector("button[aria-label='Close'], button:has-text('Discard'), button:has-text('Cancel')")
+                if close_btn and close_btn.is_visible():
+                    close_btn.click()
+                    page.wait_for_timeout(800)
+                    discard_conf = page.query_selector("div[role='dialog'] button:has-text('Discard'), button:has-text('Discard')")
+                    if discard_conf and discard_conf.is_visible():
+                        discard_conf.click()
+                        page.wait_for_timeout(800)
+            except Exception:
+                pass
+
+            # 2. 导航至 studio 草稿页
+            self.safe_goto(page, "https://www.deviantart.com/studio", timeout=30000)
+            page.wait_for_timeout(2000)
+
+            # 点击 Drafts 标签页
+            d_tab = page.query_selector("a:has-text('Drafts'), button:has-text('Drafts'), span:has-text('Drafts')")
+            if d_tab:
+                d_tab.click()
+                page.wait_for_timeout(2000)
+
+            # 3. 查找匹配的草稿行
+            target_stem = Path(img_path).stem.lower()
+            clean_title = (title or "").lower()
+            rows = page.query_selector_all("div[role='row'], div.ds-card, section, div[class*='row']")
+            target_row = None
+            for r in rows:
+                txt = (r.inner_text() or "").strip().lower()
+                if (target_stem and target_stem in txt) or (clean_title and clean_title in txt):
+                    target_row = r
+                    break
+
+            if target_row:
+                more_btn = target_row.query_selector("button[aria-label='More'], button[aria-haspopup='menu']")
+                if more_btn:
+                    more_btn.click()
+                    page.wait_for_timeout(600)
+                    del_btn = page.query_selector("button:has-text('Delete Draft'), [role='menuitem']:has-text('Delete Draft'), div:has-text('Delete Draft')")
+                    if del_btn:
+                        del_btn.evaluate("el => el.click()")
+                        page.wait_for_timeout(800)
+                        conf = page.query_selector("div[role='dialog'] button:has-text('Delete'), button:has-text('Delete')")
+                        if conf:
+                            conf.evaluate("el => el.click()")
+                            page.wait_for_timeout(1500)
+                            logger.info(f"[DeviantArt] 成功清理孤儿草稿: '{title}' / '{target_stem}'")
+            else:
+                logger.info("[DeviantArt] 未在 Studio Drafts 列表中发现残留草稿，无需清理")
+        except Exception as e_clean:
+            logger.warning(f"[DeviantArt] 清理孤儿草稿过程提示: {e_clean}")
 
     def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
         # 2. 直达投稿入口
@@ -403,6 +468,7 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
         if not f_ok:
+            self._cleanup_orphan_draft(page, title, img_path)
             return False, f"DeviantArt 标题断言失败: {f_msg}"
 
         # 6. 填写描述
@@ -516,6 +582,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                         logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
 
                 # 2. 按钮/弹窗式选择器定位与匹配
+                any_trigger_found = False
                 if not gallery_matched:
                     gallery_triggers = [
                         ".ReactModal__Content button:has-text('Gallery')",
@@ -523,14 +590,18 @@ class DeviantArtDispatcher(BaseDispatcher):
                         "button:has-text('Add to Gallery')",
                         "button:has-text('Choose gallery')",
                         "button:has-text('Featured')",
-                        "[data-testid*='gallery' i]",
-                        "[aria-label*='gallery' i]",
                         "div[role='combobox']:has-text('Gallery')",
                         ".ReactModal__Content div[role='button']:has-text('Gallery')"
                     ]
                     for g_sel in gallery_triggers:
                         g_btn = page.query_selector(g_sel)
                         if g_btn and g_btn.is_visible():
+                            # 严禁误触多图投稿弹窗 'Add Deviation Gallery'
+                            btn_aria = (g_btn.get_attribute("aria-label") or "").lower()
+                            btn_txt = (g_btn.inner_text() or "").lower()
+                            if "deviation gallery" in btn_aria or "deviation gallery" in btn_txt:
+                                continue
+                            any_trigger_found = True
                             try:
                                 click_safely(g_btn)
                                 page.wait_for_timeout(600)
@@ -568,8 +639,12 @@ class DeviantArtDispatcher(BaseDispatcher):
                                 logger.debug(f"[DeviantArt] 尝试相册触发器 {g_sel} 异常: {e_click}")
 
                 if not gallery_matched:
-                    logger.error(f"[DeviantArt] 未找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
-                    return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
+                    if any_trigger_found:
+                        logger.error(f"[DeviantArt] 相册触发器已打开，但未在列表中找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
+                        self._cleanup_orphan_draft(page, title, img_path)
+                        return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
+                    else:
+                        logger.info(f"[DeviantArt] Studio 投稿表单当前未暴露个人相册选择入口，作品将发布至主库默认相册 (Featured/All)")
                 else:
                     # 3. 选择后回读确认选中项文本 (严格阻断式回读校验)
                     confirmed = False
@@ -588,9 +663,11 @@ class DeviantArtDispatcher(BaseDispatcher):
                         logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
                     else:
                         logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
+                        self._cleanup_orphan_draft(page, title, img_path)
                         return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册"
             except Exception as e_gallery:
                 logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
+                self._cleanup_orphan_draft(page, title, img_path)
                 return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册"
 
         # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
@@ -617,7 +694,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                 break
 
         if not submit_btn:
-            return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已保留在草稿中未发布"
+            self._cleanup_orphan_draft(page, title, img_path)
+            return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已清理草稿中止发布"
 
         # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
         btn_ready = False
@@ -637,7 +715,8 @@ class DeviantArtDispatcher(BaseDispatcher):
             err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
             if err_elem:
                 err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
-            return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止以防存为半成品草稿"
+            self._cleanup_orphan_draft(page, title, img_path)
+            return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止并清理草稿"
 
         # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
         try:
@@ -765,6 +844,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                     err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
             except Exception:
                 pass
+            self._cleanup_orphan_draft(page, title, img_path)
             return False, f"{sub_msg}{err_detail}"
 
         # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁

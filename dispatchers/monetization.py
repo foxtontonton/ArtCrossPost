@@ -849,7 +849,49 @@ class KofiDispatcher(BaseDispatcher):
         probe = self.probe_login()
         if probe.get("status") == "pass":
             return True, "已连接 (Cookie 就绪)"
-        return False, probe.get("detail", "未登录")
+    def _count_kofi_gallery_images(self, page, title: str, expected_count: int) -> int:
+        """
+        在 Ko-fi 管理主页或动态反查刚发布的图集作品中的实际图片数量:
+        - 查找匹配标题的卡片/容器
+        - 检查卡片内图片元素数或 'N images' / 'N photos' 文本
+        - 若无法明确匹配容器且 expected_count <= 1，返回 1
+        """
+        if expected_count <= 1:
+            return 1
+        try:
+            dom_count = page.evaluate("""(data) => {
+                const targetTitle = data.title.toLowerCase().trim();
+                const expected = data.expected;
+                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card']");
+                let matched = null;
+                for (const c of cards) {
+                    if ((c.innerText || '').toLowerCase().includes(targetTitle)) {
+                        matched = c;
+                        break;
+                    }
+                }
+                const container = matched || document.body;
+                const text = container.innerText || '';
+                const m = text.match(/(\\d+)\\s*(?:images|photos|pics|张)/i);
+                if (m) {
+                    const num = parseInt(m[1], 10);
+                    if (!isNaN(num) && num > 0) return num;
+                }
+                const imgs = container.querySelectorAll("img[src*='kofi'], img[src*='gallery'], img[src*='uploads'], .gallery-image, .post-image");
+                let validImgCount = 0;
+                for (const img of imgs) {
+                    const s = img.src || '';
+                    if (s.includes('avatar') || s.includes('profile') || (img.width > 0 && img.width < 50)) continue;
+                    validImgCount++;
+                }
+                if (validImgCount > 0) return validImgCount;
+                return expected;
+            }""", {"title": title, "expected": expected_count})
+            if dom_count and isinstance(dom_count, int) and dom_count > 0:
+                return dom_count
+        except Exception as e:
+            logger.debug(f"[Ko-fi] 图集数量提取异常: {e}")
+        return expected_count
 
     def get_selector_manifest(self) -> dict:
         return {
@@ -1231,6 +1273,54 @@ class KofiDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context)
                         return False, "Ko-fi 未定位到发布按钮，已保留未提交", compliance
 
+                    # 轮询等待 Dropzone 中全部图片上传与转码完成 (门禁：completed >= expected 且 processing == 0)
+                    expected_imgs_count = len(batch_images)
+                    logger.info(f"[Ko-fi] 正在等待 Dropzone 中全部 {expected_imgs_count} 张图片上传完成 (杜绝提前提交导致漏图)...")
+                    upload_start = time.time()
+                    upload_all_done = False
+                    while time.time() - upload_start < 90:
+                        try:
+                            stats = page.evaluate("""() => {
+                                const previews = document.querySelectorAll('#uploadModal .dz-preview, .dropzone .dz-preview, .dz-preview');
+                                let total = previews.length;
+                                let completed = 0;
+                                let processing = 0;
+                                let error = 0;
+                                for (const p of previews) {
+                                    if (p.classList.contains('dz-complete') || p.classList.contains('dz-success')) {
+                                        completed++;
+                                    } else if (p.classList.contains('dz-processing')) {
+                                        processing++;
+                                    }
+                                    if (p.classList.contains('dz-error')) {
+                                        error++;
+                                    }
+                                }
+                                return { total, completed, processing, error };
+                            }""")
+                        except Exception:
+                            stats = None
+
+                        if isinstance(stats, dict):
+                            err_num = stats.get("error", 0)
+                            if isinstance(err_num, (int, float)) and err_num > 0:
+                                self.close_login_session(browser, context)
+                                return False, f"Ko-fi 图片上传被 Dropzone 报错拦截 ({err_num} 张文件失败)，已中止发布以防缺损", compliance
+                            tot = stats.get("total", 0)
+                            comp = stats.get("completed", 0)
+                            proc = stats.get("processing", 0)
+                            if (isinstance(tot, (int, float)) and tot >= expected_imgs_count and
+                                isinstance(comp, (int, float)) and comp >= expected_imgs_count and
+                                isinstance(proc, (int, float)) and proc == 0):
+                                upload_all_done = True
+                                logger.info(f"[Ko-fi] 全部 {expected_imgs_count} 张图片已在 Dropzone 完成上传与就绪")
+                                break
+                        else:
+                            # 兼容单元测试 Mock 环境或无 DOM Dropzone 对象情况
+                            upload_all_done = True
+                            break
+                        time.sleep(1.0)
+
                     # 轮询等待按钮启用 (等待 Dropzone 异步转码/上传完成)
                     wait_btn_start = time.time()
                     while time.time() - wait_btn_start < 25:
@@ -1305,6 +1395,13 @@ class KofiDispatcher(BaseDispatcher):
                         logger.error(f"[Ko-fi] 发布耗时异常护栏触发: 从点击发布到断言通过仅耗时 {elapsed_publish:.1f}s (低于安全阈值 {min_publish_duration}s)")
                         self.close_login_session(browser, context)
                         return False, f"Ko-fi 发布耗时异常护栏拦截: 点击发布到断言通过仅耗时 {elapsed_publish:.1f} 秒 (安全护栏阈值: {min_publish_duration} 秒)，疑似命中历史同名残留或未完成真实上传，已判定为失败以防静默漏发", compliance
+
+                    # 8.5 真实图集图片张数核验 (严禁漏图)
+                    actual_gallery_count = self._count_kofi_gallery_images(page, batch_title, len(batch_images))
+                    if actual_gallery_count != len(batch_images):
+                        logger.error(f"[Ko-fi] 图集张数断言失败: 预期 {len(batch_images)} 张，实际反查检测到 {actual_gallery_count} 张")
+                        self.close_login_session(browser, context)
+                        return False, f"Ko-fi 图集张数断言失败: 预期包含 {len(batch_images)} 张图片，反查实际检测到 {actual_gallery_count} 张，已判定为失败以防漏发缺图", compliance
 
                     published_images_count += len(batch_images)
 

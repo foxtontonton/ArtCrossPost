@@ -622,6 +622,29 @@ class XTwitterDispatcher(BaseDispatcher):
                                 if tt_el and tt_el.is_visible():
                                     tt_text = (tt_el.text_content() or "").strip()
                                 logger.info(f"[X] 发帖按钮当前等待中 ({elapsed_sec}s/{wait_button_timeout}s): aria-disabled={probe_aria}{f', 提示: {tt_text}' if tt_text else ''}")
+
+                                # 诊断与自愈：若持续禁用，检查是否出现字符超限 (例如进度环负数 -N)
+                                if probe_aria == "true":
+                                    neg_count = page.evaluate("""() => {
+                                        const spans = document.querySelectorAll("span, div");
+                                        for (const s of spans) {
+                                            if (s.children.length === 0) {
+                                                const t = (s.innerText || '').trim();
+                                                if (/^-\\d+$/.test(t)) return parseInt(t, 10);
+                                            }
+                                        }
+                                        return 0;
+                                    }""")
+                                    if neg_count and neg_count < 0:
+                                        logger.warning(f"[X] 捕获推文实际超出字数限制 ({abs(neg_count)} 字符)，触发紧急自愈修剪...")
+                                        cur_ed = page.query_selector(editor_sel)
+                                        if cur_ed:
+                                            raw_val = cur_ed.inner_text().strip()
+                                            trimmed, _, _ = truncate_x_text(raw_val, limit=char_limit - abs(neg_count))
+                                            cur_ed.click()
+                                            cur_ed.fill(trimmed)
+                                            time.sleep(0.5)
+                                            logger.info(f"[X] 紧急修剪已应用，新推文字数权重={calculate_x_char_count(trimmed)}")
                             except Exception:
                                 pass
 

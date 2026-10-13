@@ -10,15 +10,25 @@ import re
 
 def calculate_x_char_count(text: str) -> int:
     """
-    根据 X (Twitter) 官方规则计算字符数:
-    - http(s):// 链接统一折算为 23 字符
-    - 其余字符按标准长度计算
+    根据 X (Twitter) 官方规则计算加权字符数 (Twitter-Text Spec):
+    - http(s):// 链接统一折算为 23 字符权重
+    - 标准 Latin / ASCII / 常见半角字符 (codepoints 0~4351, 8192~8205, 8208~8223, 8242~8247) 权重为 1
+    - CJK 汉字、日韩文字、中文全角标点符号 (如 ：、，、。)、Emoji 表情等权重为 2
     """
     if not text:
         return 0
     url_pattern = re.compile(r'https?://\S+')
-    adjusted = url_pattern.sub("x" * 23, text)
-    return len(adjusted)
+    # 将所有 URL 替换为 23 个占位单宽字符
+    text_without_urls = url_pattern.sub(" " * 23, text)
+    count = 0
+    for ch in text_without_urls:
+        code = ord(ch)
+        if (0 <= code <= 4351) or (8192 <= code <= 8205) or (8208 <= code <= 8223) or (8242 <= code <= 8247):
+            count += 1
+        else:
+            count += 2
+    return count
+
 
 def truncate_x_text(full_text: str, limit: int = 280) -> tuple[str, int, bool]:
     """

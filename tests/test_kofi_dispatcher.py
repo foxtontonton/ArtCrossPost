@@ -205,3 +205,55 @@ def test_kofi_publish_success_verified(tmp_path, monkeypatch):
     assert success is True
     assert "Ko-fi 发布成功" in msg
     assert "真实作品" in msg
+
+
+def test_kofi_gallery_count_mismatch_blocks_publish(tmp_path, monkeypatch):
+    """
+    测试【P0 图集张数断言】：上传 10 张图但云端仅检测到 5 张（Dropzone 提前提交半成品），
+    必须严格阻断判为 FAILED，绝不误报成功。
+    """
+    disp = _setup_kofi_dispatcher(tmp_path, monkeypatch)
+    mock_page = MagicMock()
+    mock_page.url = "https://ko-fi.com/manage/mypage"
+    mock_page.wait_for_selector = MagicMock(return_value=MagicMock())
+
+    mock_btn = MagicMock()
+    mock_btn.is_disabled = MagicMock(return_value=False)
+    mock_btn.get_attribute = MagicMock(return_value="")
+
+    mock_modal = MagicMock()
+    mock_modal.is_visible = MagicMock(return_value=False)
+
+    def fake_query_selector(sel):
+        if "#uploadModal" in sel:
+            return mock_modal
+        if "#imageUploadSubmit" in sel:
+            return mock_btn
+        return MagicMock()
+
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector)
+    mock_page.inner_text = MagicMock(return_value="Artwork: 10 Image Set (1/1)")
+
+    # 模拟时钟每次调用推进 5 秒，确保通过耗时护栏 (>= 20s)
+    clock = [100.0]
+    def fake_time():
+        clock[0] += 5.0
+        return clock[0]
+    monkeypatch.setattr(time, "time", fake_time)
+
+    # 模拟图集张数反查检测到仅 5 张 (预期 10 张)
+    disp._count_kofi_gallery_images = MagicMock(return_value=5)
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+
+    ten_images = [f"test_{i}.png" for i in range(10)]
+    payload = {"title": "10 Image Set", "kofi_images": ten_images, "kofi_min_duration": 20}
+
+    success, msg, compliance = disp.publish(payload)
+    assert success is False
+    assert "图集张数断言失败" in msg
+    assert "预期包含 10 张图片" in msg
+    assert "5 张" in msg
+

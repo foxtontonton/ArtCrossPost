@@ -60,6 +60,16 @@ DEFAULT_CONFIG = {
         "Cage - A muscle growth story",
         "Film set"
     ],
+    # 4. 压缩优化与并发控制策略
+    "compression": {
+        "compress_only_when_over_limit": True, # 默认只在超平台门禁时压缩，未超限保持原始画质
+        "jpeg_quality": 88,                    # 压缩起始质量 (可调)
+        "x_max_limit_mb": 4.8,                 # X 平台单图体积上限
+        "kofi_max_limit_mb": 9.5,              # Ko-fi 平台单图体积上限
+        "deviantart_max_limit_mb": 30.0,       # DeviantArt 单图体积上限
+        "patreon_max_limit_mb": 50.0           # Patreon 单图体积上限
+    },
+    "publish_concurrency": 2,                 # 并发发布数 (默认 2，各平台独立持久化浏览器实例)
     "defaults": {
         "is_ai_generated": True,
         "x_sensitive": True,
