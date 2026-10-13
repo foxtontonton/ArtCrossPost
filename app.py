@@ -5215,7 +5215,7 @@ class MainWindow(QMainWindow):
 
                 # 1. DeviantArt 动图
                 da_out_path = None
-                clean_da_gif_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_gif_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
                 clean_da_gif = CACHE_DIR / f"{clean_da_gif_stem}.gif"
                 if is_da_censor:
                     da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
@@ -5381,9 +5381,9 @@ class MainWindow(QMainWindow):
                 else:
                     pub_raw_path = Path(p)
 
-                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名)
+                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名；首图必须为作品本体名不带编号)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
-                clean_da_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
                 clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
                 try:
                     if Path(da_target).exists():
