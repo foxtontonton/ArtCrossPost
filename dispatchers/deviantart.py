@@ -409,7 +409,7 @@ class DeviantArtDispatcher(BaseDispatcher):
         except Exception as e_clean:
             logger.warning(f"[DeviantArt] 清理孤儿草稿过程提示: {e_clean}")
 
-    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, thumb_wait_timeout=60):
         if isinstance(images, (str, Path)):
             images = [str(images)]
         else:
@@ -449,14 +449,9 @@ class DeviantArtDispatcher(BaseDispatcher):
         if not target_fi:
             target_fi = all_fis[-1]
 
-        # 确保 input[type='file'] 具备 multiple 属性支持多图批量上传
-        try:
-            target_fi.evaluate("el => el.setAttribute('multiple', '')")
-        except Exception:
-            pass
-
-        target_fi.set_input_files(images)
-        logger.info(f"[DeviantArt] 文件已批量提交 (共 {len(images)} 张，首图/Cover: {'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Studio 弹窗渲染...")
+        # 步骤 1: 只传首图，等待 Edit Draft 弹窗渲染 (现有 title_sel 断言保留)
+        target_fi.set_input_files([first_img])
+        logger.info(f"[DeviantArt] 步骤 1/5: 首图文件已提交 ({'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Edit Draft 弹窗渲染...")
 
         # 4. 等待上传与表单渲染 (大动图有羊驼动画，放宽等待时间至 75 秒)
         title_sel = "input[name='title'], input[placeholder*='Add your title here'], div[role='dialog'] input[type='text']:not([placeholder*='Search'])"
@@ -695,7 +690,137 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self._cleanup_orphan_draft(page, title, first_img)
                 return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册"
 
-        # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
+        # 步骤 3 & 步骤 4: 当包含多图时，点击 "+" 追加剩余图片并等待缩略图就绪 (单图模式直接跳过)
+        remaining_images = images[1:]
+        if remaining_images:
+            logger.info(f"[DeviantArt] 步骤 3/5: 检测到多图素材 (共 {len(images)} 张)，正在弹窗底部缩略图栏定位 '+' 按钮追加剩余 {len(remaining_images)} 张图片...")
+            plus_btn = None
+            candidate_plus_sels = [
+                ".ReactModal__Content button:has-text('+')",
+                "button:has-text('+')",
+                ".ReactModal__Content [data-hook*='thumbnail'] button",
+                ".ReactModal__Content [class*='thumbnail'] button",
+                "[data-hook*='thumbnail'] button",
+                "[class*='thumbnail'] button",
+                "[class*='filmstrip'] button",
+                ".ReactModal__Content button[aria-label*='add' i]",
+                "button[aria-label*='add' i]",
+                "button[title*='add' i]",
+                "button[aria-label*='upload' i]"
+            ]
+            for sel in candidate_plus_sels:
+                elements = page.query_selector_all(sel)
+                for el in elements:
+                    txt = (el.inner_text() or "").strip()
+                    aria = (el.get_attribute("aria-label") or "").lower()
+                    title_attr = (el.get_attribute("title") or "").lower()
+                    if "+" in txt or "add" in aria or "add" in title_attr or "upload" in aria:
+                        plus_btn = el
+                        break
+                if plus_btn:
+                    break
+
+            appended_ok = False
+            err_reason = ""
+            existing_inputs = page.query_selector_all("input[type='file']")
+
+            # 机制 A: 优先使用 expect_file_chooser() 捕获系统文件选择框
+            if plus_btn:
+                try:
+                    logger.info("[DeviantArt] 正在点击 '+' 按钮并通过 expect_file_chooser 捕获系统文件选择器...")
+                    with page.expect_file_chooser(timeout=8000) as fc_info:
+                        plus_btn.click()
+                    file_chooser = fc_info.value
+                    file_chooser.set_files(remaining_images)
+                    appended_ok = True
+                    logger.info(f"[DeviantArt] 机制 A 成功: 已通过 FileChooser 一次性注入剩余 {len(remaining_images)} 张图片")
+                except Exception as e_fc:
+                    logger.debug(f"[DeviantArt] 机制 A (FileChooser) 未触发或超时: {e_fc}")
+
+            # 机制 B: 若机制 A 未捕获到 FileChooser，改用 set_input_files 打新出现或弹窗内的隐藏 input
+            if not appended_ok:
+                logger.info("[DeviantArt] 机制 A 未捕获到 FileChooser，尝试机制 B (探测弹窗内新增或隐藏的 input[type='file'])...")
+                new_inputs = page.query_selector_all(".ReactModal__Content input[type='file'], input[type='file']")
+                target_additional_fi = None
+                for fi in new_inputs:
+                    if fi not in existing_inputs:
+                        target_additional_fi = fi
+                        break
+                if not target_additional_fi:
+                    # 检查弹窗 (.ReactModal__Content) 内部专用于追加素材的 file input (排除步骤 1 的 target_fi)
+                    modal_inputs = page.query_selector_all(".ReactModal__Content input[type='file']")
+                    for fi in modal_inputs:
+                        if fi != target_fi:
+                            target_additional_fi = fi
+                            break
+
+                if target_additional_fi:
+                    try:
+                        target_additional_fi.evaluate("el => el.setAttribute('multiple', '')")
+                    except Exception:
+                        pass
+                    try:
+                        target_additional_fi.set_input_files(remaining_images)
+                        appended_ok = True
+                        logger.info(f"[DeviantArt] 机制 B 成功: 已通过 input[type='file'] 注入剩余 {len(remaining_images)} 张图片")
+                    except Exception as e_fi:
+                        err_reason = f"input[type='file'] 注入失败: {e_fi}"
+                else:
+                    err_reason = "未定位到 '+' 按钮且未找到可用的隐藏 input[type='file']"
+
+            if not appended_ok:
+                self._cleanup_orphan_draft(page, title, first_img)
+                return False, f"DeviantArt 多图追加失败: 机制 A (FileChooser) 与机制 B (隐藏Input) 均未能提交剩余图片 ({err_reason})，已清理草稿中止发布以防漏发"
+
+            # 步骤 4: 等缩略图 - 轮询缩略图栏，数量 == len(images) 才继续，超时 60s
+            logger.info(f"[DeviantArt] 步骤 4/5: 正在轮询缩略图栏，等待全部 {len(images)} 张图片就绪 (超时 {thumb_wait_timeout}s)...")
+            expected_total = len(images)
+            thumbs_ready = False
+            wait_thumb_start = time.time()
+            while time.time() - wait_thumb_start < thumb_wait_timeout:
+                current_detected_count = 0
+                try:
+                    eval_cnt = page.evaluate("""(exp) => {
+                        try {
+                            const modal = document.querySelector('.ReactModal__Content') || document.body;
+                            const text = modal.innerText || '';
+                            const m1 = text.match(/(\\d+)\\s*\\/\\s*\\d+\\s*files/i);
+                            if (m1) return parseInt(m1[1], 10);
+                            const m2 = text.match(/(\\d+)\\s+files/i);
+                            if (m2) return parseInt(m2[1], 10);
+                            const thumbEls = modal.querySelectorAll("[data-hook*='thumbnail'] img, [class*='thumbnail'] img, [class*='filmstrip'] img, div[role='listitem'] img, div[role='tablist'] img");
+                            if (thumbEls.length > 0) return thumbEls.length;
+                        } catch(e) {}
+                        return 0;
+                    }""", expected_total)
+                    if isinstance(eval_cnt, int) and eval_cnt > 0:
+                        current_detected_count = eval_cnt
+                except Exception:
+                    pass
+
+                if current_detected_count < expected_total:
+                    try:
+                        dom_thumbs = page.query_selector_all(".ReactModal__Content [data-hook*='thumbnail'], .ReactModal__Content [class*='thumbnail'] img, [data-hook*='thumbnail'] img")
+                        if len(dom_thumbs) >= expected_total:
+                            current_detected_count = len(dom_thumbs)
+                    except Exception:
+                        pass
+
+                if current_detected_count >= expected_total:
+                    thumbs_ready = True
+                    logger.info(f"[DeviantArt] 缩略图栏已检测到全部 {expected_total} 张图片就绪 (当前: {current_detected_count} 张)！")
+                    break
+
+                elapsed_thumb = int(time.time() - wait_thumb_start)
+                if elapsed_thumb > 0 and elapsed_thumb % 10 == 0:
+                    logger.info(f"[DeviantArt] 正在等待缩略图渲染 ({current_detected_count}/{expected_total} 张，已等待 {elapsed_thumb}s)...")
+                time.sleep(1.0)
+
+            if not thumbs_ready:
+                self._cleanup_orphan_draft(page, title, first_img)
+                return False, f"DeviantArt 缩略图栏等待超时 ({thumb_wait_timeout}s 内未检测到全部 {expected_total} 张素材就绪)，已中止发布并清理草稿以防漏图"
+
+        # 步骤 5: 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
         logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
         submit_btn = None
         candidate_sels = [

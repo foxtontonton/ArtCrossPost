@@ -422,47 +422,333 @@ def test_deviantart_mature_and_ai_flags_rule(tmp_path, monkeypatch):
     assert captured_flags["is_ai"] is True
 
 
-def test_deviantart_real_submit_deviation_method_no_nameerror(tmp_path, monkeypatch):
+class MockFileChooserInfo:
+    def __init__(self, fc):
+        self.value = fc
+
+
+class MockFileChooserContext:
+    def __init__(self, fc, raise_exc=None):
+        self.fc = fc
+        self.raise_exc = raise_exc
+
+    def __enter__(self):
+        if self.raise_exc:
+            raise self.raise_exc
+        return MockFileChooserInfo(self.fc)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+def test_deviantart_v2_file_chooser_append_and_submit_success(tmp_path, monkeypatch):
     """
-    真实执行 _submit_deviation 内部流程，验证首图作为封面不可重排，无 NameError 或未定义变量。
+    DA 多图投稿重写 v2 核心主流程:
+    1. 首图上传: 仅传入 [images[0]]
+    2. 填表单
+    3. 机制 A 成功: 点击 '+' 按钮，通过 expect_file_chooser() 捕获并注入 images[1:]
+    4. 缩略图轮询: evaluate 检测到 len(images) 张缩略图就绪
+    5. Submit 提交成功
     """
     monkeypatch.setattr(time, "sleep", lambda x: None)
 
-    disp_real = DeviantArtDispatcher(tmp_path)
-    disp_real.assert_attached = MagicMock(return_value=(True, ""))
-    disp_real.assert_field_value = MagicMock(return_value=(True, ""))
-    disp_real.check_selector_state = MagicMock(return_value=(True, "ok"))
-    disp_real.assert_submitted = MagicMock(return_value=(True, ""))
-    disp_real._cleanup_orphan_draft = MagicMock()
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
 
-    mock_real_page = MagicMock()
-    mock_real_page.url = "https://www.deviantart.com/art/view-12345"
-    mock_real_page.inner_text = MagicMock(return_value="")
-    mock_file_in = MagicMock()
-    mock_file_in.inner_text.return_value = "Submit"
-    mock_file_in.is_enabled.return_value = True
-    mock_file_in.get_attribute.return_value = "false"
-    mock_real_page.query_selector_all = MagicMock(return_value=[mock_file_in])
-    mock_real_page.query_selector = MagicMock(return_value=mock_file_in)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-12345"
+    mock_page.inner_text = MagicMock(return_value="")
 
-    mock_real_context = MagicMock()
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png,image/jpeg"
+
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_plus_btn.get_attribute.return_value = "Add more files"
+
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    mock_fc = MagicMock()
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(mock_fc))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel or "thumbnail" in sel or "add" in sel:
+            return [mock_plus_btn]
+        if "Submit" in sel:
+            return [mock_submit_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if "+" in sel else mock_cover_fi))
+
+    # evaluate 返回 3 (与期望图片数匹配)
+    mock_page.evaluate = MagicMock(return_value=3)
+
+    mock_context = MagicMock()
     mock_studio_page = MagicMock()
     mock_studio_page.inner_text = MagicMock(return_value="No drafts here")
-    mock_real_context.new_page = MagicMock(return_value=mock_studio_page)
+    mock_studio_page.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio_page)
 
     images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
     for p in images:
         Path(p).write_bytes(b"dummy")
 
     comp_list = []
-    res_ok, res_msg = disp_real._submit_deviation(
-        mock_real_page, mock_real_context, images, "Latex Sessions Vol. 1",
-        "Description", ["tag1"], False, "strict", False, "", comp_list
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Multi Artwork V2",
+        "Description", ["art"], False, "strict", False, "", comp_list
     )
+
     assert res_ok is True
     assert res_msg == ""
-    # 断言 set_input_files 接收到完整的包含首图在内的图片列表
-    mock_file_in.set_input_files.assert_called_once_with(images)
+    # 步骤 1: 首图作为 source file 单独先传
+    mock_cover_fi.set_input_files.assert_called_once_with([images[0]])
+    # 步骤 3: 机制 A 通过 file_chooser 一次性注入剩余全部
+    mock_fc.set_files.assert_called_once_with(images[1:])
+    # 步骤 5: Submit 点击
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_deviantart_v2_mechanism_b_hidden_input_append_success(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 机制 B 回退:
+    - 机制 A expect_file_chooser 捕获失败 (超时抛异常)
+    - 机制 B 捕获到弹窗内新增/隐藏的 input[type='file'] 并 set_input_files(images[1:])
+    - 缩略图轮询成功，Submit 成功
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-12345"
+    mock_page.inner_text = MagicMock(return_value="")
+
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png,image/jpeg"
+
+    mock_hidden_fi = MagicMock()
+    mock_hidden_fi.get_attribute.return_value = "image/*"
+
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_plus_btn.get_attribute.return_value = "Add"
+
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    # expect_file_chooser 模拟超时抛异常
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(None, raise_exc=Exception("Timeout waiting for FileChooser")))
+
+    def fake_query_selector_all(sel):
+        if ".ReactModal__Content input[type='file']" in sel:
+            return [mock_hidden_fi]
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel or "thumbnail" in sel or "add" in sel:
+            return [mock_plus_btn]
+        if "Submit" in sel:
+            return [mock_submit_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if "+" in sel else mock_cover_fi))
+    mock_page.evaluate = MagicMock(return_value=3)
+
+    mock_context = MagicMock()
+    mock_studio_page = MagicMock()
+    mock_studio_page.inner_text = MagicMock(return_value="No drafts")
+    mock_studio_page.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio_page)
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    comp_list = []
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Multi Artwork B",
+        "Desc", [], False, "strict", False, "", comp_list
+    )
+
+    assert res_ok is True
+    # 首图
+    mock_cover_fi.set_input_files.assert_called_once_with([images[0]])
+    # 机制 B 隐藏 input 注入
+    mock_hidden_fi.set_input_files.assert_called_once_with(images[1:])
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_deviantart_v2_append_failure_both_mechanisms_loud_error(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 容错安全门禁:
+    - 机制 A (FileChooser) 与机制 B (隐藏Input) 均告失败；
+    - 必须大声报错中止并清理孤儿草稿，严禁静默跳过，严禁提交残缺作品！
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png"
+
+    # expect_file_chooser 失败
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(None, raise_exc=Exception("Timeout")))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            # 只有首图的 cover input，没有追加专用的 input
+            return [mock_cover_fi]
+        # 没有 + 按钮
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(return_value=mock_cover_fi)
+
+    mock_context = MagicMock()
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Failed Append",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is False
+    assert "DeviantArt 多图追加失败" in res_msg
+    assert "机制 A (FileChooser) 与机制 B (隐藏Input) 均未能提交剩余图片" in res_msg
+    # 必须执行孤儿草稿清理
+    disp._cleanup_orphan_draft.assert_called_once()
+
+
+def test_deviantart_v2_thumbnail_polling_timeout_loud_error(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 缩略图等待超时路径:
+    - 机制 A 注入了剩余图片，但缩略图栏轮询未能检测到全部素材就绪 (超时)；
+    - 必须大声报错中止并清理孤儿草稿，绝不提交未就绪作品！
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_fc = MagicMock()
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(mock_fc))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel:
+            return [mock_plus_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(return_value=mock_cover_fi)
+
+    # 缩略图评估始终返回 1 (小于期望的 3 张)
+    mock_page.evaluate = MagicMock(return_value=1)
+
+    mock_context = MagicMock()
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Timeout Append",
+        "Desc", [], False, "strict", False, "", [], thumb_wait_timeout=0.01
+    )
+
+    assert res_ok is False
+    assert "缩略图栏等待超时" in res_msg
+    disp._cleanup_orphan_draft.assert_called_once()
+
+
+def test_deviantart_v2_single_image_skips_plus_and_thumbnails(tmp_path, monkeypatch):
+    """
+    DA 单图投稿边界验证:
+    - 当 images 只有 1 张时，直接跳过步骤 3 (+) 与步骤 4 (缩略图轮询)，走原单图提交流程。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-single"
+    mock_cover_fi = MagicMock()
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    mock_page.query_selector_all = MagicMock(side_effect=lambda sel: [mock_submit_btn] if "Submit" in sel else [mock_cover_fi])
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else mock_cover_fi)
+    mock_page.expect_file_chooser = MagicMock()
+
+    mock_context = MagicMock()
+    mock_studio = MagicMock()
+    mock_studio.inner_text.return_value = "clean"
+    mock_studio.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio)
+
+    img_1 = str(tmp_path / "da_single.jpg")
+    Path(img_1).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, [img_1], "Solo Artwork",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is True
+    assert res_msg == ""
+    # 首图上传
+    mock_cover_fi.set_input_files.assert_called_once_with([img_1])
+    # 步骤 3 的 expect_file_chooser 绝不调用
+    mock_page.expect_file_chooser.assert_not_called()
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
 
 
 # ==================== 4. X (Twitter) 4-Image Posting Tests ====================
