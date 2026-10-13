@@ -617,17 +617,7 @@ class DeviantArtDispatcher(BaseDispatcher):
             logger.info(f"[DeviantArt] 正在定位相册选择器并选择相册: '{gallery}'...")
             gallery_matched = False
             try:
-                # 0. 在左侧表单滚动容器内下滚，确保 Gallery 区域进入视口渲染
-                try:
-                    page.evaluate("""() => {
-                        const scroller = document.querySelector('.EYQKmR.XITZsZ') || document.querySelector('.ReactModal__Content');
-                        if (scroller) scroller.scrollTop = 500;
-                    }""")
-                    page.wait_for_timeout(400)
-                except Exception:
-                    pass
-
-                # 1. <select> 模糊匹配与选择 (兼容原生 select / 单测 mock 场景)
+                # 0. <select> 模糊匹配与选择 (兼容原生 select / 单测 mock 场景)
                 select_els = page.query_selector_all(".ReactModal__Content select, form select, select")
                 for s_el in select_els:
                     try:
@@ -651,66 +641,53 @@ class DeviantArtDispatcher(BaseDispatcher):
                     except Exception as e_sel:
                         logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
 
-                # 2. 定位 Studio 原生 Gallery 下拉组件 (<label>Gallery</label> 及其紧随的 combobox 下拉触发框)
+                # 1. 定位 Studio 原生 Gallery 下拉组件 (<label>Gallery</label> 对应专属 combobox)
                 if not gallery_matched:
-                    # 先检查是否已默认选定该相册
-                    already_selected = False
-                    combobox_el = page.query_selector("div[role='combobox'][aria-haspopup='listbox'], .ReactModal__Content [role='combobox']")
-                    if combobox_el:
-                        cur_cb_text = (combobox_el.inner_text() or "").strip()
+                    g_cb = page.evaluate_handle("""() => {
+                        const labels = Array.from(document.querySelectorAll('label'));
+                        const gLabel = labels.find(l => (l.innerText || '').trim() === 'Gallery');
+                        if (gLabel && gLabel.parentElement) {
+                            return gLabel.parentElement.querySelector("div[role='combobox']") || gLabel.parentElement.querySelector('[role="combobox"]');
+                        }
+                        return document.querySelector(".ReactModal__Content div[role='combobox']:not([aria-autocomplete])") || null;
+                    }""").as_element()
+
+                    if g_cb:
+                        cur_cb_text = (g_cb.inner_text() or "").strip()
                         if gallery.lower() in cur_cb_text.lower():
                             gallery_matched = True
-                            already_selected = True
                             logger.info(f"[DeviantArt] 相册已处于选中状态: '{gallery}'")
+                        else:
+                            # 展开 Gallery combobox 下拉面板
+                            if g_cb.get_attribute("aria-expanded") != "true":
+                                click_safely(g_cb)
+                                page.wait_for_timeout(600)
 
-                    if not already_selected:
-                        # 查找触发器并点击展开
-                        g_trigger = combobox_el or page.query_selector(
-                            ".ReactModal__Content [role='combobox']:has-text('Gallery'), "
-                            ".ReactModal__Content [role='combobox']:has-text('Select'), "
-                            ".ReactModal__Content [role='button']:has-text('Gallery'), "
-                            "button:has-text('Add to Gallery'), button:has-text('Choose gallery'), "
-                            "button:has-text('Featured'), label:has-text('Gallery')"
-                        )
-                        if not g_trigger:
-                            trig_handle = page.evaluate_handle("""() => {
+                            # 优先在 listbox 容器内精确匹配目标相册
+                            click_success = page.evaluate("""(g) => {
                                 const labels = Array.from(document.querySelectorAll('label'));
                                 const gLabel = labels.find(l => (l.innerText || '').trim() === 'Gallery');
-                                if (gLabel && gLabel.parentElement) {
-                                    return gLabel.parentElement.querySelector('[role="combobox"], div[tabindex], div:not([class=""]):not(label)') || gLabel.parentElement;
-                                }
-                                return null;
-                            }""")
-                            g_trigger = trig_handle.as_element()
+                                const cb = gLabel && gLabel.parentElement ? gLabel.parentElement.querySelector("div[role='combobox']") : null;
+                                const listId = cb ? cb.getAttribute('aria-controls') : null;
+                                const listEl = listId ? document.getElementById(listId) : document.querySelector("div[id$='-list'], ul[role='listbox']");
+                                const scope = listEl || document.body;
 
-                        if g_trigger:
-                            click_safely(g_trigger)
-                            page.wait_for_timeout(500)
-
-                            # 优先尝试在展开的 listbox 中查找目标相册项并点击
-                            click_res = page.evaluate("""(targetName) => {
-                                const listbox = document.querySelector('[role="listbox"]') || document.querySelector('[id*="-list"]') || document.body;
-                                const candidates = Array.from(listbox.querySelectorAll('label, [role="option"], [role="checkbox"], li, div')).filter(el => {
+                                const matches = Array.from(scope.querySelectorAll('label, [role=\"option\"], [role=\"checkbox\"], li, div, span')).filter(el => {
                                     const t = (el.innerText || '').trim();
-                                    return t.toLowerCase() === targetName.toLowerCase() || t.toLowerCase().includes(targetName.toLowerCase());
+                                    return t.toLowerCase() === g.toLowerCase();
                                 });
-                                if (candidates.length > 0) {
-                                    let chosen = candidates.find(el => el.tagName === 'LABEL' || el.querySelector('input[type="checkbox"]')) || candidates[0];
-                                    chosen.scrollIntoView({ block: 'nearest' });
-                                    const cb = chosen.querySelector ? chosen.querySelector('input[type="checkbox"]') : null;
-                                    if (cb && !cb.checked) {
-                                        chosen.click();
-                                    } else if (!cb) {
-                                        chosen.click();
-                                    }
+                                if (matches.length > 0) {
+                                    // 优先点击 label / option / checkbox 或最外层行容器
+                                    const target = matches.find(m => m.tagName === 'LABEL' || m.getAttribute('role') === 'option' || m.getAttribute('role') === 'checkbox') || matches[0];
+                                    target.click();
                                     return true;
                                 }
                                 return false;
                             }""", gallery)
 
-                            if click_res:
+                            if click_success:
                                 gallery_matched = True
-                                logger.info(f"[DeviantArt] 通过下拉菜单成功选定相册: '{gallery}'")
+                                logger.info(f"[DeviantArt] 通过相册下拉列表项成功匹配并点击: '{gallery}'")
                                 page.wait_for_timeout(400)
                             else:
                                 # 兼容 mock 场景的 query_selector_all 匹配
@@ -736,9 +713,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                                     if gallery_matched:
                                         break
 
-                            # 关键: 关闭下拉面板！通过再次点击触发器（toggle close）确认选定，严禁按 Escape（DA 下 Escape 会丢弃选定状态重置为 Select）
+                            # 关闭下拉面板：通过再次点击 combobox 触发器（toggle close）确认选定，严禁按 Escape
                             try:
-                                click_safely(g_trigger)
+                                if g_cb.get_attribute("aria-expanded") == "true":
+                                    click_safely(g_cb)
                             except Exception:
                                 pass
                             page.wait_for_timeout(400)
@@ -748,16 +726,19 @@ class DeviantArtDispatcher(BaseDispatcher):
                     self._cleanup_orphan_draft(page, title, first_img)
                     return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
                 else:
-                    # 3. 选择后回读确认选中项文本 (严格阻断式回读校验)
+                    # 2. 选择后回读确认选中项文本 (严格阻断式回读校验)
                     confirmed = False
                     for _ in range(6):
-                        page.wait_for_timeout(500)
+                        page.wait_for_timeout(400)
                         try:
                             readback_res = page.evaluate("""(g) => {
                                 const labels = Array.from(document.querySelectorAll('label'));
                                 const gLabel = labels.find(l => (l.innerText || '').trim() === 'Gallery');
-                                const text = (gLabel && gLabel.parentElement ? gLabel.parentElement.innerText : '') || (document.querySelector('.ReactModal__Content') || document.body).innerText;
-                                return text.toLowerCase().includes(g.toLowerCase());
+                                const cb = gLabel && gLabel.parentElement ? gLabel.parentElement.querySelector("div[role='combobox']") : null;
+                                const cbText = cb ? (cb.innerText || '') : '';
+                                if (cbText.toLowerCase().includes(g.toLowerCase())) return true;
+                                const fullText = (document.querySelector('.ReactModal__Content') || document.body).innerText || '';
+                                return fullText.toLowerCase().includes(g.toLowerCase());
                             }""", gallery)
                             if readback_res is True:
                                 confirmed = True
@@ -793,43 +774,62 @@ class DeviantArtDispatcher(BaseDispatcher):
                     break
                 time.sleep(1.0)
 
+            existing_inputs = page.query_selector_all("input[type='file']")
+
+            # 确保弹窗主体未发生整体纵向漂移，使底栏胶卷位于可视范围
+            try:
+                page.evaluate("() => { const m = document.querySelector('.ReactModal__Content'); if (m) m.scrollTop = 0; }")
+            except Exception:
+                pass
+
             plus_btn = None
             candidate_plus_sels = [
                 "button[aria-label='Attach additional media']",
                 "button[aria-label*='additional media' i]",
                 ".ReactModal__Content button[aria-label*='additional media' i]",
+                "div.rfiU0f button",
+                ".ReactModal__Content div.rfiU0f button",
                 "button[aria-label*='Attach' i]",
                 ".ReactModal__Content button[aria-label*='Attach' i]",
                 ".ReactModal__Content [class*='filmstrip'] button",
                 ".ReactModal__Content div:has(> img) + div button",
-                ".ReactModal__Content button:has-text('+')",
-                "button:has-text('+')",
                 ".ReactModal__Content [data-hook*='thumbnail'] button",
                 ".ReactModal__Content [class*='thumbnail'] button",
                 "[data-hook*='thumbnail'] button",
                 "[class*='thumbnail'] button",
-                "[class*='filmstrip'] button",
-                ".ReactModal__Content button[aria-label*='add' i]",
-                "button[aria-label*='add' i]"
+                "[class*='filmstrip'] button"
             ]
-            for sel in candidate_plus_sels:
-                elements = page.query_selector_all(sel)
-                for el in elements:
-                    txt = (el.inner_text() or "").strip()
-                    aria = (el.get_attribute("aria-label") or "").lower()
-                    title_attr = (el.get_attribute("title") or "").lower()
-                    # 严禁误触描述框富文本工具栏的 emote/poll/deviation gallery 等按钮以及 tag badge
-                    if any(bad in aria or bad in title_attr for bad in ["emote", "poll", "deviation gallery", "core badge", "table", "link", "tag"]):
-                        continue
-                    if "additional media" in aria or "attach" in aria or ("+" in txt and len(txt) <= 2) or "add" in aria or "add" in title_attr:
-                        plus_btn = el
-                        break
-                if plus_btn:
-                    break
+
+            # 1. 优先通过 wait_for_selector (state='attached') 快速定位底栏追加按钮
+            try:
+                w_timeout = min(8000, max(1000, thumb_wait_timeout * 200)) if thumb_wait_timeout >= 1 else 1000
+                plus_btn = page.wait_for_selector(
+                    "button[aria-label='Attach additional media'], button[aria-label*='additional media' i]",
+                    state="attached",
+                    timeout=w_timeout
+                )
+            except Exception:
+                plus_btn = None
+
+            # 2. 兜底逐个快速探测 (兼容单测 mock 与异形 DOM)
+            if not plus_btn:
+                for sel in candidate_plus_sels:
+                    try:
+                        elements = page.query_selector_all(sel)
+                        if elements:
+                            plus_btn = elements[0]
+                            break
+                    except Exception:
+                        pass
 
             appended_ok = False
             err_reason = ""
-            existing_inputs = page.query_selector_all("input[type='file']")
+
+            # 解除前置表单项焦点，防止聚焦拦截或受控事件冒泡干扰
+            try:
+                page.evaluate("() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); }")
+            except Exception:
+                pass
 
             # 机制 A: 优先使用 expect_file_chooser() 捕获系统文件选择框
             if plus_btn:
@@ -846,11 +846,11 @@ class DeviantArtDispatcher(BaseDispatcher):
                     appended_ok = True
                     logger.info(f"[DeviantArt] 机制 A 成功: 已通过 FileChooser 一次性注入剩余 {len(remaining_images)} 张图片")
                 except Exception as e_fc:
-                    logger.warning(f"[DeviantArt] 机制 A (FileChooser) 未触发或超时: {e_fc}")
+                    logger.warning(f"[DeviantArt] 机制 A (FileChooser) 未捕获到文件选择器 ({e_fc})，转入机制 B...")
 
-            # 机制 B: 若机制 A 未捕获到 FileChooser，改用 set_input_files 打弹窗内新增或专用于追加的 input
+            # 机制 B: 若机制 A 未捕获到 FileChooser，改用 set_input_files 打底栏专属追加 input[type='file']
             if not appended_ok:
-                logger.info("[DeviantArt] 机制 A 未捕获到 FileChooser，尝试机制 B (探测弹窗内专用于追加素材的 input[type='file'])...")
+                logger.info("[DeviantArt] 机制 A 未捕获到 FileChooser，尝试机制 B (定位底栏专属追加 input[type='file'])...")
                 new_inputs = page.query_selector_all(".ReactModal__Content input[type='file'], div.rfiU0f input[type='file']")
                 target_additional_fi = None
                 for fi in new_inputs:
@@ -859,6 +859,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                         break
                 if not target_additional_fi and len(new_inputs) > 1:
                     target_additional_fi = new_inputs[-1]
+                if not target_additional_fi:
+                    dedicated_fi = page.query_selector("div.rfiU0f input[type='file'], .ReactModal__Content div:has(button[aria-label*='additional media' i]) input[type='file']")
+                    if dedicated_fi and dedicated_fi not in existing_inputs:
+                        target_additional_fi = dedicated_fi
 
                 if target_additional_fi:
                     try:
@@ -868,11 +872,11 @@ class DeviantArtDispatcher(BaseDispatcher):
                     try:
                         target_additional_fi.set_input_files(remaining_images)
                         appended_ok = True
-                        logger.info(f"[DeviantArt] 机制 B 成功: 已通过 input[type='file'] 注入剩余 {len(remaining_images)} 张图片")
+                        logger.info(f"[DeviantArt] 机制 B 成功: 已通过专属 input[type='file'] 注入剩余 {len(remaining_images)} 张图片")
                     except Exception as e_fi:
                         err_reason = f"弹窗内 input[type='file'] 注入失败: {e_fi}"
                 else:
-                    err_reason = "未捕获到系统文件选择器，且弹窗内无新增文件上传输入框"
+                    err_reason = "未捕获到系统文件选择器，且弹窗内未能定位到底栏追加输入框"
 
             if not appended_ok:
                 self._cleanup_orphan_draft(page, title, first_img)
@@ -1235,85 +1239,94 @@ class DeviantArtDispatcher(BaseDispatcher):
         if expected_count <= 1:
             return 1
 
-        # 1. 优先从 window.__INITIAL_STATE__ / 前端数据层提取
-        try:
-            eval_count = page.evaluate("""() => {
-                try {
-                    if (window.__INITIAL_STATE__) {
-                        const st = window.__INITIAL_STATE__;
-                        if (st.entities && st.entities.deviation) {
-                            for (const k in st.entities.deviation) {
-                                const dev = st.entities.deviation[k];
-                                if (dev && dev.media && Array.isArray(dev.media.files) && dev.media.files.length > 0) {
-                                    return dev.media.files.length;
-                                }
-                                if (dev && dev.extended && Array.isArray(dev.extended.files) && dev.extended.files.length > 0) {
-                                    return dev.extended.files.length;
+        # 增加对作品展示页动态组件加载与水合的缓冲轮询 (最多轮询 8 次，间隔 1s)
+        for attempt in range(8):
+            # 1. 优先从 window.__INITIAL_STATE__ / 前端数据层提取
+            try:
+                eval_count = page.evaluate("""() => {
+                    try {
+                        if (window.__INITIAL_STATE__) {
+                            const st = window.__INITIAL_STATE__;
+                            if (st.entities && st.entities.deviation) {
+                                for (const k in st.entities.deviation) {
+                                    const dev = st.entities.deviation[k];
+                                    if (dev && dev.media && Array.isArray(dev.media.files) && dev.media.files.length > 0) {
+                                        return dev.media.files.length;
+                                    }
+                                    if (dev && dev.extended && Array.isArray(dev.extended.files) && dev.extended.files.length > 0) {
+                                        return dev.extended.files.length;
+                                    }
                                 }
                             }
                         }
-                    }
-                } catch (e) {}
-                return null;
-            }""")
-            if eval_count is not None and isinstance(eval_count, int) and eval_count > 0:
-                logger.info(f"[DeviantArt] 从前端状态数据中核验到图集图片数: {eval_count} 张")
-                return eval_count
-        except Exception as e:
-            logger.debug(f"[DeviantArt] 提取前端状态数据异常: {e}")
+                    } catch (e) {}
+                    return null;
+                }""")
+                if eval_count is not None and isinstance(eval_count, int) and eval_count > 0:
+                    logger.info(f"[DeviantArt] 从前端状态数据中核验到图集图片数: {eval_count} 张")
+                    return eval_count
+            except Exception as e:
+                logger.debug(f"[DeviantArt] 提取前端状态数据异常: {e}")
 
-        # 2. 从 DOM 画廊轮播 / 缩略图 / 页面标记中核验
-        try:
-            dom_count = page.evaluate("""(exp) => {
-                try {
-                    const thumbSelectors = [
-                        "[data-hook='deviation_thumbnails'] img",
-                        "div[class*='Thumbnails'] img",
-                        "div[class*='Pagination'] button",
-                        "div[role='tablist'] [role='tab']",
-                        "button[aria-label*='slide']",
-                        "button[aria-label*='Slide']",
-                        "nav[aria-label*='Gallery'] button",
-                        "[data-testid='gallery-slider'] img",
-                        ".deviation-carousel img"
-                    ];
-                    for (const sel of thumbSelectors) {
-                        const els = document.querySelectorAll(sel);
-                        if (els && els.length > 1) {
-                            return els.length;
+            # 2. 从 DOM 画廊轮播 / 缩略图 / 页面标记中核验
+            try:
+                dom_count = page.evaluate("""(exp) => {
+                    try {
+                        const thumbSelectors = [
+                            ".nijSZp img",
+                            "button.CAKEeJ img",
+                            "div[class*='nijSZp'] button",
+                            "button.CAKEeJ",
+                            "[data-hook='deviation_thumbnails'] img",
+                            "div[class*='Thumbnails'] img",
+                            "div[class*='Pagination'] button",
+                            "div[role='tablist'] [role='tab']",
+                            "button[aria-label*='slide']",
+                            "button[aria-label*='Slide']",
+                            "nav[aria-label*='Gallery'] button",
+                            "[data-testid='gallery-slider'] img",
+                            ".deviation-carousel img"
+                        ];
+                        for (const sel of thumbSelectors) {
+                            const els = document.querySelectorAll(sel);
+                            if (els && els.length > 1) {
+                                return els.length;
+                            }
                         }
-                    }
 
-                    const bodyText = document.body ? document.body.innerText : "";
-                    const m1 = bodyText.match(/1\\s*(?:of|\\/)\\s*(\\d+)/i);
-                    if (m1) {
-                        return parseInt(m1[1], 10);
-                    }
-                    const m2 = bodyText.match(/(\\d+)\\s*(?:images|photos|deviations|张)/i);
-                    if (m2) {
-                        return parseInt(m2[1], 10);
-                    }
+                        const bodyText = document.body ? document.body.innerText : "";
+                        const m1 = bodyText.match(/1\\s*(?:of|\\/)\\s*(\\d+)/i);
+                        if (m1) {
+                            return parseInt(m1[1], 10);
+                        }
+                        const m2 = bodyText.match(/(\\d+)\\s*(?:images|photos|deviations|张)/i);
+                        if (m2) {
+                            return parseInt(m2[1], 10);
+                        }
 
-                    const artImgs = document.querySelectorAll("main img, div[role='main'] img, div[data-hook='art_stage'] img");
-                    if (artImgs.length >= exp) {
-                        return exp;
-                    }
-                } catch (e) {}
-                return null;
-            }""", expected_count)
-            if dom_count is not None and isinstance(dom_count, int) and dom_count > 0:
-                logger.info(f"[DeviantArt] 从 DOM 轮播/缩略图组件核验到图集图片数: {dom_count} 张")
-                return dom_count
-        except Exception as e:
-            logger.debug(f"[DeviantArt] DOM 图集数量提取异常: {e}")
+                        // 精确舞台范围统计 (严格限定在 stage/filmstrip 专属多图容器内，杜绝主视口外推荐/评论区杂图误判)
+                        const stageImgs = document.querySelectorAll("div[data-hook='art_stage'] img[class*='art'], [data-hook='deviation_thumbnails'] img, div[data-hook='gallery_stage'] img, .nijSZp img");
+                        if (stageImgs.length >= exp) {
+                            return exp;
+                        }
+                    } catch (e) {}
+                    return null;
+                }""", expected_count)
+                if dom_count is not None and isinstance(dom_count, int) and dom_count > 0:
+                    logger.info(f"[DeviantArt] 从 DOM 轮播/缩略图组件核验到图集图片数: {dom_count} 张")
+                    return dom_count
+            except Exception as e:
+                logger.debug(f"[DeviantArt] DOM 图集数量提取异常: {e}")
 
-        # 3. 兜底选择器统计
-        try:
-            thumbs = page.query_selector_all("[data-hook='deviation_thumbnails'] img, button[aria-label*='slide'], div[class*='Thumbnails'] img")
-            if len(thumbs) > 1:
-                return len(thumbs)
-        except Exception:
-            pass
+            # 3. 兜底选择器统计
+            try:
+                thumbs = page.query_selector_all(".nijSZp img, button.CAKEeJ, [data-hook='deviation_thumbnails'] img, button[aria-label*='slide'], div[class*='Thumbnails'] img")
+                if len(thumbs) > 1:
+                    return len(thumbs)
+            except Exception:
+                pass
+
+            time.sleep(1.0)
 
         return 1
 

@@ -22,6 +22,7 @@ data/*
 # 临时沙盒与测试输出
 temp_verify_extract/
 scratch/
+browser_profiles/
 *.log
 
 # ==========================================
