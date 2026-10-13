@@ -627,7 +627,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                 except Exception:
                     pass
 
-                # 1. <select> 模糊匹配与选择 (兼容原生 select 场景)
+                # 1. <select> 模糊匹配与选择 (兼容原生 select / 单测 mock 场景)
                 select_els = page.query_selector_all(".ReactModal__Content select, form select, select")
                 for s_el in select_els:
                     try:
@@ -651,111 +651,97 @@ class DeviantArtDispatcher(BaseDispatcher):
                     except Exception as e_sel:
                         logger.debug(f"[DeviantArt] <select> 匹配尝试异常: {e_sel}")
 
-                # 2. 定位 Studio 原生 Gallery 下拉组件 (<label>Gallery</label> 及其紧随的 Select 触发框)
-                any_trigger_found = False
+                # 2. 定位 Studio 原生 Gallery 下拉组件 (<label>Gallery</label> 及其紧随的 combobox 下拉触发框)
                 if not gallery_matched:
-                    # 优先通过 query_selector 尝试匹配常见触发器 (兼容单测 mock 与真实 DOM)
-                    gallery_triggers = [
-                        ".ReactModal__Content [role='combobox']:has-text('Gallery')",
-                        ".ReactModal__Content div[role='combobox']:has-text('Gallery')",
-                        ".ReactModal__Content div[role='button']:has-text('Gallery')",
-                        ".ReactModal__Content button:has-text('Gallery')",
-                        "button:has-text('Add to Gallery')",
-                        "button:has-text('Choose gallery')",
-                        "button:has-text('Featured')",
-                        "label:has-text('Gallery')"
-                    ]
-                    g_btn = None
-                    for g_sel in gallery_triggers:
-                        btn = page.query_selector(g_sel)
-                        if btn:
-                            is_vis = btn.is_visible() if hasattr(btn, "is_visible") and callable(btn.is_visible) else True
-                            if is_vis:
-                                g_btn = btn
-                                any_trigger_found = True
-                                break
+                    # 先检查是否已默认选定该相册
+                    already_selected = False
+                    combobox_el = page.query_selector("div[role='combobox'][aria-haspopup='listbox'], .ReactModal__Content [role='combobox']")
+                    if combobox_el:
+                        cur_cb_text = (combobox_el.inner_text() or "").strip()
+                        if gallery.lower() in cur_cb_text.lower():
+                            gallery_matched = True
+                            already_selected = True
+                            logger.info(f"[DeviantArt] 相册已处于选中状态: '{gallery}'")
 
-                    # 若未找到标准触发器，利用 JS 定位 Gallery label 的父容器触发器 (真实 Studio 页面结构)
-                    if not g_btn:
-                        try:
-                            js_found = page.evaluate("""() => {
-                                const labels = Array.from(document.querySelectorAll('label'));
-                                const gLabel = labels.find(l => (l.innerText || '').trim() === 'Gallery');
-                                return !!(gLabel && gLabel.parentElement);
-                            }""")
-                            if js_found is True:
-                                any_trigger_found = True
-                        except Exception:
-                            pass
-
-                    if any_trigger_found:
-                        # 展开下拉菜单 (若找到 g_btn 则点击，否则执行 JS 点击触发器)
-                        if g_btn:
-                            click_safely(g_btn)
-                        else:
-                            page.evaluate("""() => {
+                    if not already_selected:
+                        # 查找触发器并点击展开
+                        g_trigger = combobox_el or page.query_selector(
+                            ".ReactModal__Content [role='combobox']:has-text('Gallery'), "
+                            ".ReactModal__Content [role='combobox']:has-text('Select'), "
+                            ".ReactModal__Content [role='button']:has-text('Gallery'), "
+                            "button:has-text('Add to Gallery'), button:has-text('Choose gallery'), "
+                            "button:has-text('Featured'), label:has-text('Gallery')"
+                        )
+                        if not g_trigger:
+                            trig_handle = page.evaluate_handle("""() => {
                                 const labels = Array.from(document.querySelectorAll('label'));
                                 const gLabel = labels.find(l => (l.innerText || '').trim() === 'Gallery');
                                 if (gLabel && gLabel.parentElement) {
-                                    const trigger = gLabel.parentElement.querySelector('div[tabindex], [role="combobox"], [class*="select"], [class*="Select"], div:not([class=""]):not(label)');
-                                    if (trigger) trigger.click();
+                                    return gLabel.parentElement.querySelector('[role="combobox"], div[tabindex], div:not([class=""]):not(label)') || gLabel.parentElement;
                                 }
+                                return null;
                             }""")
-                        page.wait_for_timeout(600)
+                            g_trigger = trig_handle.as_element()
 
-                        # 在展开的选项中查找匹配项: 优先尝试 query_selector_all (兼容 mock)
-                        item_sels = [
-                            f"[role='option']:has-text('{gallery}')",
-                            f"[role='menuitem']:has-text('{gallery}')",
-                            f"[role='checkbox']:has-text('{gallery}')",
-                            f"li:has-text('{gallery}')",
-                            f"button:has-text('{gallery}')",
-                            f"label:has-text('{gallery}')",
-                            f"div:has-text('{gallery}')"
-                        ]
-                        for it_sel in item_sels:
-                            items = page.query_selector_all(it_sel)
-                            for it in reversed(items):
-                                it_txt = (it.inner_text() or "").strip()
-                                if gallery.lower() in it_txt.lower():
-                                    click_safely(it)
-                                    page.wait_for_timeout(400)
-                                    gallery_matched = True
-                                    logger.info(f"[DeviantArt] 通过列表项成功匹配并点击相册: '{gallery}'")
-                                    break
-                            if gallery_matched:
-                                break
+                        if g_trigger:
+                            click_safely(g_trigger)
+                            page.wait_for_timeout(500)
 
-                        # 若 query_selector_all 未命中，尝试 JS 深入 DOM 节点匹配 (真实 Studio 结构)
-                        if not gallery_matched:
-                            try:
-                                js_click = page.evaluate("""(target) => {
-                                    const all = Array.from(document.querySelectorAll('div, label, span, li, [role="option"]'));
-                                    const matches = all.filter(el => {
-                                        const txt = (el.innerText || '').trim();
-                                        return txt.toLowerCase() === target.toLowerCase() || txt.toLowerCase().includes(target.toLowerCase());
-                                    });
-                                    if (matches.length > 0) {
-                                        matches.sort((a, b) => b.innerText.length - a.innerText.length);
-                                        const targetEl = matches[matches.length - 1];
-                                        targetEl.scrollIntoView({block: 'nearest'});
-                                        targetEl.click();
-                                        return true;
+                            # 优先尝试在展开的 listbox 中查找目标相册项并点击
+                            click_res = page.evaluate("""(targetName) => {
+                                const listbox = document.querySelector('[role="listbox"]') || document.querySelector('[id*="-list"]') || document.body;
+                                const candidates = Array.from(listbox.querySelectorAll('label, [role="option"], [role="checkbox"], li, div')).filter(el => {
+                                    const t = (el.innerText || '').trim();
+                                    return t.toLowerCase() === targetName.toLowerCase() || t.toLowerCase().includes(targetName.toLowerCase());
+                                });
+                                if (candidates.length > 0) {
+                                    let chosen = candidates.find(el => el.tagName === 'LABEL' || el.querySelector('input[type="checkbox"]')) || candidates[0];
+                                    chosen.scrollIntoView({ block: 'nearest' });
+                                    const cb = chosen.querySelector ? chosen.querySelector('input[type="checkbox"]') : null;
+                                    if (cb && !cb.checked) {
+                                        chosen.click();
+                                    } else if (!cb) {
+                                        chosen.click();
                                     }
-                                    return false;
-                                }""", gallery)
-                                if js_click is True:
-                                    gallery_matched = True
-                                    logger.info(f"[DeviantArt] 通过下拉菜单成功选定相册: '{gallery}'")
+                                    return true;
+                                }
+                                return false;
+                            }""", gallery)
+
+                            if click_res:
+                                gallery_matched = True
+                                logger.info(f"[DeviantArt] 通过下拉菜单成功选定相册: '{gallery}'")
+                                page.wait_for_timeout(400)
+                            else:
+                                # 兼容 mock 场景的 query_selector_all 匹配
+                                item_sels = [
+                                    f"[role='option']:has-text('{gallery}')",
+                                    f"[role='menuitem']:has-text('{gallery}')",
+                                    f"[role='checkbox']:has-text('{gallery}')",
+                                    f"label:has-text('{gallery}')",
+                                    f"li:has-text('{gallery}')",
+                                    f"button:has-text('{gallery}')",
+                                    f"div:has-text('{gallery}')"
+                                ]
+                                for it_sel in item_sels:
+                                    items = page.query_selector_all(it_sel)
+                                    for it in reversed(items):
+                                        it_txt = (it.inner_text() or "").strip()
+                                        if gallery.lower() in it_txt.lower():
+                                            click_safely(it)
+                                            page.wait_for_timeout(400)
+                                            gallery_matched = True
+                                            logger.info(f"[DeviantArt] 通过列表项成功匹配并点击相册: '{gallery}'")
+                                            break
+                                    if gallery_matched:
+                                        break
+
+                            # 关键: 关闭下拉面板！通过再次点击触发器（toggle close）确认选定，严禁按 Escape（DA 下 Escape 会丢弃选定状态重置为 Select）
+                            try:
+                                click_safely(g_trigger)
                             except Exception:
                                 pass
-
-                        # 关闭下拉面板
-                        try:
-                            page.keyboard.press("Escape")
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(300)
+                            page.wait_for_timeout(400)
 
                 if not gallery_matched:
                     logger.error(f"[DeviantArt] 相册选择器未能匹配或定位到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
@@ -809,10 +795,13 @@ class DeviantArtDispatcher(BaseDispatcher):
 
             plus_btn = None
             candidate_plus_sels = [
+                "button[aria-label='Attach additional media']",
                 "button[aria-label*='additional media' i]",
                 ".ReactModal__Content button[aria-label*='additional media' i]",
                 "button[aria-label*='Attach' i]",
                 ".ReactModal__Content button[aria-label*='Attach' i]",
+                ".ReactModal__Content [class*='filmstrip'] button",
+                ".ReactModal__Content div:has(> img) + div button",
                 ".ReactModal__Content button:has-text('+')",
                 "button:has-text('+')",
                 ".ReactModal__Content [data-hook*='thumbnail'] button",
@@ -821,9 +810,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                 "[class*='thumbnail'] button",
                 "[class*='filmstrip'] button",
                 ".ReactModal__Content button[aria-label*='add' i]",
-                "button[aria-label*='add' i]",
-                "button[title*='add' i]",
-                "button[aria-label*='upload' i]"
+                "button[aria-label*='add' i]"
             ]
             for sel in candidate_plus_sels:
                 elements = page.query_selector_all(sel)
@@ -831,10 +818,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                     txt = (el.inner_text() or "").strip()
                     aria = (el.get_attribute("aria-label") or "").lower()
                     title_attr = (el.get_attribute("title") or "").lower()
-                    # 严禁误触描述框富文本工具栏的 emote/poll/deviation gallery 等按钮
-                    if any(bad in aria or bad in title_attr for bad in ["emote", "poll", "deviation gallery", "core badge", "table", "link"]):
+                    # 严禁误触描述框富文本工具栏的 emote/poll/deviation gallery 等按钮以及 tag badge
+                    if any(bad in aria or bad in title_attr for bad in ["emote", "poll", "deviation gallery", "core badge", "table", "link", "tag"]):
                         continue
-                    if "additional media" in aria or "attach" in aria or "+" in txt or "add" in aria or "add" in title_attr or "upload" in aria:
+                    if "additional media" in aria or "attach" in aria or ("+" in txt and len(txt) <= 2) or "add" in aria or "add" in title_attr:
                         plus_btn = el
                         break
                 if plus_btn:
@@ -848,6 +835,10 @@ class DeviantArtDispatcher(BaseDispatcher):
             if plus_btn:
                 try:
                     logger.info("[DeviantArt] 正在点击追加素材按钮并通过 expect_file_chooser 捕获系统文件选择器...")
+                    try:
+                        plus_btn.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
                     with page.expect_file_chooser(timeout=8000) as fc_info:
                         plus_btn.click()
                     file_chooser = fc_info.value
@@ -855,24 +846,19 @@ class DeviantArtDispatcher(BaseDispatcher):
                     appended_ok = True
                     logger.info(f"[DeviantArt] 机制 A 成功: 已通过 FileChooser 一次性注入剩余 {len(remaining_images)} 张图片")
                 except Exception as e_fc:
-                    logger.debug(f"[DeviantArt] 机制 A (FileChooser) 未触发或超时: {e_fc}")
+                    logger.warning(f"[DeviantArt] 机制 A (FileChooser) 未触发或超时: {e_fc}")
 
-            # 机制 B: 若机制 A 未捕获到 FileChooser，改用 set_input_files 打新出现或弹窗底栏内的隐藏 input
+            # 机制 B: 若机制 A 未捕获到 FileChooser，改用 set_input_files 打弹窗内新增或专用于追加的 input
             if not appended_ok:
-                logger.info("[DeviantArt] 机制 A 未捕获到 FileChooser，尝试机制 B (探测弹窗内新增或底栏隐藏的 input[type='file'])...")
-                new_inputs = page.query_selector_all("div.rfiU0f input[type='file'], .ReactModal__Content input[type='file'], input[type='file']")
+                logger.info("[DeviantArt] 机制 A 未捕获到 FileChooser，尝试机制 B (探测弹窗内专用于追加素材的 input[type='file'])...")
+                new_inputs = page.query_selector_all(".ReactModal__Content input[type='file'], div.rfiU0f input[type='file']")
                 target_additional_fi = None
                 for fi in new_inputs:
-                    if fi not in existing_inputs and fi != target_fi:
+                    if fi not in existing_inputs:
                         target_additional_fi = fi
                         break
-                if not target_additional_fi:
-                    # 检查弹窗 (.ReactModal__Content) 或底栏内部专用于追加素材的 file input (排除步骤 1 的 target_fi)
-                    modal_inputs = page.query_selector_all("div.rfiU0f input[type='file'], .ReactModal__Content input[type='file']")
-                    for fi in modal_inputs:
-                        if fi != target_fi:
-                            target_additional_fi = fi
-                            break
+                if not target_additional_fi and len(new_inputs) > 1:
+                    target_additional_fi = new_inputs[-1]
 
                 if target_additional_fi:
                     try:
@@ -884,9 +870,9 @@ class DeviantArtDispatcher(BaseDispatcher):
                         appended_ok = True
                         logger.info(f"[DeviantArt] 机制 B 成功: 已通过 input[type='file'] 注入剩余 {len(remaining_images)} 张图片")
                     except Exception as e_fi:
-                        err_reason = f"input[type='file'] 注入失败: {e_fi}"
+                        err_reason = f"弹窗内 input[type='file'] 注入失败: {e_fi}"
                 else:
-                    err_reason = "未定位到追加按钮且未找到可用的隐藏 input[type='file']"
+                    err_reason = "未捕获到系统文件选择器，且弹窗内无新增文件上传输入框"
 
             if not appended_ok:
                 self._cleanup_orphan_draft(page, title, first_img)
