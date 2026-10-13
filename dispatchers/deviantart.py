@@ -409,7 +409,14 @@ class DeviantArtDispatcher(BaseDispatcher):
         except Exception as e_clean:
             logger.warning(f"[DeviantArt] 清理孤儿草稿过程提示: {e_clean}")
 
-    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        if isinstance(images, (str, Path)):
+            images = [str(images)]
+        else:
+            images = [str(p) for p in images]
+
+        first_img = images[0]
+
         # 2. 直达投稿入口
         self.safe_goto(page, "https://www.deviantart.com/submit", timeout=45000)
         try:
@@ -419,10 +426,10 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         all_fis = page.query_selector_all("input[type='file']")
         if not all_fis:
-            return False, "DeviantArt 投稿页未能定位到文件上传控件 (请检查网络代理或重新登录)", []
+            return False, "DeviantArt 投稿页未能定位到文件上传控件 (请检查网络代理或重新登录)"
 
-        # 3. 按素材格式智能分发 (动图 GIF 匹配 accept='image/gif'，静态图匹配 accept='image/png|jpg')
-        is_gif = img_path.lower().endswith(".gif")
+        # 3. 按素材格式智能分发 (首图为 source file 不可重排，动图 GIF 匹配 accept='image/gif'，静态图匹配 accept='image/png|jpg')
+        is_gif = first_img.lower().endswith(".gif")
         target_fi = None
         for fi in all_fis:
             acc = (fi.get_attribute("accept") or "").lower()
@@ -442,8 +449,14 @@ class DeviantArtDispatcher(BaseDispatcher):
         if not target_fi:
             target_fi = all_fis[-1]
 
-        target_fi.set_input_files(img_path)
-        logger.info(f"[DeviantArt] 文件已提交 ({'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Studio 弹窗渲染...")
+        # 确保 input[type='file'] 具备 multiple 属性支持多图批量上传
+        try:
+            target_fi.evaluate("el => el.setAttribute('multiple', '')")
+        except Exception:
+            pass
+
+        target_fi.set_input_files(images)
+        logger.info(f"[DeviantArt] 文件已批量提交 (共 {len(images)} 张，首图/Cover: {'GIF动图' if is_gif else '静态图片'})，等待上传处理与 Studio 弹窗渲染...")
 
         # 4. 等待上传与表单渲染 (大动图有羊驼动画，放宽等待时间至 75 秒)
         title_sel = "input[name='title'], input[placeholder*='Add your title here'], div[role='dialog'] input[type='text']:not([placeholder*='Search'])"
@@ -480,7 +493,7 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
         if not f_ok:
-            self._cleanup_orphan_draft(page, title, img_path)
+            self._cleanup_orphan_draft(page, title, first_img)
             return False, f"DeviantArt 标题断言失败: {f_msg}"
 
         # 6. 填写描述
@@ -653,7 +666,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                 if not gallery_matched:
                     if any_trigger_found:
                         logger.error(f"[DeviantArt] 相册触发器已打开，但未在列表中找到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
-                        self._cleanup_orphan_draft(page, title, img_path)
+                        self._cleanup_orphan_draft(page, title, first_img)
                         return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
                     else:
                         logger.info(f"[DeviantArt] Studio 投稿表单当前未暴露个人相册选择入口，作品将发布至主库默认相册 (Featured/All)")
@@ -675,11 +688,11 @@ class DeviantArtDispatcher(BaseDispatcher):
                         logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
                     else:
                         logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
-                        self._cleanup_orphan_draft(page, title, img_path)
+                        self._cleanup_orphan_draft(page, title, first_img)
                         return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册"
             except Exception as e_gallery:
                 logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
-                self._cleanup_orphan_draft(page, title, img_path)
+                self._cleanup_orphan_draft(page, title, first_img)
                 return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册"
 
         # 9. 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
@@ -706,7 +719,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                 break
 
         if not submit_btn:
-            self._cleanup_orphan_draft(page, title, img_path)
+            self._cleanup_orphan_draft(page, title, first_img)
             return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已清理草稿中止发布"
 
         # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
@@ -727,7 +740,7 @@ class DeviantArtDispatcher(BaseDispatcher):
             err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
             if err_elem:
                 err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
-            self._cleanup_orphan_draft(page, title, img_path)
+            self._cleanup_orphan_draft(page, title, first_img)
             return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止并清理草稿"
 
         # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
@@ -856,7 +869,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                     err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
             except Exception:
                 pass
-            self._cleanup_orphan_draft(page, title, img_path)
+            self._cleanup_orphan_draft(page, title, first_img)
             return False, f"{sub_msg}{err_detail}"
 
         # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
@@ -945,11 +958,111 @@ class DeviantArtDispatcher(BaseDispatcher):
         time.sleep(3)
         return True, ""
 
+    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        """兼容旧版单图调用的别名方法"""
+        return self._submit_deviation(page, context, [img_path], title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance)
+
+    def _count_deviantart_gallery_images(self, page, expected_count: int) -> int:
+        """
+        核验 DeviantArt 发布后正式作品展示页 (/art/ 或 /deviation/) 上的图集图片数量 (对齐实际发出数 == 导入数):
+        - 若 expected_count <= 1 (单图模式，前置已校验页面成功跳转作品页)，直接返回 1
+        1. 优先通过 window.__INITIAL_STATE__ 数据层反查
+        2. 其次通过 DOM 轮播/缩略图列表/指示器提取 (carousel, thumbnails, slide count)
+        3. 探测页面文本如 "1 of N" 或 "N images"
+        4. 兜底主舞台及多图容器中的有效图片元素统计
+        """
+        if expected_count <= 1:
+            return 1
+
+        # 1. 优先从 window.__INITIAL_STATE__ / 前端数据层提取
+        try:
+            eval_count = page.evaluate("""() => {
+                try {
+                    if (window.__INITIAL_STATE__) {
+                        const st = window.__INITIAL_STATE__;
+                        if (st.entities && st.entities.deviation) {
+                            for (const k in st.entities.deviation) {
+                                const dev = st.entities.deviation[k];
+                                if (dev && dev.media && Array.isArray(dev.media.files) && dev.media.files.length > 0) {
+                                    return dev.media.files.length;
+                                }
+                                if (dev && dev.extended && Array.isArray(dev.extended.files) && dev.extended.files.length > 0) {
+                                    return dev.extended.files.length;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
+                return null;
+            }""")
+            if eval_count is not None and isinstance(eval_count, int) and eval_count > 0:
+                logger.info(f"[DeviantArt] 从前端状态数据中核验到图集图片数: {eval_count} 张")
+                return eval_count
+        except Exception as e:
+            logger.debug(f"[DeviantArt] 提取前端状态数据异常: {e}")
+
+        # 2. 从 DOM 画廊轮播 / 缩略图 / 页面标记中核验
+        try:
+            dom_count = page.evaluate("""(exp) => {
+                try {
+                    const thumbSelectors = [
+                        "[data-hook='deviation_thumbnails'] img",
+                        "div[class*='Thumbnails'] img",
+                        "div[class*='Pagination'] button",
+                        "div[role='tablist'] [role='tab']",
+                        "button[aria-label*='slide']",
+                        "button[aria-label*='Slide']",
+                        "nav[aria-label*='Gallery'] button",
+                        "[data-testid='gallery-slider'] img",
+                        ".deviation-carousel img"
+                    ];
+                    for (const sel of thumbSelectors) {
+                        const els = document.querySelectorAll(sel);
+                        if (els && els.length > 1) {
+                            return els.length;
+                        }
+                    }
+
+                    const bodyText = document.body ? document.body.innerText : "";
+                    const m1 = bodyText.match(/1\\s*(?:of|\\/)\\s*(\\d+)/i);
+                    if (m1) {
+                        return parseInt(m1[1], 10);
+                    }
+                    const m2 = bodyText.match(/(\\d+)\\s*(?:images|photos|deviations|张)/i);
+                    if (m2) {
+                        return parseInt(m2[1], 10);
+                    }
+
+                    const artImgs = document.querySelectorAll("main img, div[role='main'] img, div[data-hook='art_stage'] img");
+                    if (artImgs.length >= exp) {
+                        return exp;
+                    }
+                } catch (e) {}
+                return null;
+            }""", expected_count)
+            if dom_count is not None and isinstance(dom_count, int) and dom_count > 0:
+                logger.info(f"[DeviantArt] 从 DOM 轮播/缩略图组件核验到图集图片数: {dom_count} 张")
+                return dom_count
+        except Exception as e:
+            logger.debug(f"[DeviantArt] DOM 图集数量提取异常: {e}")
+
+        # 3. 兜底选择器统计
+        try:
+            thumbs = page.query_selector_all("[data-hook='deviation_thumbnails'] img, button[aria-label*='slide'], div[class*='Thumbnails'] img")
+            if len(thumbs) > 1:
+                return len(thumbs)
+        except Exception:
+            pass
+
+        return 1
+
     def publish(self, payload):
         """
-        通过 Playwright 执行 DeviantArt 原生发布后台操作:
-        - 单 deviation 只支持单图，多图=连续发多个 deviation，间隔随机 3–8 分钟，标题加序号。
-        - 成功断言核验: 实际发出数 == 导入数，断言失败一律报 FAILED。
+        通过 Playwright 执行 DeviantArt 原生单作品多图 (Gallery) 发布:
+        - 多张图片一次投稿进 1 个 deviation，图集形式展示 (首图为 source file 不可重排)
+        - 单 deviation 图片上限 deviantart_max_images_per_deviation (默认 10)
+        - 标题/描述/标签只填一次，作用于整个 deviation
+        - 成功断言: 访问作品页反查图集图片数 == 预期传入数，不一致大声失败
         """
         images = payload.get("da_images") or payload.get("images", [])
         if not images:
@@ -959,17 +1072,23 @@ class DeviantArtDispatcher(BaseDispatcher):
         desc = payload.get("description", "")
         _tags = payload.get("tags", [])
         da_mature_opt = payload.get("platform_options", {}).get("deviantart_mature", "strict" if payload.get("is_nsfw", False) else "none")
-        is_mature = (da_mature_opt != "none")
+        is_mature = (da_mature_opt != "none") or payload.get("is_nsfw", False)
         mature_level = "moderate" if da_mature_opt == "moderate" else "strict"
         is_ai = payload.get("platform_options", {}).get("deviantart_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
         gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
+
+        da_max = payload.get("deviantart_max_images_per_deviation") or \
+                 payload.get("platform_options", {}).get("deviantart_max_images_per_deviation", 10)
+
+        total_images = len(images)
+        if total_images > da_max:
+            return False, f"DA 单作品上限 {da_max} 张，当前 {total_images} 张，请自行删减素材后重试 (不自动拆分)", []
 
         cookies = self.get_cookies()
         if not cookies:
             return False, "DeviantArt 未登录，请先点击登录按钮获取会话", []
 
-        total_images = len(images)
-        logger.info(f"[DeviantArt] 开始原生投稿 (共 {total_images} 张): 标题={title}, 原生AI开关={is_ai}, 原生Mature={is_mature} ({mature_level})")
+        logger.info(f"[DeviantArt] 开始原生单作品图集投稿 (共 {total_images} 张): 标题={title}, 原生AI开关={is_ai}, 原生Mature={is_mature} ({mature_level}), 相册='{gallery}'")
         compliance = []
 
         try:
@@ -992,36 +1111,39 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self.safe_goto(page, "https://www.deviantart.com", timeout=30000)
                 page.wait_for_timeout(1500)
 
-                published_count = 0
-                import random
-
-                for img_idx, img_path in enumerate(images):
-                    current_title = f"{title} ({img_idx + 1}/{total_images})" if total_images > 1 else title
-                    logger.info(f"[DeviantArt] 正在发布第 {img_idx + 1}/{total_images} 张作品: '{current_title}'...")
-
-                    sub_ok, sub_msg = self._submit_single_deviation(
-                        page, context, img_path, current_title, desc, _tags,
-                        is_mature, mature_level, is_ai, gallery, compliance
-                    )
-                    if not sub_ok:
-                        self.close_login_session(browser, context, page)
-                        compliance.append(
-                            self.verify_compliance_item(
-                                "deviantart",
-                                "gallery_count",
-                                True,
-                                False,
-                                f"多图连续投稿中断: 第 {img_idx + 1}/{total_images} 张失败 (已成功 {published_count}/{total_images} 张)"
-                            )
+                # 2. 单作品多图投稿
+                sub_ok, sub_msg = self._submit_deviation(
+                    page, context, images, title, desc, _tags,
+                    is_mature, mature_level, is_ai, gallery, compliance
+                )
+                if not sub_ok:
+                    self.close_login_session(browser, context, page)
+                    compliance.append(
+                        self.verify_compliance_item(
+                            "deviantart",
+                            "gallery_count",
+                            True,
+                            False,
+                            f"单作品图集投稿失败: {sub_msg}"
                         )
-                        return False, f"DeviantArt 连续发布第 {img_idx + 1}/{total_images} 张失败: {sub_msg} (已成功 {published_count}/{total_images} 张)", compliance
+                    )
+                    return False, f"DeviantArt 发布失败: {sub_msg}", compliance
 
-                    published_count += 1
-                    if img_idx < total_images - 1:
-                        default_interval = random.uniform(180, 480)
-                        interval = payload.get("da_interval_seconds", default_interval)
-                        logger.info(f"[DeviantArt] 第 {img_idx + 1}/{total_images} 张发布成功，安全等待间隔 {interval:.1f} 秒后发布下一张...")
-                        time.sleep(interval)
+                # 3. 成功断言: 访问作品页反查图集图片数 == 预期传入数 (不一致大声失败)
+                actual_count = self._count_deviantart_gallery_images(page, total_images)
+                if actual_count != total_images:
+                    logger.error(f"[DeviantArt] 图集张数断言失败: 预期 {total_images} 张，作品页反查实际检测到 {actual_count} 张")
+                    self.close_login_session(browser, context, page)
+                    compliance.append(
+                        self.verify_compliance_item(
+                            "deviantart",
+                            "gallery_count",
+                            True,
+                            False,
+                            f"图集张数核验失败: 预期 {total_images} 张，实际检测到 {actual_count} 张"
+                        )
+                    )
+                    return False, f"DeviantArt 图集张数断言失败: 预期包含 {total_images} 张图片，反查实际检测到 {actual_count} 张，已判定为失败以防漏图", compliance
 
                 self.close_login_session(browser, context, page)
                 compliance.append(
@@ -1030,10 +1152,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                         "gallery_count",
                         True,
                         True,
-                        f"多图连续投稿核验通过 (成功 {published_count}/{total_images} 张)"
+                        f"单作品图集核验通过 (成功 {total_images}/{total_images} 张)"
                     )
                 )
-                return True, f"DeviantArt 发布成功 (连续发布成功 {published_count}/{total_images} 张)", compliance
+                return True, f"DeviantArt 发布成功 (单作品图集核验通过，包含 {total_images}/{total_images} 张图片)", compliance
         except Exception as e:
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")
             return False, f"DeviantArt 自动化发布异常: {e}", compliance

@@ -2729,6 +2729,22 @@ class SettingsDialog(QDialog):
 
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
         da_vbox.addWidget(self.def_da_gallery_combo)
+
+        dmax_label = QLabel("DeviantArt 单作品图片上限 (Max images per deviation)")
+        dmax_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        da_vbox.addWidget(dmax_label)
+        dmax_desc = QLabel("单作品一次投稿允许的最大图片数（普通用户默认 10 张，Core 会员可调至 100 张）。超出此上限时将阻断投稿并提示手动删减。")
+        dmax_desc.setStyleSheet("color: #888888; font-size: 11px; margin-bottom: 4px;")
+        dmax_desc.setWordWrap(True)
+        da_vbox.addWidget(dmax_desc)
+
+        self.def_da_max_spin = QSpinBox()
+        self.def_da_max_spin.setRange(1, 100)
+        cur_dmax = self.config.get("defaults", {}).get("deviantart_max_images_per_deviation", self.config.get("deviantart_max_images_per_deviation", 10))
+        self.def_da_max_spin.setValue(int(cur_dmax))
+        self.def_da_max_spin.valueChanged.connect(self._on_def_da_max_changed)
+        da_vbox.addWidget(self.def_da_max_spin)
+
         layout.addLayout(da_vbox)
 
         layout.addStretch()
@@ -2782,6 +2798,13 @@ class SettingsDialog(QDialog):
                         w.setCurrentIndex(0)
                 else:
                     w.setText(gal_val)
+        self._notify_saved()
+
+    def _on_def_da_max_changed(self, val):
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        self.config["defaults"]["deviantart_max_images_per_deviation"] = val
+        self.config["deviantart_max_images_per_deviation"] = val
         self._notify_saved()
 
     def _on_close_clicked(self):
@@ -5063,6 +5086,29 @@ class MainWindow(QMainWindow):
             self.notify("⚠️ 发布前门禁拦截: 请先填写作品标题！", level="warning")
             return
 
+        # DeviantArt 单作品多图上限门禁 (默认 10 张，超限弹窗阻断提示手动删减，不自动拆分)
+        if any(d.name == "deviantart" for d in selected):
+            da_max = self.config.get("defaults", {}).get(
+                "deviantart_max_images_per_deviation",
+                self.config.get("deviantart_max_images_per_deviation", 10)
+            )
+            curr_count = len(self.image_paths)
+            if curr_count > da_max:
+                warn_text = f"DA 单作品上限 {da_max} 张，当前 {curr_count} 张"
+                logger.warning(f"[发布前门禁] {warn_text}，已中止发布")
+                try:
+                    from PyQt5.QtWidgets import QMessageBox
+                    if QApplication.instance():
+                        QMessageBox.warning(
+                            self,
+                            "DeviantArt 素材超限",
+                            f"{warn_text}。\n\n请在素材区自行删减至 {da_max} 张以内后再进行投稿（系统不自动拆分）。"
+                        )
+                except Exception:
+                    pass
+                self.notify(warn_text, level="warning")
+                return
+
         # 需求 4.c: 混合素材 (GIF + 静态图) 自动按平台能力拆分与发布前确认
         has_gif = any(p.lower().endswith(".gif") for p in self.image_paths)
         has_static = any(not p.lower().endswith(".gif") for p in self.image_paths)
@@ -5078,7 +5124,7 @@ class MainWindow(QMainWindow):
                         "检测到当前导入了包含动图与静态图的【混合素材】。\n\n"
                         "各平台将按最佳兼容能力自动分发：\n"
                         "• X (Twitter)：平台限制单帖不能混发动静图，将优先选用已选素材；\n"
-                        "• DeviantArt：平台为单图发布，将逐张按序号发布；\n"
+                        "• DeviantArt：平台支持单作品图集发布（上限可配置，首图为封面）；\n"
                         "• Patreon / Ko-fi：支持图集画廊展示。\n\n"
                         "是否确认按各平台最佳策略继续分发？"
                     )
@@ -5426,6 +5472,11 @@ class MainWindow(QMainWindow):
                 platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
             if "ai" in opts:
                 platform_options["deviantart_ai"] = opts["ai"].isChecked()
+            da_limit_val = self.config.get("defaults", {}).get(
+                "deviantart_max_images_per_deviation",
+                self.config.get("deviantart_max_images_per_deviation", 10)
+            )
+            platform_options["deviantart_max_images_per_deviation"] = da_limit_val
 
         if "patreon" in self.platform_controls:
             opts = self.platform_controls["patreon"]["options"]
@@ -5489,6 +5540,7 @@ class MainWindow(QMainWindow):
             "tags": tags,
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
+            "deviantart_max_images_per_deviation": da_limit_val,
             "x_images": x_images,               # X (Twitter) 专属图 (按 X 打码选项与体积限制)
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)

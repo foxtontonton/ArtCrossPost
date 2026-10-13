@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
         "deviantart_mature": "strict",
         "deviantart_default_gallery": "", # 默认发布相册 (留空使用默认)
         "deviantart_censor": True,        # DeviantArt 专属打码保护开关
+        "deviantart_max_images_per_deviation": 10, # 单作品图片上限 (默认10张，Core会员可调至100)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"

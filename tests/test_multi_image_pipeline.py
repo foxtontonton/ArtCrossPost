@@ -11,9 +11,10 @@ Tests for Multi-Image Gallery Pipeline and Platform Publishing:
 """
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
+from PyQt5.QtWidgets import QMessageBox
 
 from app import optimize_static_image, MainWindow
 from dispatchers.deviantart import DeviantArtDispatcher
@@ -229,13 +230,15 @@ def test_remove_image_updates_gallery_and_selection(mock_main_window):
     assert p2 not in win.x_selected_paths
 
 
-# ==================== 3. DeviantArt Multi-deviation Sequential Publishing Tests ====================
+# ==================== 3. DeviantArt Single-Deviation Multi-Image Gallery Tests ====================
 
-def test_deviantart_multi_deviation_sequential_success(tmp_path, monkeypatch):
+def test_deviantart_multi_image_single_deviation_success(tmp_path, monkeypatch):
     """
-    DA 多图发布：
-    单 deviation 仅支持单图，多图=连续发多个 deviation，间隔随机 3–8 分钟，标题加序号。
-    断言 3 张图片连续成功，标题分别追加 (1/3), (2/3), (3/3)，成功断言回读 3/3。
+    DA 单作品多图规范 (2026-10-13 22:42 定版)：
+    - 多张图片一次投稿进 1 个 deviation，图集形式展示 (对标 Patreon gallery)；
+    - 标题/描述/标签只填一次，标题无 (1/N) 后缀；
+    - 3–8 分钟间隔逻辑对 DA 作废 (单次投稿即可)；
+    - 成功断言：发布后访问作品页，反查图集图片数 == 预期传入数 (3/3 成功)。
     """
     monkeypatch.setattr(time, "sleep", lambda x: None)
 
@@ -251,14 +254,14 @@ def test_deviantart_multi_deviation_sequential_success(tmp_path, monkeypatch):
     mock_context.pages = [mock_page]
     disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
 
-    # 捕获提交的各个单作品标题
-    submitted_titles = []
+    submitted_batches = []
 
-    def fake_submit_single(page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
-        submitted_titles.append(title)
+    def fake_submit(page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        submitted_batches.append({"images": images, "title": title, "desc": desc, "tags": _tags})
         return True, ""
 
-    disp._submit_single_deviation = MagicMock(side_effect=fake_submit_single)
+    disp._submit_deviation = MagicMock(side_effect=fake_submit)
+    disp._count_deviantart_gallery_images = MagicMock(return_value=3)
 
     test_imgs = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
     for p in test_imgs:
@@ -266,26 +269,70 @@ def test_deviantart_multi_deviation_sequential_success(tmp_path, monkeypatch):
 
     payload = {
         "title": "Dragon Series",
-        "da_images": test_imgs,
-        "da_interval_seconds": 0
+        "description": "Epic dragon gallery",
+        "tags": ["dragon", "fantasy"],
+        "da_images": test_imgs
     }
 
     success, msg, compliance = disp.publish(payload)
 
     assert success is True
-    assert "3/3" in msg
-    assert submitted_titles == ["Dragon Series (1/3)", "Dragon Series (2/3)", "Dragon Series (3/3)"]
+    assert "3/3" in msg or "单作品图集核验通过" in msg
+    assert len(submitted_batches) == 1  # 严禁重复分发，单次投稿进 1 个 deviation
+    assert submitted_batches[0]["title"] == "Dragon Series"  # 纯净标题，严禁追加 (1/3)
+    assert submitted_batches[0]["images"] == test_imgs
     count_comp = [c for c in compliance if c.get("item") == "gallery_count"]
     assert len(count_comp) == 1
     assert count_comp[0]["verified"] is True
     assert "3/3" in count_comp[0]["detail"]
 
 
-def test_deviantart_multi_deviation_13_images_completes_and_no_browser_nameerror(tmp_path, monkeypatch):
+def test_deviantart_max_images_limit_warning_and_block(tmp_path, monkeypatch, mock_main_window):
     """
-    回归测试【P0 核心修复】：
-    1. 确保 DA 多图连续发布完整走完 13 张作品，序号正确生成 (1/13) ~ (13/13)；
-    2. 真实调用 _submit_single_deviation，彻底杜绝已出库后的 NameError: name 'browser' is not defined。
+    单 deviation 图片上限配置 deviantart_max_images_per_deviation (默认 10)：
+    1. 投稿时若图片数超限 (13 > 10)，UI 弹警告弹窗提示 'DA 单作品上限 10 张，当前 13 张'，由用户自行删减，不自动拆分；
+    2. Dispatcher 同样阻断并返回合规警告。
+    """
+    win = mock_main_window
+    win.config["defaults"]["deviantart_max_images_per_deviation"] = 10
+
+    # 13 张图片素材
+    imgs_13 = [str(tmp_path / f"da_{i}.jpg") for i in range(13)]
+    for p in imgs_13:
+        Path(p).write_bytes(b"dummy")
+    win.image_paths = imgs_13
+
+    # 勾选 DeviantArt
+    for name, ctrl in win.platform_controls.items():
+        ctrl["checkbox"].setChecked(name == "deviantart")
+
+    win.title_input.setText("Latex Showcase")
+
+    with patch.object(QMessageBox, "warning") as mock_warn:
+        win._start_publishing()
+        mock_warn.assert_called_once()
+        args = mock_warn.call_args[0]
+        assert "DA 单作品上限 10 张，当前 13 张" in args[2]
+
+    win.notify.assert_called_with("DA 单作品上限 10 张，当前 13 张", level="warning")
+
+    # 验证 Dispatcher 层面同样做严格门禁拦截
+    disp = DeviantArtDispatcher(tmp_path)
+    succ, msg, comp = disp.publish({
+        "title": "Latex Showcase",
+        "da_images": imgs_13,
+        "deviantart_max_images_per_deviation": 10
+    })
+    assert succ is False
+    assert "DA 单作品上限 10 张，当前 13 张" in msg
+    assert "请自行删减" in msg
+
+
+def test_deviantart_gallery_count_assertion_failure(tmp_path, monkeypatch):
+    """
+    成功断言反查：
+    发布后访问作品页，反查图集图片数 == 预期传入数。
+    若预期 4 张，但页面反查仅检测到 2 张，必须大声失败并判 FAILED，严禁虚报成功！
     """
     monkeypatch.setattr(time, "sleep", lambda x: None)
 
@@ -301,28 +348,86 @@ def test_deviantart_multi_deviation_13_images_completes_and_no_browser_nameerror
     mock_context.pages = [mock_page]
     disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
 
-    # 1. 验证 13 张完整流
-    titles_13 = []
-    disp._submit_single_deviation = MagicMock(side_effect=lambda page, context, img_path, title, *args: (titles_13.append(title), (True, ""))[1])
+    disp._submit_deviation = MagicMock(return_value=(True, ""))
+    # 模拟实际反查到的图片仅有 2 张 (缺漏 2 张)
+    disp._count_deviantart_gallery_images = MagicMock(return_value=2)
 
-    images_13 = [str(tmp_path / f"da_{i}.jpg") for i in range(13)]
-    for p in images_13:
-        Path(p).write_bytes(b"dummy")
+    test_imgs = [str(tmp_path / f"da_{i}.jpg") for i in range(4)]
+    for p in test_imgs:
+        Path(p).write_bytes(b"dummy_da")
 
     payload = {
-        "title": "Latex Sessions Vol. 1",
-        "da_images": images_13,
-        "da_interval_seconds": 0
+        "title": "Quad Art",
+        "da_images": test_imgs
     }
 
     success, msg, compliance = disp.publish(payload)
-    assert success is True
-    assert "13/13" in msg
-    assert len(titles_13) == 13
-    assert titles_13[0] == "Latex Sessions Vol. 1 (1/13)"
-    assert titles_13[-1] == "Latex Sessions Vol. 1 (13/13)"
 
-    # 2. 真实执行 _submit_single_deviation，验证内部无未定义变量 (杜绝 NameError: name 'browser' is not defined)
+    assert success is False
+    assert "图集张数断言失败" in msg
+    assert "预期包含 4 张图片" in msg
+    assert "实际检测到 2 张" in msg
+    count_comp = [c for c in compliance if c.get("item") == "gallery_count"]
+    assert len(count_comp) == 1
+    assert count_comp[0]["verified"] is False
+
+
+def test_deviantart_mature_and_ai_flags_rule(tmp_path, monkeypatch):
+    """
+    官方规则验证：
+    1. 任一图 mature 则整个 deviation 必须标 Mature；
+    2. 任一图 AI 则必须标 AI 标签。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.get_cookies = MagicMock(return_value=[{"name": "userinfo", "value": "val"}])
+    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+    disp.safe_goto = MagicMock()
+    disp.apply_stealth = MagicMock()
+    disp.close_login_session = MagicMock()
+
+    mock_page = MagicMock()
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+
+    captured_flags = {}
+
+    def fake_submit(page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+        captured_flags["is_mature"] = is_mature
+        captured_flags["is_ai"] = is_ai
+        return True, ""
+
+    disp._submit_deviation = MagicMock(side_effect=fake_submit)
+    disp._count_deviantart_gallery_images = MagicMock(return_value=2)
+
+    test_imgs = [str(tmp_path / f"da_{i}.jpg") for i in range(2)]
+    for p in test_imgs:
+        Path(p).write_bytes(b"dummy")
+
+    payload = {
+        "title": "Mixed Mature/AI Art",
+        "da_images": test_imgs,
+        "is_nsfw": True,
+        "platform_options": {
+            "deviantart_mature": "strict",
+            "deviantart_ai": True
+        }
+    }
+
+    success, msg, comp = disp.publish(payload)
+    assert success is True
+    assert captured_flags["is_mature"] is True
+    assert captured_flags["is_ai"] is True
+
+
+def test_deviantart_real_submit_deviation_method_no_nameerror(tmp_path, monkeypatch):
+    """
+    真实执行 _submit_deviation 内部流程，验证首图作为封面不可重排，无 NameError 或未定义变量。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
     disp_real = DeviantArtDispatcher(tmp_path)
     disp_real.assert_attached = MagicMock(return_value=(True, ""))
     disp_real.assert_field_value = MagicMock(return_value=(True, ""))
@@ -341,68 +446,23 @@ def test_deviantart_multi_deviation_13_images_completes_and_no_browser_nameerror
     mock_real_page.query_selector = MagicMock(return_value=mock_file_in)
 
     mock_real_context = MagicMock()
-    # 模拟 studio_page
     mock_studio_page = MagicMock()
     mock_studio_page.inner_text = MagicMock(return_value="No drafts here")
     mock_real_context.new_page = MagicMock(return_value=mock_studio_page)
 
-    # 调用未经 mock 的真实 _submit_single_deviation 方法，必须正常返回且不抛出 NameError
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
     comp_list = []
-    res_ok, res_msg = disp_real._submit_single_deviation(
-        mock_real_page, mock_real_context, images_13[0], "Latex Sessions Vol. 1 (1/13)",
+    res_ok, res_msg = disp_real._submit_deviation(
+        mock_real_page, mock_real_context, images, "Latex Sessions Vol. 1",
         "Description", ["tag1"], False, "strict", False, "", comp_list
     )
     assert res_ok is True
     assert res_msg == ""
-
-
-def test_deviantart_multi_deviation_middle_failure_halts(tmp_path, monkeypatch):
-    """
-    DA 多图中断：
-    若第 2 张发布失败，流程立即阻断报 FAILED，汇报已成功 1/3 张，严禁假阳性。
-    """
-    monkeypatch.setattr(time, "sleep", lambda x: None)
-
-    disp = DeviantArtDispatcher(tmp_path)
-    disp.get_cookies = MagicMock(return_value=[{"name": "userinfo", "value": "val"}])
-    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
-    disp.safe_goto = MagicMock()
-    disp.apply_stealth = MagicMock()
-    disp.close_login_session = MagicMock()
-
-    mock_page = MagicMock()
-    mock_context = MagicMock()
-    mock_context.pages = [mock_page]
-    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
-
-    call_count = [0]
-
-    def fake_submit_single(page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
-        call_count[0] += 1
-        if call_count[0] == 2:
-            return False, "Studio 草稿箱超时未销毁"
-        return True, ""
-
-    disp._submit_single_deviation = MagicMock(side_effect=fake_submit_single)
-
-    test_imgs = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
-    for p in test_imgs:
-        Path(p).write_bytes(b"dummy_da")
-
-    payload = {
-        "title": "Dragon Series",
-        "da_images": test_imgs,
-        "da_interval_seconds": 0
-    }
-
-    success, msg, compliance = disp.publish(payload)
-
-    assert success is False
-    assert "已成功 1/3 张" in msg
-    assert call_count[0] == 2  # 第 3 张未被盲目执行
-    count_comp = [c for c in compliance if c.get("item") == "gallery_count"]
-    assert len(count_comp) == 1
-    assert count_comp[0]["verified"] is False
+    # 断言 set_input_files 接收到完整的包含首图在内的图片列表
+    mock_file_in.set_input_files.assert_called_once_with(images)
 
 
 # ==================== 4. X (Twitter) 4-Image Posting Tests ====================
@@ -546,18 +606,19 @@ def test_single_gif_compatibility_across_platforms(tmp_path, monkeypatch, qapp):
     da_disp = DeviantArtDispatcher(tmp_path)
     published_titles = []
 
-    def mock_da_single(page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+    def mock_da_single(page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
         published_titles.append(title)
         return True, ""
 
     mock_page = MagicMock()
-    mock_page.url = "https://www.deviantart.com"
+    mock_page.url = "https://www.deviantart.com/art/view-123"
     mock_context = MagicMock()
     mock_context.pages = [mock_page]
 
     da_disp.safe_goto = MagicMock()
     da_disp.apply_stealth = MagicMock()
-    da_disp._submit_single_deviation = mock_da_single
+    da_disp._submit_deviation = mock_da_single
+    da_disp._count_deviantart_gallery_images = MagicMock(return_value=1)
     da_disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
     da_disp.close_login_session = MagicMock()
     da_disp.get_cookies = MagicMock(return_value=[{"name": "auth", "value": "1"}])
