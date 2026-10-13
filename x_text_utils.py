@@ -32,64 +32,101 @@ def calculate_x_char_count(text: str) -> int:
 
 def truncate_x_text(full_text: str, limit: int = 280) -> tuple[str, int, bool]:
     """
-    针对 X 平台进行智能截断 (方案 A - 优先保护末尾变现签名):
+    针对 X 平台进行智能截断 (优先级反转: 优先保留正文，签名最先被裁):
+    裁剪顺序:
+    ① 赞助引流文案 (先删 Patreon/Ko-fi 等链接行，保留 DeviantArt 链接)
+    ② tags (若删完引流依然超限，从后往前逐个移除 hashtags)
+    ③ 正文 (正文优先保留，最后才动；末尾附加 '...'，杜绝中文标记)
     返回: (truncated_text, truncated_chars, signature_preserved)
-    - truncated_text: 截断后的最终文本 (保证 <= limit)
-    - truncated_chars: 被截断/移除的字符数
-    - signature_preserved: 是否成功保留末尾签名
     """
     orig_count = calculate_x_char_count(full_text)
     if orig_count <= limit:
         return full_text, 0, False
 
-    sig_markers = ["patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp", "subscribestar", "dlsite", "gumroad", "---"]
-    # 检查后 160 字符内是否有签名特征
-    tail_sample = full_text[-160:].lower() if len(full_text) > 160 else full_text.lower()
-    has_sig = any(m in tail_sample for m in sig_markers)
+    cur_text = full_text
 
-    sig_start = -1
-    if has_sig:
-        # 寻找 \n--- 或签名特征行
-        divider_idx = full_text.rfind("\n---")
-        if divider_idx != -1 and divider_idx >= len(full_text) - 200:
-            sig_start = divider_idx
+    # ① 裁剪赞助引流文案 (先删 Patreon/Ko-fi 等链接行，保留 DeviantArt 链接)
+    sponsorship_domains = [
+        "patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp",
+        "subscribestar", "gumroad", "dlsite"
+    ]
+    lines = cur_text.splitlines()
+    filtered_lines = []
+    removed_sponsorship = False
+
+    for line in lines:
+        line_lower = line.lower()
+        if "deviantart.com" in line_lower:
+            filtered_lines.append(line)
+        elif any(domain in line_lower for domain in sponsorship_domains):
+            removed_sponsorship = True
+            continue
         else:
-            lines = full_text.splitlines(keepends=True)
-            accum = 0
-            for line in lines:
-                if any(m in line.lower() for m in sig_markers) and accum >= len(full_text) - 180:
-                    sig_start = accum
-                    break
-                accum += len(line)
+            filtered_lines.append(line)
 
-    if sig_start != -1:
-        body = full_text[:sig_start].rstrip()
-        sig = full_text[sig_start:].lstrip("\r\n")
-        ellipsis = "\n...[正文略]...\n"
-        budget = limit - calculate_x_char_count(sig) - calculate_x_char_count(ellipsis)
-        if budget > 25:
-            cut_body = body
-            while cut_body and calculate_x_char_count(cut_body) > budget:
-                cut_body = cut_body[:-5]
-            while cut_body and calculate_x_char_count(cut_body) > budget:
-                cut_body = cut_body[:-1]
+    if removed_sponsorship:
+        cleaned_lines = []
+        for idx, l in enumerate(filtered_lines):
+            # 若分割线后已无任何链接或有效内容，清理孤立分割线
+            if l.strip() == "---":
+                remaining = "\n".join(filtered_lines[idx+1:]).strip()
+                if not remaining or not any(m in remaining.lower() for m in ["http://", "https://", "deviantart.com"]):
+                    continue
+            cleaned_lines.append(l)
+        candidate = "\n".join(cleaned_lines).strip()
+        candidate = re.sub(r'\n{3,}', '\n\n', candidate)
+        if calculate_x_char_count(candidate) <= limit:
+            da_preserved = "deviantart.com" in candidate.lower()
+            return candidate, max(0, len(full_text) - len(candidate)), da_preserved
+        cur_text = candidate
 
-            truncated = f"{cut_body.rstrip()}{ellipsis}{sig}"
-            cut_chars = len(full_text) - len(truncated)
-            return truncated, max(0, cut_chars), True
+    # ② 裁剪 tags (若依然超限，从后往前逐个移除 hashtags)
+    tag_matches = list(re.finditer(r'#[^\s#]+', cur_text))
+    if tag_matches:
+        for m in reversed(tag_matches):
+            start = m.start()
+            end = m.end()
+            if start > 0 and cur_text[start - 1] == ' ':
+                start -= 1
+            cand = cur_text[:start] + cur_text[end:]
+            cand = re.sub(r'[ \t]+\n', '\n', cand)
+            cand = re.sub(r'\n{3,}', '\n\n', cand).strip()
+            cur_text = cand
+            if calculate_x_char_count(cur_text) <= limit:
+                da_preserved = "deviantart.com" in cur_text.lower()
+                return cur_text, max(0, len(full_text) - len(cur_text)), da_preserved
 
-    # 若未识别签名或预算不足以保留签名，执行常规尾部截断
+    # ③ 裁剪正文 (正文优先保留，最后才动；末尾附加 '...')
+    has_da = "deviantart.com" in cur_text.lower()
+    if has_da:
+        lines = cur_text.splitlines()
+        da_lines = [l for l in lines if "deviantart.com" in l.lower()]
+        non_da_lines = [l for l in lines if "deviantart.com" not in l.lower()]
+        da_block = "\n".join(da_lines).strip()
+        body_part = "\n".join(non_da_lines).strip()
+
+        needed_da_budget = calculate_x_char_count(da_block) + 4
+        if limit - needed_da_budget >= 25:
+            body_budget = limit - needed_da_budget - calculate_x_char_count("...")
+            cut_b = body_part
+            while cut_b and calculate_x_char_count(cut_b) > body_budget:
+                cut_b = cut_b[:-5]
+            while cut_b and calculate_x_char_count(cut_b) > body_budget:
+                cut_b = cut_b[:-1]
+            final_text = f"{cut_b.rstrip()}...\n\n{da_block}".strip()
+            if calculate_x_char_count(final_text) <= limit:
+                return final_text, max(0, len(full_text) - len(final_text)), True
+
     ellipsis = "..."
-    budget = limit - len(ellipsis)
-    cut = full_text
+    budget = limit - calculate_x_char_count(ellipsis)
+    cut = cur_text
     while cut and calculate_x_char_count(cut) > budget:
         cut = cut[:-5]
     while cut and calculate_x_char_count(cut) > budget:
         cut = cut[:-1]
 
-    truncated = cut.rstrip() + ellipsis
-    cut_chars = len(full_text) - len(truncated)
-    return truncated, max(0, cut_chars), False
+    final_text = cut.rstrip() + ellipsis
+    return final_text, max(0, len(full_text) - len(final_text)), False
 
 def split_into_x_threads(full_text: str, limit: int = 280) -> list[str]:
     """

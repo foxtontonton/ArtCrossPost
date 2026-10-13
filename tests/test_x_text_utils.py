@@ -82,43 +82,48 @@ class TestTruncateXText:
         assert cut_chars > 0
         assert sig_ok is False
 
-    def test_signature_preserved_patreon(self):
-        body = "This is a detailed artwork description. " * 10
-        sig = "\n---\nSupport me on Patreon: https://patreon.com/artist"
-        full_text = body + sig
-        limit = 280
-        assert calculate_x_char_count(full_text) > limit
+    def test_truncation_cuts_sponsorship_first_preserves_deviantart(self):
+        body = "This is my latest illustration work! Hope you guys like it."
+        da_link = "DeviantArt: https://deviantart.com/artist/art-123"
+        patreon_link = "Patreon: https://patreon.com/artist"
+        kofi_link = "Ko-fi: https://ko-fi.com/artist"
+        full_text = f"{body}\n\n---\n{patreon_link}\n{kofi_link}\n{da_link}"
+        limit = 120
 
-        trunc, cut_chars, sig_ok = truncate_x_text(full_text, limit=limit)
+        trunc, cut_chars, da_ok = truncate_x_text(full_text, limit=limit)
         assert calculate_x_char_count(trunc) <= limit
-        assert sig_ok is True
         assert cut_chars > 0
-        # 验证正文中间插入了截断省略符，而尾部签名完好无损
-        assert "...[正文略]..." in trunc
-        assert "Support me on Patreon: https://patreon.com/artist" in trunc
+        # 验证优先移除了 Patreon 与 Ko-fi 链接，而保留了 DeviantArt 链接
+        assert "patreon.com" not in trunc
+        assert "ko-fi.com" not in trunc
+        assert "deviantart.com" in trunc
+        assert "...[正文略]..." not in trunc
+        assert body in trunc
 
-    def test_signature_preserved_kofi(self):
-        body = "Long descriptive text for social media post. " * 8
-        sig = "\nSupport: https://ko-fi.com/creator"
-        full_text = body + sig
-        limit = 200
+    def test_truncation_cuts_tags_second(self):
+        body = "Wonderful artwork showcase for today!"
+        tags = "#art #drawing #anime #digitalart #illustration #originalcharacter"
+        full_text = f"{body}\n\n{tags}"
+        limit = 70
 
-        trunc, cut_chars, sig_ok = truncate_x_text(full_text, limit=limit)
+        trunc, cut_chars, _ = truncate_x_text(full_text, limit=limit)
         assert calculate_x_char_count(trunc) <= limit
-        assert sig_ok is True
-        assert "ko-fi.com/creator" in trunc
+        assert cut_chars > 0
+        assert body in trunc
+        # 验证标签被从后往前裁减，正文保持完整
+        assert "#originalcharacter" not in trunc
+        assert "...[正文略]..." not in trunc
 
-    def test_excessive_signature_fallback(self):
-        # 如果签名自身已几乎填满全部预算 (budget <= 25)，应安全回退至尾部截断
-        long_sig = "\n---\n" + ("Patreon link: https://patreon.com/test " * 10)
-        body = "Short body. "
-        full_text = body + long_sig
-        limit = 100
+    def test_truncation_cuts_body_last_with_ellipsis_no_chinese(self):
+        long_body = "This is an extremely long novel-like backstory describing every single detail. " * 8
+        full_text = f"{long_body}\n\nDeviantArt: https://deviantart.com/artist"
+        limit = 150
 
-        trunc, cut_chars, sig_ok = truncate_x_text(full_text, limit=limit)
+        trunc, cut_chars, _ = truncate_x_text(full_text, limit=limit)
         assert calculate_x_char_count(trunc) <= limit
-        assert trunc.endswith("...")
-        assert sig_ok is False
+        assert cut_chars > 0
+        assert "...[正文略]..." not in trunc
+        assert "..." in trunc
 
 
 class TestSplitIntoXThreads:

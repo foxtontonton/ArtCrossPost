@@ -5135,7 +5135,8 @@ class MainWindow(QMainWindow):
 
         for idx, p in enumerate(self.image_paths):
             is_gif = p.lower().endswith(".gif")
-            ext = "gif" if is_gif else "png"
+            orig_sfx = Path(p).suffix.lstrip(".").lower()
+            ext = "gif" if is_gif else (orig_sfx if orig_sfx in ("jpg", "jpeg", "png", "webp") else "jpg")
 
             # 水印参数字典
             wm_info = {
@@ -5330,6 +5331,7 @@ class MainWindow(QMainWindow):
                         enable_stroke=wm_stroke,
                         output_path=pub_raw_path
                     )
+                    logger.info(f"[Watermark] 水印压制完成: '{Path(p).name}' -> '{pub_raw_path.name}' (95%高质量保存)")
                 else:
                     pub_raw_path = Path(p)
 
@@ -5359,7 +5361,15 @@ class MainWindow(QMainWindow):
                     try:
                         optimize_static_image(x_target, opt_jpg, max_limit_mb=x_limit, quality=x_quality, compress_only_when_over_limit=x_only_over)
                         x_images_map[p] = str(opt_jpg)
-                        logger.info(f"[Image Optimizer] X 静态图处理就绪: {Path(x_target).stat().st_size / 1024 / 1024:.2f}MB -> {Path(opt_jpg).stat().st_size / 1024 / 1024:.2f}MB (门禁: ≤{x_limit}MB, 策略: 仅超限压缩={x_only_over})")
+                        in_mb = Path(x_target).stat().st_size / (1024 * 1024)
+                        out_mb = Path(opt_jpg).stat().st_size / (1024 * 1024)
+                        if in_mb <= x_limit:
+                            if abs(in_mb - out_mb) < 0.001:
+                                logger.info(f"[Image Optimizer] X 静态图保持原始无损放行: {in_mb:.2f}MB (未超门禁 ≤{x_limit}MB)")
+                            else:
+                                logger.info(f"[Image Optimizer] X 静态图格式转码 (PNG/WebP -> JPEG): {in_mb:.2f}MB -> {out_mb:.2f}MB (质量={x_quality})")
+                        else:
+                            logger.info(f"[Image Optimizer] X 静态图超限压缩生效: {in_mb:.2f}MB -> {out_mb:.2f}MB (超出门禁 ≤{x_limit}MB，已压缩合规)")
                     except Exception as e:
                         logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
                         x_images_map[p] = str(x_target)
@@ -5461,8 +5471,7 @@ class MainWindow(QMainWindow):
             elif policy == "thread":
                 x_action = "thread"
             else: # "ask"
-                has_sig = any(m in full_x_text[-160:].lower() for m in ["patreon", "ko-fi", "fanbox", "fantia", "---"])
-                sig_hint = "<br><font color='#34d399'>💡 检测到正文末尾包含赞助签名，选择截断将优先保护签名。</font>" if has_sig else ""
+                sig_hint = "<br><font color='#34d399'>💡 选择智能截断将优先保留正文，按顺序自动裁剪赞助引流链接 (Patreon/Ko-fi) 与标签。</font>"
                 self.x_limit_msg_lbl.setText(
                     f"X (Twitter) 文本计为 <b>{x_count}</b> 字符 (限额 <b>{x_limit}</b> 字符)，已超限 <b>{x_count - x_limit}</b> 字。{sig_hint}<br>请确认发布方式："
                 )

@@ -718,7 +718,7 @@ class XTwitterDispatcher(BaseDispatcher):
                         if thread_count > 1:
                             succ_msg = f"X (Twitter) 串推发布成功 (已拆成 {thread_count} 条推文发布，成功 {actual_images_count}/{actual_images_count} 张)"
                         elif truncated:
-                            sig_note = "，已保护末尾变现签名" if signature_preserved else ""
+                            sig_note = "，已优先裁剪赞助引流/标签以保护正文"
                             succ_msg = f"X (Twitter) 发布成功 (正文超限，已截断 {truncated_chars} 字符{sig_note}，成功 {actual_images_count}/{actual_images_count} 张)"
                         else:
                             succ_msg = f"X (Twitter) 发布成功 (已勾选官方 Made with AI 及 Nudity 警告，成功 {actual_images_count}/{actual_images_count} 张)"

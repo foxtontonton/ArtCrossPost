@@ -281,6 +281,81 @@ def test_deviantart_multi_deviation_sequential_success(tmp_path, monkeypatch):
     assert "3/3" in count_comp[0]["detail"]
 
 
+def test_deviantart_multi_deviation_13_images_completes_and_no_browser_nameerror(tmp_path, monkeypatch):
+    """
+    回归测试【P0 核心修复】：
+    1. 确保 DA 多图连续发布完整走完 13 张作品，序号正确生成 (1/13) ~ (13/13)；
+    2. 真实调用 _submit_single_deviation，彻底杜绝已出库后的 NameError: name 'browser' is not defined。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.get_cookies = MagicMock(return_value=[{"name": "userinfo", "value": "val"}])
+    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+    disp.safe_goto = MagicMock()
+    disp.apply_stealth = MagicMock()
+    disp.close_login_session = MagicMock()
+
+    mock_page = MagicMock()
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+
+    # 1. 验证 13 张完整流
+    titles_13 = []
+    disp._submit_single_deviation = MagicMock(side_effect=lambda page, context, img_path, title, *args: (titles_13.append(title), (True, ""))[1])
+
+    images_13 = [str(tmp_path / f"da_{i}.jpg") for i in range(13)]
+    for p in images_13:
+        Path(p).write_bytes(b"dummy")
+
+    payload = {
+        "title": "Latex Sessions Vol. 1",
+        "da_images": images_13,
+        "da_interval_seconds": 0
+    }
+
+    success, msg, compliance = disp.publish(payload)
+    assert success is True
+    assert "13/13" in msg
+    assert len(titles_13) == 13
+    assert titles_13[0] == "Latex Sessions Vol. 1 (1/13)"
+    assert titles_13[-1] == "Latex Sessions Vol. 1 (13/13)"
+
+    # 2. 真实执行 _submit_single_deviation，验证内部无未定义变量 (杜绝 NameError: name 'browser' is not defined)
+    disp_real = DeviantArtDispatcher(tmp_path)
+    disp_real.assert_attached = MagicMock(return_value=(True, ""))
+    disp_real.assert_field_value = MagicMock(return_value=(True, ""))
+    disp_real.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp_real.assert_submitted = MagicMock(return_value=(True, ""))
+    disp_real._cleanup_orphan_draft = MagicMock()
+
+    mock_real_page = MagicMock()
+    mock_real_page.url = "https://www.deviantart.com/art/view-12345"
+    mock_real_page.inner_text = MagicMock(return_value="")
+    mock_file_in = MagicMock()
+    mock_file_in.inner_text.return_value = "Submit"
+    mock_file_in.is_enabled.return_value = True
+    mock_file_in.get_attribute.return_value = "false"
+    mock_real_page.query_selector_all = MagicMock(return_value=[mock_file_in])
+    mock_real_page.query_selector = MagicMock(return_value=mock_file_in)
+
+    mock_real_context = MagicMock()
+    # 模拟 studio_page
+    mock_studio_page = MagicMock()
+    mock_studio_page.inner_text = MagicMock(return_value="No drafts here")
+    mock_real_context.new_page = MagicMock(return_value=mock_studio_page)
+
+    # 调用未经 mock 的真实 _submit_single_deviation 方法，必须正常返回且不抛出 NameError
+    comp_list = []
+    res_ok, res_msg = disp_real._submit_single_deviation(
+        mock_real_page, mock_real_context, images_13[0], "Latex Sessions Vol. 1 (1/13)",
+        "Description", ["tag1"], False, "strict", False, "", comp_list
+    )
+    assert res_ok is True
+    assert res_msg == ""
+
+
 def test_deviantart_multi_deviation_middle_failure_halts(tmp_path, monkeypatch):
     """
     DA 多图中断：

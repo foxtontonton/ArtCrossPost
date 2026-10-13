@@ -257,3 +257,70 @@ def test_kofi_gallery_count_mismatch_blocks_publish(tmp_path, monkeypatch):
     assert "预期包含 10 张图片" in msg
     assert "5 张" in msg
 
+
+def test_kofi_stale_post_skipped_and_fresh_post_verified(tmp_path, monkeypatch):
+    """
+    测试【P0 核心增强】：当云端存在同名但时间早（2 hours ago）且张数不符（5张）的残留旧帖时，
+    断言逻辑不被旧帖提前假阳性命中，跳过残留旧帖并成功核验最新出库的新帖（Just now，10张）。
+    """
+    disp = _setup_kofi_dispatcher(tmp_path, monkeypatch)
+    mock_page = MagicMock()
+    mock_page.url = "https://ko-fi.com/manage/posts"
+    mock_page.wait_for_selector = MagicMock(return_value=MagicMock())
+
+    mock_btn = MagicMock()
+    mock_btn.is_disabled = MagicMock(return_value=False)
+    mock_btn.get_attribute = MagicMock(return_value="")
+
+    mock_modal = MagicMock()
+    mock_modal.is_visible = MagicMock(return_value=False)
+
+    def fake_query_selector(sel):
+        if "#uploadModal" in sel:
+            return mock_modal
+        if "#imageUploadSubmit" in sel:
+            return mock_btn
+        return MagicMock()
+
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector)
+
+    # 第一次 evaluate 返回旧帖 (2 hours ago, 5 images)；第二次轮询返回新帖 (Just now, 10 images)
+    eval_call_count = [0]
+    def fake_eval(script, *args):
+        if "Dropzone" in str(script) or "dz-complete" in str(script):
+            return {"all": 10, "complete": 10, "processing": 0}
+        if "cards" in str(script):
+            eval_call_count[0] += 1
+            if eval_call_count[0] == 1:
+                # 仅有残留旧帖
+                return [{"count": 5, "timeStr": "2 hours ago", "isFresh": False}]
+            else:
+                # 最新帖子已索引出库
+                return [
+                    {"count": 10, "timeStr": "Just now", "isFresh": True},
+                    {"count": 5, "timeStr": "2 hours ago", "isFresh": False}
+                ]
+        return 10
+
+    mock_page.evaluate = MagicMock(side_effect=fake_eval)
+
+    # 推进时间确保通过 20s 护栏
+    clock = [100.0]
+    def fake_time():
+        clock[0] += 4.0
+        return clock[0]
+    monkeypatch.setattr(time, "time", fake_time)
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+
+    ten_images = [f"test_{i}.png" for i in range(10)]
+    payload = {"title": "Latex Sessions Vol. 1", "kofi_images": ten_images, "kofi_min_duration": 20}
+
+    success, msg, compliance = disp.publish(payload)
+    assert success is True
+    assert "Ko-fi 发布成功" in msg
+    assert eval_call_count[0] >= 2
+
+

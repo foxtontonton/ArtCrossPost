@@ -1362,35 +1362,104 @@ class KofiDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context)
                         return False, f"Ko-fi 提交超时未关闭发布弹窗 (第 {batch_idx + 1}/{total_batches} 帖)，作品可能已存为草稿，请前往网页确认", compliance
 
-                    # 7. 真实成功断言：跳转主页与管理动态反查刚刚发布的作品标题
-                    logger.info(f"[Ko-fi] 上传弹窗已关闭，正在前往个人管理主页与后台 feed 执行真实作品存在性断言 (标题: '{batch_title}')...")
-                    time.sleep(2)
-                    self.safe_goto(page, "https://ko-fi.com/manage/mypage", timeout=35000)
-                    page.wait_for_timeout(2000)
-
+                    # 7. 真实成功断言：跳转管理动态与主页反查刚刚发布的作品 (时间 + 张数双重校验，严格区分新帖与历史残留)
+                    logger.info(f"[Ko-fi] 上传弹窗已关闭，正在前往个人管理动态与主页执行真实作品出库断言 (标题: '{batch_title}', 预期张数: {len(batch_images)})...")
                     clean_title = (batch_title or "").strip().lower()
+                    expected_imgs_count = len(batch_images)
                     post_found = False
-                    try:
-                        page_text = (page.inner_text("body") or "").lower()
-                        if clean_title and clean_title in page_text:
-                            post_found = True
-                    except Exception as pe:
-                        logger.debug(f"[Ko-fi] 读取 mypage 正文异常: {pe}")
+                    stale_notes = []
 
-                    if not post_found:
-                        logger.info("[Ko-fi] /manage/mypage 未直接检出标题，正在前往 /manage/posts 进一步核实...")
-                        self.safe_goto(page, "https://ko-fi.com/manage/posts", timeout=30000)
+                    assert_start = time.time()
+                    check_url = "https://ko-fi.com/manage/posts"
+                    self.safe_goto(page, check_url, timeout=30000)
+
+                    while time.time() - assert_start < 25:
+                        page.wait_for_timeout(1500)
+                        card_eval = None
                         try:
-                            page.wait_for_timeout(2000)
-                            posts_text = (page.inner_text("body") or "").lower()
-                            if clean_title and clean_title in posts_text:
+                            card_eval = page.evaluate("""(data) => {
+                                const target = data.title;
+                                const expected = data.expected;
+                                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card'], tr, .table-row");
+                                let foundList = [];
+                                for (const c of cards) {
+                                    const text = (c.innerText || '').toLowerCase();
+                                    if (text.includes(target)) {
+                                        let timeStr = "";
+                                        const timeEl = c.querySelector("time, .time, .date, [class*='time'], [class*='date'], small");
+                                        if (timeEl) {
+                                            timeStr = (timeEl.innerText || '').trim();
+                                        } else {
+                                            const tm = text.match(/(\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\\s*ago|just now|moments? ago)/i);
+                                            if (tm) timeStr = tm[1];
+                                        }
+                                        let cnt = 0;
+                                        const m = text.match(/(\\d+)\\s*(?:images|photos|pics|张)/i);
+                                        if (m) {
+                                            cnt = parseInt(m[1], 10);
+                                        } else {
+                                            const imgs = c.querySelectorAll("img[src*='kofi'], img[src*='gallery'], img[src*='uploads'], .gallery-image, .post-image");
+                                            for (const img of imgs) {
+                                                const s = img.src || '';
+                                                if (!s.includes('avatar') && !s.includes('profile') && (!img.width || img.width >= 50)) {
+                                                    cnt++;
+                                                }
+                                            }
+                                        }
+                                        const isFresh = !timeStr || /just now|moment|sec|1m|2m|3m|4m|5m|minute|min/i.test(timeStr);
+                                        const isStale = /hour|hr|yesterday|day|week|month|year/i.test(timeStr);
+                                        foundList.push({
+                                            count: cnt,
+                                            timeStr: timeStr,
+                                            isFresh: isFresh && !isStale
+                                        });
+                                    }
+                                }
+                                return foundList;
+                            }""", {"title": clean_title, "expected": expected_imgs_count})
+                        except Exception:
+                            pass
+
+                        page_text = ""
+                        try:
+                            page_text = (page.inner_text("body") or "").lower()
+                        except Exception:
+                            pass
+
+                        if isinstance(card_eval, list) and card_eval:
+                            fresh_matches = [
+                                c for c in card_eval
+                                if isinstance(c, dict) and c.get("isFresh") and (expected_imgs_count <= 1 or c.get("count", 0) == expected_imgs_count or c.get("count", 0) == 0)
+                            ]
+                            if fresh_matches:
                                 post_found = True
-                        except Exception as pe:
-                            logger.debug(f"[Ko-fi] 检查 manage/posts 异常: {pe}")
+                                break
+                            else:
+                                for c in card_eval:
+                                    if isinstance(c, dict):
+                                        note = f"时间: '{c.get('timeStr')}', 张数: {c.get('count')}/{expected_imgs_count}"
+                                        if note not in stale_notes:
+                                            stale_notes.append(note)
+                                            logger.info(f"[Ko-fi] 检测到同名历史旧帖 ({note})，跳过旧帖，轮询等待刚刚提交的最新作品索引出库...")
+                        elif clean_title and clean_title in page_text:
+                            post_found = True
+                            break
+
+                        elapsed_round = time.time() - assert_start
+                        if elapsed_round > 10 and check_url != "https://ko-fi.com/manage/mypage":
+                            check_url = "https://ko-fi.com/manage/mypage"
+                            self.safe_goto(page, check_url, timeout=25000)
+                        else:
+                            time.sleep(2.5)
+                            try:
+                                page.reload()
+                            except Exception:
+                                pass
 
                     if not post_found:
                         self.close_login_session(browser, context)
-                        return False, f"Ko-fi 真实成功断言失败: 在管理主页 (/manage/mypage) 与管理动态 (/manage/posts) 均未检索到刚刚发布的作品标题 '{batch_title}'，第 {batch_idx + 1}/{total_batches} 帖发布未能确认生效，已判定为失败", compliance
+                        stale_hint = f" (仅检测到同名历史残留: {'; '.join(stale_notes)})" if stale_notes else ""
+                        return False, f"Ko-fi 真实成功断言失败: 在管理后台未检索到刚刚发布的有效新帖 '{batch_title}'{stale_hint}，第 {batch_idx + 1}/{total_batches} 帖发布未能确认生效，已判定为失败", compliance
 
                     # 8. 耗时安全护栏校验: 从点击发布到断言通过少于 min_publish_duration 直接判异常
                     elapsed_publish = time.time() - publish_click_time

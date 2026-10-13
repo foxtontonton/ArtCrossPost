@@ -943,10 +943,6 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
         time.sleep(3)
-
-        self.close_login_session(browser, context, page)
-        logger.info("[DeviantArt] 作品正式上架且草稿已销毁确认！执行安全网络缓冲等待 (3秒)...")
-        time.sleep(3)
         return True, ""
 
     def publish(self, payload):
