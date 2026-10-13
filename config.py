@@ -72,7 +72,9 @@ DEFAULT_CONFIG = {
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
-        "kofi_censor": False              # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
+        "kofi_censor": False,             # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
+        "kofi_min_duration": 20,          # Ko-fi 发布耗时安全护栏阈值 (秒，低于此值直接判异常以防假阳性)
+        "x_wait_button_timeout": 120      # X (Twitter) 发帖按钮等待就绪超时 (秒，应对服务端转码延迟)
     }
 }
 
