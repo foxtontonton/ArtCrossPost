@@ -37,8 +37,8 @@ from PyQt5.QtWidgets import (
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
     QTextBrowser, QDialog, QTabWidget, QSpinBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject
-from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData
+from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
 
 from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
 from censor_engine import CensorEngine
@@ -1057,6 +1057,240 @@ class UnifiedPreviewCanvas(QLabel):
         painter.end()
 
 
+class ThumbnailCardWidget(QFrame):
+    """
+    中央预览区多图图集缩略图卡片:
+    - 序号标识 (#1, #2...)
+    - 快速左移/右移 (◀, ▶) 与单张删除 (✕)
+    - 缩略图图像展示 (点击切换当前大图预览)
+    - X (Twitter) 选用 Checkbox (上限 4 张，超限即时拦截并 toast 提示)
+    - 鼠标拖拽排序支持
+    """
+    def __init__(self, main_window, idx: int, img_path: str):
+        super().__init__()
+        self.main_window = main_window
+        self.idx = idx
+        self.img_path = str(img_path)
+        self.drag_start_pos = None
+
+        self.setFixedWidth(118)
+        self.setFixedHeight(136)
+        self.setCursor(Qt.PointingHandCursor)
+
+        is_active = (idx == getattr(main_window, "current_preview_index", 0))
+        bg_color = "#1e1e2d" if is_active else "#14141e"
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {bg_color};
+                border: {'2px solid #6366f1' if is_active else '1px solid #2e2e40'};
+                border-radius: 6px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
+
+        # 1. 顶部操作条: 序号 + ◀ + ▶ + ✕
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(2)
+
+        order_lbl = QLabel(f"#{idx + 1}")
+        order_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; font-size: 10px; border: none; background: transparent;")
+        top_row.addWidget(order_lbl)
+        top_row.addStretch()
+
+        total_count = len(main_window.image_paths)
+
+        btn_style = """
+            QPushButton {
+                background-color: #272738;
+                border: 1px solid #3e3e52;
+                border-radius: 3px;
+                color: #e2e8f0;
+                font-size: 9px;
+                padding: 0px;
+                min-width: 16px;
+                max-width: 16px;
+                min-height: 16px;
+                max-height: 16px;
+            }
+            QPushButton:hover {
+                background-color: #4338ca;
+                border-color: #6366f1;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a24;
+                color: #52525b;
+                border-color: #262634;
+            }
+        """
+
+        left_btn = QPushButton("◀")
+        left_btn.setStyleSheet(btn_style)
+        left_btn.setEnabled(idx > 0)
+        left_btn.setToolTip("向左移动 (提前排序)")
+        left_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i - 1))
+        top_row.addWidget(left_btn)
+
+        right_btn = QPushButton("▶")
+        right_btn.setStyleSheet(btn_style)
+        right_btn.setEnabled(idx < total_count - 1)
+        right_btn.setToolTip("向右移动 (后置排序)")
+        right_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i + 1))
+        top_row.addWidget(right_btn)
+
+        del_btn = QPushButton("✕")
+        del_btn.setStyleSheet(btn_style.replace("#4338ca", "#b91c1c").replace("#6366f1", "#ef4444"))
+        del_btn.setToolTip("从当前图集中移除此张素材")
+        del_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.remove_image(i))
+        top_row.addWidget(del_btn)
+
+        layout.addLayout(top_row)
+
+        # 2. 中间缩略图区域
+        self.img_lbl = QLabel()
+        self.img_lbl.setAlignment(Qt.AlignCenter)
+        self.img_lbl.setFixedHeight(70)
+        self.img_lbl.setStyleSheet("border: none; background-color: #0b0b10; border-radius: 4px;")
+
+        pix = self.main_window._get_cached_thumbnail(self.img_path)
+        if pix and not pix.isNull():
+            self.img_lbl.setPixmap(pix)
+        else:
+            self.img_lbl.setText("图片")
+            self.img_lbl.setStyleSheet("color: #64748b; font-size: 10px; border: none; background-color: #0b0b10;")
+
+        layout.addWidget(self.img_lbl)
+
+        # 3. 底部 "X 选用" 复选框
+        bot_row = QHBoxLayout()
+        bot_row.setContentsMargins(0, 0, 0, 0)
+        bot_row.setSpacing(2)
+
+        self.x_cb = QCheckBox("X 选用")
+        self.x_cb.setStyleSheet("""
+            QCheckBox {
+                color: #cbd5e1;
+                font-size: 10px;
+                border: none;
+                background: transparent;
+            }
+            QCheckBox::indicator {
+                width: 13px;
+                height: 13px;
+            }
+        """)
+        self.x_cb.setToolTip("勾选发往 X (Twitter)，单帖最多勾选 4 张 (未勾选时默认发前 4 张)")
+        is_selected = (self.img_path in self.main_window.x_selected_paths)
+        self.x_cb.setChecked(is_selected)
+        self.x_cb.stateChanged.connect(self._on_x_check_changed)
+        bot_row.addWidget(self.x_cb)
+        bot_row.addStretch()
+
+        layout.addLayout(bot_row)
+
+    def _on_x_check_changed(self, state):
+        checked = (state == Qt.Checked)
+        if checked:
+            if len(self.main_window.x_selected_paths) >= 4 and self.img_path not in self.main_window.x_selected_paths:
+                self.x_cb.blockSignals(True)
+                self.x_cb.setChecked(False)
+                self.x_cb.blockSignals(False)
+                self.main_window.notify("X 单帖最多 4 张", level="warning")
+                return
+            self.main_window.x_selected_paths.add(self.img_path)
+        else:
+            self.main_window.x_selected_paths.discard(self.img_path)
+        self.main_window._update_gallery_status_label()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.main_window.select_preview_image(self.idx)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton and self.drag_start_pos is not None:
+            if (event.pos() - self.drag_start_pos).manhattanLength() > QApplication.startDragDistance():
+                drag = QDrag(self)
+                mime = QMimeData()
+                mime.setText(str(self.idx))
+                drag.setMimeData(mime)
+                pix = self.img_lbl.pixmap()
+                if pix and not pix.isNull():
+                    drag.setPixmap(pix)
+                    drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
+                drag.exec_(Qt.MoveAction)
+                self.drag_start_pos = None
+                return
+        super().mouseMoveEvent(event)
+
+
+class ThumbnailGalleryWidget(QScrollArea):
+    """
+    中央预览区底部多图缩略图画廊滚动容器:
+    - 横向平铺展示全部素材卡片
+    - 支持整栏拖拽排序与快速点选
+    """
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.cards = []
+        self.setWidgetResizable(True)
+        self.setFixedHeight(152)
+        self.setAcceptDrops(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet("""
+            QScrollArea {
+                background-color: #0d0d14;
+                border: 1px solid #232332;
+                border-radius: 6px;
+            }
+        """)
+
+        self.container = QWidget()
+        self.container.setStyleSheet("background-color: transparent;")
+        self.hlayout = QHBoxLayout(self.container)
+        self.hlayout.setContentsMargins(6, 4, 6, 4)
+        self.hlayout.setSpacing(6)
+        self.hlayout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.setWidget(self.container)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasText():
+            try:
+                src_idx = int(event.mimeData().text())
+                drop_x = self.mapToGlobal(event.pos()).x()
+                target_idx = len(self.cards) - 1
+                for i, card in enumerate(self.cards):
+                    card_gx = card.mapToGlobal(QPoint(0, 0)).x()
+                    card_gw = card.width()
+                    if drop_x < card_gx + (card_gw // 2):
+                        target_idx = i
+                        break
+                if 0 <= src_idx < len(self.main_window.image_paths) and 0 <= target_idx < len(self.main_window.image_paths):
+                    self.main_window.move_image(src_idx, target_idx)
+                event.acceptProposedAction()
+            except Exception as e:
+                logger.debug(f"拖拽排序 dropEvent 异常: {e}")
+                event.ignore()
+
+
 class NotificationBar(QFrame):
     """内嵌通知栏组件，零弹窗沉浸式用户反馈与事件日志"""
     def __init__(self, parent=None, is_expanded: bool = True):
@@ -1358,6 +1592,78 @@ def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     return compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]")
 
 
+def optimize_static_image(input_img_path, output_img_path, max_limit_mb=None, quality=88, compress_only_when_over_limit=True):
+    """
+    静态图 (JPEG/PNG/WEBP) 专用压缩优化分支:
+    - 现有管线逐张复用：JPEG 走静态图压缩分支
+    - compress_only_when_over_limit=True 时：若原图已是 JPEG 且未超过 max_limit_mb，则保持原始画质放行，严禁无损变有损过度压缩
+    - 若原图为 PNG/WEBP 或体积超限，则转码并压缩为高质量 JPEG (RGB)，优化色度采样子带
+    - 若配置了 max_limit_mb 且输出超限，则自适应梯度调节 quality (88 -> 80 -> 72 -> 65)
+      或等比微调缩放尺寸，确保体积严格满足限制。
+    """
+    import shutil
+    in_p = Path(input_img_path)
+    out_p = Path(output_img_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    in_size = in_p.stat().st_size
+    is_jpeg = in_p.suffix.lower() in (".jpg", ".jpeg")
+
+    # 保护原始画质：原图已是 JPEG 且体积未超限时，直接复制无损放行
+    if compress_only_when_over_limit and is_jpeg and max_limit_mb is not None:
+        max_bytes = max_limit_mb * 1024 * 1024
+        if in_size <= max_bytes:
+            if str(in_p.resolve()) != str(out_p.resolve()):
+                shutil.copy2(str(in_p), str(out_p))
+            logger.info(f"[Image Optimizer] 静态图体积 ({in_size / 1024 / 1024:.2f}MB) 未超过上限 ({max_limit_mb:.2f}MB)，保持原始无损放行")
+            return str(out_p)
+
+    with Image.open(str(in_p)) as im:
+        # 处理透明通道转换为白色背景 RGB
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            im = im.convert("RGBA")
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[3])
+            rgb_im = bg
+        else:
+            rgb_im = im.convert("RGB")
+
+        # 首次保存高质量 JPEG
+        rgb_im.save(str(out_p), "JPEG", quality=quality, optimize=True)
+
+        if max_limit_mb is not None:
+            max_bytes = max_limit_mb * 1024 * 1024
+            cur_size = out_p.stat().st_size
+            curr_q = quality
+            # 质量梯度降级
+            quality_steps = [82, 75, 68, 60]
+            step_idx = 0
+            while cur_size > max_bytes and step_idx < len(quality_steps):
+                curr_q = quality_steps[step_idx]
+                step_idx += 1
+                rgb_im.save(str(out_p), "JPEG", quality=curr_q, optimize=True)
+                cur_size = out_p.stat().st_size
+
+            # 若调节质量仍超限，等比缩放分辨率
+            scale_factor = 0.9
+            scaled_im = rgb_im
+            while cur_size > max_bytes and scaled_im.width > 400 and scaled_im.height > 400:
+                new_w = max(400, int(scaled_im.width * scale_factor))
+                new_h = max(400, int(scaled_im.height * scale_factor))
+                if new_w == scaled_im.width and new_h == scaled_im.height:
+                    break
+                scaled_im = scaled_im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                scaled_im.save(str(out_p), "JPEG", quality=curr_q, optimize=True)
+                cur_size = out_p.stat().st_size
+                if cur_size <= max_bytes:
+                    break
+
+            if cur_size > max_bytes:
+                raise RuntimeError(f"静态图片压缩后体积 ({cur_size / 1024 / 1024:.2f}MB) 仍超出上限 {max_limit_mb:.2f}MB")
+
+    return str(out_p)
+
+
 class LoginThread(QThread):
     finished_signal = pyqtSignal(bool, str, dict)
 
@@ -1510,12 +1816,17 @@ class PublishThread(QThread):
             self.progress_signal.emit(5, f"门禁已拦截 {gate_skipped_count} 个未就绪平台，继续为剩余 {len(valid_dispatchers)} 个平台发布...")
             self.msleep(800)
 
-        # ---------------- 针对通过门禁的平台正式分发 ----------------
+        # ---------------- 针对通过门禁的平台正式分发 (并发发布架构) ----------------
         valid_total = len(valid_dispatchers)
-        for idx, disp in enumerate(valid_dispatchers):
-            step = 5 + int(((idx) / max(1, valid_total)) * 90)
-            self.progress_signal.emit(step, f"正在向 {disp.display_name} 发布内容...")
+        cfg = load_config()
+        concurrency = self.payload.get("publish_concurrency") or cfg.get("publish_concurrency", 2)
+        concurrency = max(1, min(valid_total, int(concurrency)))
 
+        self.progress_signal.emit(5, f"开始并行分发至 {valid_total} 个平台 (并发数: {concurrency})...")
+        logger.info(f"[PublishThread] 启动并发分发: 平台总数={valid_total}, 并发数={concurrency}")
+
+        def _publish_worker(disp):
+            logger.info(f"[{disp.display_name}] 并发发布任务启动...")
             try:
                 ret = disp.publish(self.payload)
                 if isinstance(ret, tuple) and len(ret) >= 3:
@@ -1531,8 +1842,7 @@ class PublishThread(QThread):
             # 针对网络/超时类异常自动重试 1 次 (P1-7)
             if not success and any(err_k in str(msg).lower() for err_k in ["timeout", "timed out", "net::err", "connection", "err_aborted"]):
                 logger.warning(f"[{disp.display_name}] 捕获网络/超时波动 ({msg})，触发自动重试 (1/1)...")
-                self.progress_signal.emit(step, f"[{disp.display_name}] 网络波动，正在自动重试 (1/1)...")
-                self.msleep(1500)
+                time.sleep(1.5)
                 try:
                     ret_retry = disp.publish(self.payload)
                     if isinstance(ret_retry, tuple) and len(ret_retry) >= 3:
@@ -1548,8 +1858,20 @@ class PublishThread(QThread):
                     success, msg, compliance = False, f"重试后依然失败: {e2}", []
                     logger.error(f"[{disp.display_name}] 自动重试异常: {e2}")
 
-            results[disp.name] = (success, msg, compliance)
-            self.msleep(600)
+            logger.info(f"[{disp.display_name}] 发布流程结束: 成功={success}")
+            return disp.name, disp.display_name, success, msg, compliance
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_disp = {executor.submit(_publish_worker, d): d for d in valid_dispatchers}
+            for future in as_completed(future_to_disp):
+                disp_name, disp_title, success, msg, compliance = future.result()
+                results[disp_name] = (success, msg, compliance)
+                completed_count += 1
+                progress_val = 5 + int((completed_count / valid_total) * 90)
+                status_str = "成功" if success else "未完成"
+                self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
 
         self.progress_signal.emit(100, "全平台分发已完成！")
         self.completed_signal.emit(results)
@@ -2506,6 +2828,8 @@ class MainWindow(QMainWindow):
         self.dispatchers = get_all_dispatchers(COOKIES_DIR)
         
         self.image_paths = []
+        self.x_selected_paths = set()  # 记录用户在图集中为 X (Twitter) 单独勾选的素材路径 (最多 4 张)
+        self._thumbnail_cache = {}  # {image_path: QPixmap} 缩略图缓存
         self.custom_censor_boxes = {}  # {image_path: [[x1, y1, x2, y2], ...]}
         self.current_preview_index = 0
         self._current_rendered_pixmap = None
@@ -3376,6 +3700,24 @@ class MainWindow(QMainWindow):
         self.preview_status_lbl = QLabel("🛡️ 打码: 未开启  |  💧 水印: 未开启")
         self.preview_status_lbl.setStyleSheet("color: #9ca3af; padding-top: 4px;")
         preview_vlayout.addWidget(self.preview_status_lbl)
+
+        # 多图图集列表与 X (Twitter) 选用画廊栏
+        gallery_header_row = QHBoxLayout()
+        gallery_header_row.setContentsMargins(0, 4, 0, 0)
+        self.gallery_status_lbl = QLabel("图集总数: <b>0</b> 张  |  X (Twitter) 选用: <b>未选用 (默认发前 4 张)</b>")
+        self.gallery_status_lbl.setStyleSheet("color: #a5b4fc; font-size: 11px;")
+        gallery_header_row.addWidget(self.gallery_status_lbl)
+        gallery_header_row.addStretch()
+
+        clear_x_sel_btn = QPushButton("清空 X 选用")
+        clear_x_sel_btn.setObjectName("secondaryBtn")
+        clear_x_sel_btn.setToolTip("清空所有已勾选的 X 选用项，回退为默认取前 4 张")
+        clear_x_sel_btn.clicked.connect(self._clear_x_selections)
+        gallery_header_row.addWidget(clear_x_sel_btn)
+        preview_vlayout.addLayout(gallery_header_row)
+
+        self.thumbnail_gallery = ThumbnailGalleryWidget(self)
+        preview_vlayout.addWidget(self.thumbnail_gallery)
 
         center_layout.addWidget(preview_group)
         self.main_splitter.addWidget(center_widget)
@@ -4311,17 +4653,20 @@ class MainWindow(QMainWindow):
         if self.image_paths and self.current_preview_index > 0:
             self.current_preview_index -= 1
             self.img_list_widget.setCurrentRow(self.current_preview_index)
+            self._refresh_thumbnail_gallery(cards_only=True)
             self._schedule_preview_refresh(instant=True)
 
     def _next_preview_image(self):
         if self.image_paths and self.current_preview_index < len(self.image_paths) - 1:
             self.current_preview_index += 1
             self.img_list_widget.setCurrentRow(self.current_preview_index)
+            self._refresh_thumbnail_gallery(cards_only=True)
             self._schedule_preview_refresh(instant=True)
 
     def _on_image_selection_changed(self, row):
         if 0 <= row < len(self.image_paths):
             self.current_preview_index = row
+            self._refresh_thumbnail_gallery(cards_only=True)
             self._schedule_preview_refresh(instant=True)
 
     def _generate_composite_gif(self, input_gif_path, output_gif_path, censor_params=None, wm_params=None, max_limit_mb=None):
@@ -4536,6 +4881,133 @@ class MainWindow(QMainWindow):
         else:
             self.notify("作品描述中已包含该引流签名，未重复追加", level="info")
 
+    def get_x_selected_images(self):
+        """
+        根据用户在多图图集中的勾选状态提取要发往 X (Twitter) 的图片:
+        ① 默认取缩略图排序的前 4 张发一条 tweet；
+        ② 新增'X 选用'：缩略图每张加 checkbox，用户勾选要发的图，上限 4 张；未勾选时回退①；发帖顺序按缩略图排序（非勾选顺序）。
+        """
+        if not self.image_paths:
+            return []
+        selected = [p for p in self.image_paths if p in self.x_selected_paths]
+        if selected:
+            return selected[:4]
+        return self.image_paths[:4]
+
+    def move_image(self, src_idx: int, target_idx: int):
+        """图集顺序调整 (拖拽排序 / ◀ ▶ 移动)"""
+        if not (0 <= src_idx < len(self.image_paths) and 0 <= target_idx < len(self.image_paths)):
+            return
+        if src_idx == target_idx:
+            return
+        p = self.image_paths.pop(src_idx)
+        self.image_paths.insert(target_idx, p)
+        if self.current_preview_index == src_idx:
+            self.current_preview_index = target_idx
+        elif src_idx < self.current_preview_index <= target_idx:
+            self.current_preview_index -= 1
+        elif target_idx <= self.current_preview_index < src_idx:
+            self.current_preview_index += 1
+        self._sync_img_list_widget(block_signals=True)
+        self._refresh_thumbnail_gallery()
+        self._schedule_preview_refresh(instant=True)
+
+    def remove_image(self, idx: int):
+        """图集单张删除"""
+        if not (0 <= idx < len(self.image_paths)):
+            return
+        removed_p = self.image_paths.pop(idx)
+        self.x_selected_paths.discard(removed_p)
+        self.custom_censor_boxes.pop(removed_p, None)
+        self._thumbnail_cache.pop(removed_p, None)
+        if self.image_paths:
+            if self.current_preview_index >= len(self.image_paths):
+                self.current_preview_index = len(self.image_paths) - 1
+        else:
+            self.current_preview_index = 0
+            self.preview_canvas.clear_image()
+            self.preview_info_lbl.setText("当前未选择图片")
+            self.preview_status_lbl.setText("🛡️ 打码: 未开启  |  💧 水印: 未开启")
+        self._sync_img_list_widget(block_signals=True)
+        self._refresh_thumbnail_gallery()
+        self._schedule_preview_refresh(instant=True)
+        self.notify(f"已移除素材: {Path(removed_p).name}", level="info")
+
+    def select_preview_image(self, idx: int):
+        """切换中央预览框当前聚焦展示的素材"""
+        if 0 <= idx < len(self.image_paths):
+            self.current_preview_index = idx
+            self._sync_img_list_widget(block_signals=True)
+            self._refresh_thumbnail_gallery(cards_only=True)
+            self._schedule_preview_refresh(instant=True)
+
+    def _sync_img_list_widget(self, block_signals=False):
+        """同步左栏图片列表控件"""
+        if not hasattr(self, "img_list_widget"):
+            return
+        if block_signals:
+            self.img_list_widget.blockSignals(True)
+        self.img_list_widget.clear()
+        for p in self.image_paths:
+            self.img_list_widget.addItem(Path(p).name)
+        if 0 <= self.current_preview_index < len(self.image_paths):
+            self.img_list_widget.setCurrentRow(self.current_preview_index)
+        if block_signals:
+            self.img_list_widget.blockSignals(False)
+
+    def _refresh_thumbnail_gallery(self, cards_only=False):
+        """刷新中央预览区底部的多图缩略图画廊"""
+        if not hasattr(self, "thumbnail_gallery"):
+            return
+
+        while self.thumbnail_gallery.hlayout.count():
+            item = self.thumbnail_gallery.hlayout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        self.thumbnail_gallery.cards.clear()
+
+        if not self.image_paths:
+            empty_lbl = QLabel("暂未导入图片 (可在左侧导入多张作品图片进行图集编排与 X 选用)")
+            empty_lbl.setStyleSheet("color: #64748b; font-size: 11px; padding: 10px;")
+            self.thumbnail_gallery.hlayout.addWidget(empty_lbl)
+            self._update_gallery_status_label()
+            return
+
+        for idx, img_p in enumerate(self.image_paths):
+            card = ThumbnailCardWidget(self, idx, img_p)
+            self.thumbnail_gallery.cards.append(card)
+            self.thumbnail_gallery.hlayout.addWidget(card)
+
+        self.thumbnail_gallery.hlayout.addStretch()
+        self._update_gallery_status_label()
+
+    def _get_cached_thumbnail(self, img_path: str):
+        if img_path in self._thumbnail_cache:
+            return self._thumbnail_cache[img_path]
+        try:
+            pix = QPixmap(str(img_path))
+            if pix and not pix.isNull():
+                scaled = pix.scaled(72, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._thumbnail_cache[img_path] = scaled
+                return scaled
+        except Exception as e:
+            logger.debug(f"加载缩略图缓存异常: {e}")
+        return None
+
+    def _update_gallery_status_label(self):
+        if hasattr(self, "gallery_status_lbl"):
+            total = len(self.image_paths)
+            x_count = len([p for p in self.image_paths if p in self.x_selected_paths])
+            x_note = f"已选用 {x_count}/4 张" if x_count > 0 else "未选用 (默认发前 4 张)"
+            self.gallery_status_lbl.setText(f"图集总数: <b>{total}</b> 张  |  X (Twitter) 选用: <b>{x_note}</b>")
+
+    def _clear_x_selections(self):
+        self.x_selected_paths.clear()
+        self._refresh_thumbnail_gallery()
+        self.notify("已清空 X 选用项，将回退为默认取缩略图前 4 张发推", level="info")
+
     def _select_images(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "选择作品图片", "", "图片与动图文件 (*.png *.jpg *.jpeg *.webp *.gif)"
@@ -4549,13 +5021,16 @@ class MainWindow(QMainWindow):
                     added += 1
             if added > 0:
                 self.current_preview_index = 0
-                self.img_list_widget.setCurrentRow(0)
+                self._sync_img_list_widget()
+                self._refresh_thumbnail_gallery()
                 self._schedule_preview_refresh(instant=True)
                 self.notify(f"已成功导入 {added} 张素材，效果已在中央预览框中实时合成！", level="success")
 
     def _clear_images(self):
         count = len(self.image_paths)
         self.image_paths.clear()
+        self.x_selected_paths.clear()
+        self._thumbnail_cache.clear()
         self.custom_censor_boxes.clear()
         self.img_list_widget.clear()
         self.current_preview_index = 0
@@ -4564,6 +5039,7 @@ class MainWindow(QMainWindow):
         self.preview_status_lbl.setText("🛡️ 打码: 未开启  |  💧 水印: 未开启")
         self._current_rendered_pixmap = None
         self._current_rendered_gif_path = None
+        self._refresh_thumbnail_gallery()
         if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
             self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
         self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
@@ -4587,10 +5063,39 @@ class MainWindow(QMainWindow):
             self.notify("⚠️ 发布前门禁拦截: 请先填写作品标题！", level="warning")
             return
 
+        # 需求 4.c: 混合素材 (GIF + 静态图) 自动按平台能力拆分与发布前确认
+        has_gif = any(p.lower().endswith(".gif") for p in self.image_paths)
+        has_static = any(not p.lower().endswith(".gif") for p in self.image_paths)
+        if has_gif and has_static:
+            logger.info("[发布检查] 检测到包含动图与静态图片的混合素材批次")
+            try:
+                from PyQt5.QtWidgets import QMessageBox
+                if QApplication.instance() and hasattr(self, "isVisible") and self.isVisible():
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("混合素材发布确认")
+                    msg_box.setIcon(QMessageBox.Question)
+                    msg_box.setText(
+                        "检测到当前导入了包含动图与静态图的【混合素材】。\n\n"
+                        "各平台将按最佳兼容能力自动分发：\n"
+                        "• X (Twitter)：平台限制单帖不能混发动静图，将优先选用已选素材；\n"
+                        "• DeviantArt：平台为单图发布，将逐张按序号发布；\n"
+                        "• Patreon / Ko-fi：支持图集画廊展示。\n\n"
+                        "是否确认按各平台最佳策略继续分发？"
+                    )
+                    msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+                    msg_box.setDefaultButton(QMessageBox.Yes)
+                    ret = msg_box.exec_()
+                    if ret != QMessageBox.Yes:
+                        self.notify("用户已取消混合素材分发", level="info")
+                        return
+            except Exception as me:
+                logger.debug(f"[混合素材确认] 提示: {me}")
+
         # 准备分发图片资源
         raw_images = [str(p) for p in self.image_paths]
         da_images = []
         x_images = []
+        x_images_map = {}
         patreon_images = []
         kofi_images = []
 
@@ -4663,25 +5168,33 @@ class MainWindow(QMainWindow):
 
                 # 1. DeviantArt 动图
                 da_out_path = None
+                clean_da_gif_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_gif = CACHE_DIR / f"{clean_da_gif_stem}.gif"
                 if is_da_censor:
                     da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
                     try:
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
+                        import shutil
+                        if str(clean_da_gif) != str(da_out_path):
+                            shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                        da_images.append(str(clean_da_gif))
                     except RuntimeError as e:
                         self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
                         logger.error(f"[发布准备] {e}")
                         return
-                    da_images.append(str(da_out_path))
                 else:
                     if wm_info:
                         da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_wm.gif"
                         try:
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                            import shutil
+                            if str(clean_da_gif) != str(da_out_path):
+                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            da_images.append(str(clean_da_gif))
                         except RuntimeError as e:
                             self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
                             logger.error(f"[发布准备] {e}")
                             return
-                        da_images.append(str(da_out_path))
                     else:
                         da_images.append(str(p))
 
@@ -4695,9 +5208,9 @@ class MainWindow(QMainWindow):
                         self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
                         logger.error(f"[发布准备] {e}")
                         return
-                    x_images.append(str(x_out_path))
+                    x_images_map[p] = str(x_out_path)
                 else:
-                    x_images.append(da_images[-1])
+                    x_images_map[p] = da_images[-1]
 
                 # 3. Patreon 动图
                 if is_pat_censor:
@@ -4820,25 +5333,38 @@ class MainWindow(QMainWindow):
                 else:
                     pub_raw_path = Path(p)
 
-                # DeviantArt 静态图
+                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
-                da_images.append(str(da_target))
+                clean_da_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
+                try:
+                    if Path(da_target).exists():
+                        import shutil
+                        if str(clean_da_path) != str(da_target):
+                            shutil.copyfile(str(da_target), str(clean_da_path))
+                        da_images.append(str(clean_da_path))
+                    else:
+                        da_images.append(str(da_target))
+                except Exception:
+                    da_images.append(str(da_target))
 
-                # X (Twitter) 静态图与体积门禁 (单图 ≤ 5MB，超过 4.8MB 自动高质量转码 JPEG)
+                # X (Twitter) 静态图与体积门禁 (JPEG 压缩分支)
                 x_target = pub_censor_path if is_x_censor else pub_raw_path
-                if is_x_selected and Path(x_target).exists() and Path(x_target).stat().st_size > 4.8 * 1024 * 1024:
-                    big_p = Path(x_target)
+                if is_x_selected:
                     opt_jpg = CACHE_DIR / f"{safe_title}_{idx}_xopt.jpg"
+                    cfg_comp = load_config().get("compression", {})
+                    x_limit = cfg_comp.get("x_max_limit_mb", 4.8)
+                    x_quality = cfg_comp.get("jpeg_quality", 88)
+                    x_only_over = cfg_comp.get("compress_only_when_over_limit", True)
                     try:
-                        with Image.open(str(big_p)) as im_big:
-                            im_big.convert("RGB").save(str(opt_jpg), "JPEG", quality=88, optimize=True)
-                        x_images.append(str(opt_jpg))
-                        logger.info(f"[Image Optimizer] X 静态图超限，已自动高质量转码 JPEG: {big_p.stat().st_size / 1024 / 1024:.2f}MB -> {opt_jpg.stat().st_size / 1024 / 1024:.2f}MB")
+                        optimize_static_image(x_target, opt_jpg, max_limit_mb=x_limit, quality=x_quality, compress_only_when_over_limit=x_only_over)
+                        x_images_map[p] = str(opt_jpg)
+                        logger.info(f"[Image Optimizer] X 静态图处理就绪: {Path(x_target).stat().st_size / 1024 / 1024:.2f}MB -> {Path(opt_jpg).stat().st_size / 1024 / 1024:.2f}MB (门禁: ≤{x_limit}MB, 策略: 仅超限压缩={x_only_over})")
                     except Exception as e:
                         logger.debug(f"[Image Optimizer] 静态图转码异常: {e}")
-                        x_images.append(str(x_target))
+                        x_images_map[p] = str(x_target)
                 else:
-                    x_images.append(str(x_target))
+                    x_images_map[p] = str(x_target)
 
                 # Patreon 静态图
                 if is_pat_censor:
@@ -4853,6 +5379,10 @@ class MainWindow(QMainWindow):
                 else:
                     kofi_target = pub_raw_path if wm_info else Path(p)
                 kofi_images.append(str(kofi_target))
+
+        # X (Twitter) 专属图按选用状态提取：勾选则按缩略图排序取勾选的最多4张；未勾选则回退取前4张
+        x_candidate_paths = self.get_x_selected_images()
+        x_images = [x_images_map[p] for p in x_candidate_paths if p in x_images_map]
 
         tags = split_and_normalize_tags(self.tags_input.toPlainText())
 

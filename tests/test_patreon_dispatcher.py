@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 from dispatchers.monetization import PatreonDispatcher
 
@@ -93,3 +94,133 @@ def test_patreon_submission_signals(tmp_path):
     mock_update_btn = MagicMock()
     mock_publish_btn = None
     assert mock_update_btn is not None and mock_publish_btn is None
+
+
+def test_patreon_gallery_10_images_success(tmp_path, monkeypatch):
+    """
+    验收标准 1: Patreon 一次发 10 张 JPEG，gallery 里 10 张全在，报告显示成功 10/10。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = PatreonDispatcher(tmp_path)
+    disp.get_cookies = MagicMock(return_value=[{"name": "session_id", "value": "123"}])
+
+    mock_page = MagicMock()
+    mock_file_input = MagicMock()
+    mock_inline = MagicMock()
+    mock_inline.is_visible.return_value = True
+
+    # 模拟 10 张图片素材
+    test_imgs = [str(tmp_path / f"img_{i}.jpg") for i in range(10)]
+    for p in test_imgs:
+        Path(p).write_bytes(b"dummy_jpg")
+
+    def fake_query_selector(sel):
+        if "input#mainMedia" in sel or "photosInput" in sel:
+            return mock_file_input
+        if "patreon-media" in sel or "media-item" in sel:
+            return mock_inline
+        if "Title" in sel:
+            title_input = MagicMock()
+            return title_input
+        if "Publish" in sel:
+            btn = MagicMock()
+            btn.is_disabled.return_value = False
+            btn.get_attribute.return_value = "false"
+            return btn
+        return MagicMock()
+
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector)
+    mock_page.url = "https://www.patreon.com/FOXTONTONTON/posts/12345678"
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.safe_goto = MagicMock()
+    disp.clean_context_tabs = MagicMock()
+    disp.apply_stealth = MagicMock()
+
+    # mock _count_patreon_gallery_images 返回全部 10 张
+    disp._count_patreon_gallery_images = MagicMock(return_value=10)
+
+    payload = {
+        "title": "My 10 Image Gallery",
+        "images": test_imgs,
+        "patreon_images": test_imgs
+    }
+    success, msg, compliance = disp.publish(payload)
+
+    assert success is True
+    assert "10/10" in msg
+    mock_file_input.set_input_files.assert_called_once_with(test_imgs)
+    count_comp = [c for c in compliance if c.get("item") == "gallery_count"]
+    assert len(count_comp) == 1
+    assert count_comp[0]["verified"] is True
+    assert "10/10" in count_comp[0]["detail"]
+
+
+def test_patreon_gallery_count_mismatch_fails_loudly(tmp_path, monkeypatch):
+    """
+    成功断言: 预期 10 张但实际核验为 8 张时，断言失败一律报 FAILED，不许报成功。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = PatreonDispatcher(tmp_path)
+    disp.get_cookies = MagicMock(return_value=[{"name": "session_id", "value": "123"}])
+
+    mock_page = MagicMock()
+    mock_file_input = MagicMock()
+    mock_inline = MagicMock()
+    mock_inline.is_visible.return_value = True
+
+    test_imgs = [str(tmp_path / f"img_{i}.jpg") for i in range(10)]
+    for p in test_imgs:
+        Path(p).write_bytes(b"dummy_jpg")
+
+    def fake_query_selector(sel):
+        if "input#mainMedia" in sel or "photosInput" in sel:
+            return mock_file_input
+        if "patreon-media" in sel or "media-item" in sel:
+            return mock_inline
+        if "Title" in sel:
+            return MagicMock()
+        if "Publish" in sel:
+            btn = MagicMock()
+            btn.is_disabled.return_value = False
+            btn.get_attribute.return_value = "false"
+            return btn
+        return MagicMock()
+
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector)
+    mock_page.url = "https://www.patreon.com/FOXTONTONTON/posts/12345678"
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+    disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.safe_goto = MagicMock()
+    disp.clean_context_tabs = MagicMock()
+    disp.apply_stealth = MagicMock()
+
+    # 实际只核验到 8 张
+    disp._count_patreon_gallery_images = MagicMock(return_value=8)
+
+    payload = {
+        "title": "My 10 Image Gallery",
+        "images": test_imgs,
+        "patreon_images": test_imgs
+    }
+    success, msg, compliance = disp.publish(payload)
+
+    assert success is False
+    assert "断言失败" in msg or "FAILED" in msg or "不匹配" in msg
+    assert "8/10" in msg
+    count_comp = [c for c in compliance if c.get("item") == "gallery_count"]
+    assert len(count_comp) == 1
+    assert count_comp[0]["verified"] is False
+

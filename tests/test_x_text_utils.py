@@ -28,7 +28,8 @@ class TestCalculateXCharCount:
 
     def test_chinese_text(self):
         text = "你好世界，艺术创作同步发布助手"
-        assert calculate_x_char_count(text) == len(text)
+        # 15 个汉字及中文全角标点，Twitter 加权为 15 * 2 = 30
+        assert calculate_x_char_count(text) == 30
 
     def test_single_short_and_long_url(self):
         # 无论 URL 实际长度如何，X 均折算为 23 字符
@@ -51,7 +52,8 @@ class TestCalculateXCharCount:
 
     def test_newlines_and_emojis(self):
         text = "🎨 Title\n\nLine 1\nLine 2"
-        assert calculate_x_char_count(text) == len(text)
+        # 🎨 为 Emoji 权重为 2，其余 ASCII/换行字符 21 个，合计 23
+        assert calculate_x_char_count(text) == 23
 
 
 class TestTruncateXText:

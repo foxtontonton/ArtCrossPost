@@ -190,3 +190,32 @@ def test_x_button_wait_timeout_and_retry(tmp_path, monkeypatch):
     assert "已尝试 2 次" in msg or "已重试" in msg
     # 验证确实调用了 reload 刷新 composer
     assert mock_page.reload.call_count >= 1
+
+
+def test_da_cleanup_orphan_draft(tmp_path, monkeypatch):
+    """测试【DA 孤儿草稿自动清理】：失败或中断时能够定位并删除 Studio Drafts"""
+    disp = _setup_da(tmp_path, monkeypatch)
+    mock_page = MagicMock()
+    mock_row = MagicMock()
+    mock_row.inner_text = MagicMock(return_value="Latex Sessions Vol. 1 0 raw wm")
+    mock_more_btn = MagicMock()
+    mock_row.query_selector = MagicMock(return_value=mock_more_btn)
+
+    mock_del_btn = MagicMock()
+    mock_conf_btn = MagicMock()
+
+    def fake_query_selector(sel):
+        if "Delete Draft" in sel:
+            return mock_del_btn
+        if "Delete" in sel:
+            return mock_conf_btn
+        return MagicMock()
+
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector)
+    mock_page.query_selector_all = MagicMock(return_value=[mock_row])
+
+    disp._cleanup_orphan_draft(mock_page, "Latex Sessions Vol. 1", "data/cache/Latex_Sessions_Vol_1_0_raw_wm.png")
+    assert disp.safe_goto.called
+    assert mock_del_btn.evaluate.called
+    assert mock_conf_btn.evaluate.called
+

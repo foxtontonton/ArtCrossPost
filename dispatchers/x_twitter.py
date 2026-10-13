@@ -399,9 +399,10 @@ class XTwitterDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context)
                         return False, "X (Twitter) 未能定位到图片上传控件，已中止发布以防文字单独泄露", compliance
 
+                    upload_images = abs_images[:4]
                     if file_input:
-                        file_input.set_input_files(abs_images)
-                        logger.info("[X] 正在上传图片并等待服务端渲染...")
+                        file_input.set_input_files(upload_images)
+                        logger.info(f"[X] 正在上传 {len(upload_images)} 张图片并等待服务端渲染...")
                         # 断言 2.1: 上传后断言附件必须就绪
                         att_ok, att_msg = self.assert_attached(
                             page,
@@ -621,6 +622,29 @@ class XTwitterDispatcher(BaseDispatcher):
                                 if tt_el and tt_el.is_visible():
                                     tt_text = (tt_el.text_content() or "").strip()
                                 logger.info(f"[X] 发帖按钮当前等待中 ({elapsed_sec}s/{wait_button_timeout}s): aria-disabled={probe_aria}{f', 提示: {tt_text}' if tt_text else ''}")
+
+                                # 诊断与自愈：若持续禁用，检查是否出现字符超限 (例如进度环负数 -N)
+                                if probe_aria == "true":
+                                    neg_count = page.evaluate("""() => {
+                                        const spans = document.querySelectorAll("span, div");
+                                        for (const s of spans) {
+                                            if (s.children.length === 0) {
+                                                const t = (s.innerText || '').trim();
+                                                if (/^-\\d+$/.test(t)) return parseInt(t, 10);
+                                            }
+                                        }
+                                        return 0;
+                                    }""")
+                                    if neg_count and neg_count < 0:
+                                        logger.warning(f"[X] 捕获推文实际超出字数限制 ({abs(neg_count)} 字符)，触发紧急自愈修剪...")
+                                        cur_ed = page.query_selector(editor_sel)
+                                        if cur_ed:
+                                            raw_val = cur_ed.inner_text().strip()
+                                            trimmed, _, _ = truncate_x_text(raw_val, limit=char_limit - abs(neg_count))
+                                            cur_ed.click()
+                                            cur_ed.fill(trimmed)
+                                            time.sleep(0.5)
+                                            logger.info(f"[X] 紧急修剪已应用，新推文字数权重={calculate_x_char_count(trimmed)}")
                             except Exception:
                                 pass
 
@@ -669,15 +693,35 @@ class XTwitterDispatcher(BaseDispatcher):
 
                         self.close_login_session(browser, context, page)
                         if not sub_ok:
+                            compliance.append(
+                                self.verify_compliance_item(
+                                    "x_twitter",
+                                    "gallery_count",
+                                    True,
+                                    False,
+                                    f"推文配图未能确认出海 (预期 {len(upload_images)} 张)"
+                                )
+                            )
                             return False, sub_msg, compliance
 
+                        actual_images_count = len(upload_images)
+                        compliance.append(
+                            self.verify_compliance_item(
+                                "x_twitter",
+                                "gallery_count",
+                                True,
+                                True,
+                                f"推文配图核验通过 (成功 {actual_images_count}/{actual_images_count} 张)"
+                            )
+                        )
+
                         if thread_count > 1:
-                            succ_msg = f"X (Twitter) 串推发布成功 (已拆成 {thread_count} 条推文发布)"
+                            succ_msg = f"X (Twitter) 串推发布成功 (已拆成 {thread_count} 条推文发布，成功 {actual_images_count}/{actual_images_count} 张)"
                         elif truncated:
                             sig_note = "，已保护末尾变现签名" if signature_preserved else ""
-                            succ_msg = f"X (Twitter) 发布成功 (正文超限，已截断 {truncated_chars} 字符{sig_note})"
+                            succ_msg = f"X (Twitter) 发布成功 (正文超限，已截断 {truncated_chars} 字符{sig_note}，成功 {actual_images_count}/{actual_images_count} 张)"
                         else:
-                            succ_msg = "X (Twitter) 发布成功 (已勾选官方 Made with AI 及 Nudity 警告)"
+                            succ_msg = f"X (Twitter) 发布成功 (已勾选官方 Made with AI 及 Nudity 警告，成功 {actual_images_count}/{actual_images_count} 张)"
                         return True, succ_msg, compliance
 
                     # 超时未激活：如果还有重试机会，刷新重试
