@@ -469,7 +469,7 @@ def test_deviantart_v2_file_chooser_append_and_submit_success(tmp_path, monkeypa
 
     mock_plus_btn = MagicMock()
     mock_plus_btn.inner_text.return_value = "+"
-    mock_plus_btn.get_attribute.return_value = "Add more files"
+    mock_plus_btn.get_attribute.return_value = "Attach additional media"
 
     mock_submit_btn = MagicMock()
     mock_submit_btn.inner_text.return_value = "Submit"
@@ -482,17 +482,17 @@ def test_deviantart_v2_file_chooser_append_and_submit_success(tmp_path, monkeypa
     def fake_query_selector_all(sel):
         if "input[type='file']" in sel:
             return [mock_cover_fi]
-        if "+" in sel or "thumbnail" in sel or "add" in sel:
+        if "+" in sel or "thumbnail" in sel or "add" in sel or "additional media" in sel or "Attach" in sel:
             return [mock_plus_btn]
         if "Submit" in sel:
             return [mock_submit_btn]
         return []
 
     mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
-    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if "+" in sel else mock_cover_fi))
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if ("+" in sel or "additional media" in sel or "Attach" in sel) else mock_cover_fi))
 
-    # evaluate 返回 3 (与期望图片数匹配)
-    mock_page.evaluate = MagicMock(return_value=3)
+    # evaluate 返回 dict 结构 (真实 DOM: 3 张文件就绪且羊驼后台转码完毕)
+    mock_page.evaluate = MagicMock(return_value={"count": 3, "llama": False})
 
     mock_context = MagicMock()
     mock_studio_page = MagicMock()
