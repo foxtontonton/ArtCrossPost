@@ -1131,14 +1131,14 @@ class ThumbnailCardWidget(QFrame):
         left_btn.setStyleSheet(btn_style)
         left_btn.setEnabled(idx > 0)
         left_btn.setToolTip("向左移动 (提前排序)")
-        left_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i - 1))
+        left_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.reorder_images(i, i - 1))
         top_row.addWidget(left_btn)
 
         right_btn = QPushButton("▶")
         right_btn.setStyleSheet(btn_style)
         right_btn.setEnabled(idx < total_count - 1)
         right_btn.setToolTip("向右移动 (后置排序)")
-        right_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i + 1))
+        right_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.reorder_images(i, i + 1))
         top_row.addWidget(right_btn)
 
         del_btn = QPushButton("✕")
@@ -1218,21 +1218,76 @@ class ThumbnailCardWidget(QFrame):
                 mime = QMimeData()
                 mime.setText(str(self.idx))
                 drag.setMimeData(mime)
-                pix = self.img_lbl.pixmap()
-                if pix and not pix.isNull():
-                    drag.setPixmap(pix)
-                    drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
-                drag.exec_(Qt.MoveAction)
+
+                # 拖拽视觉反馈: 卡片半透明跟随渲染 (0.65 不透明度)
+                card_pix = self.grab()
+                if card_pix and not card_pix.isNull():
+                    trans_pix = QPixmap(card_pix.size())
+                    trans_pix.fill(Qt.transparent)
+                    painter = QPainter(trans_pix)
+                    painter.setOpacity(0.65)
+                    painter.drawPixmap(0, 0, card_pix)
+                    painter.end()
+                    drag.setPixmap(trans_pix)
+                    drag.setHotSpot(self.drag_start_pos)
+                else:
+                    pix = self.img_lbl.pixmap()
+                    if pix and not pix.isNull():
+                        drag.setPixmap(pix)
+                        drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
+
+                try:
+                    drag.exec_(Qt.MoveAction)
+                finally:
+                    if hasattr(self.main_window, "thumbnail_gallery"):
+                        self.main_window.thumbnail_gallery._hide_insertion_indicator()
                 self.drag_start_pos = None
                 return
         super().mouseMoveEvent(event)
+
+
+class InsertionIndicatorWidget(QWidget):
+    """
+    缩略图画廊拖拽插入位置指示符 (竖线插入符):
+    - 高对比度强调色竖线 (#818cf8 / #6366f1)
+    - 顶部与底部指示圆点，视觉清晰醒目
+    - 鼠标事件穿透 (WA_TransparentForMouseEvents)，不干扰拖拽响应
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setFixedWidth(8)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 竖线: 宽度 3px，高对比度主题色 #818cf8
+        pen = QPen(QColor("#818cf8"), 3)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+
+        mid_x = self.width() // 2
+        top_y = 6
+        bot_y = self.height() - 6
+        painter.drawLine(mid_x, top_y, mid_x, bot_y)
+
+        # 顶部与底部高亮圆点
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#a5b4fc")))
+        painter.drawEllipse(QPoint(mid_x, top_y), 3, 3)
+        painter.drawEllipse(QPoint(mid_x, bot_y), 3, 3)
+        painter.end()
 
 
 class ThumbnailGalleryWidget(QScrollArea):
     """
     中央预览区底部多图缩略图画廊滚动容器:
     - 横向平铺展示全部素材卡片
-    - 支持整栏拖拽排序与快速点选
+    - 支持整栏鼠标拖拽重排与快速点选
+    - 拖拽过程中显示竖线插入符与半透明卡片预览
     """
     def __init__(self, main_window):
         super().__init__()
@@ -1259,6 +1314,75 @@ class ThumbnailGalleryWidget(QScrollArea):
         self.hlayout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.setWidget(self.container)
 
+        # 拖拽插入位置指示符 (作为视口浮层子控件，不影响内部布局与拖拽事件)
+        self.indicator = InsertionIndicatorWidget(self.viewport())
+
+    def _get_card_geometry(self, i: int):
+        """获取第 i 张卡片的实际或理论几何尺寸 (x, width)"""
+        card = self.cards[i]
+        cw = card.width() if card.width() > 0 else 118
+        if i > 0 and card.x() == 0:
+            cx = 6 + i * (cw + self.hlayout.spacing())
+        else:
+            cx = card.x()
+        return cx, cw
+
+    def _calculate_insertion_slot(self, pos: QPoint) -> int:
+        """
+        根据当前光标位置计算在图集中的插入槽位 (0 到 len(self.cards))
+        """
+        if not self.cards:
+            return 0
+        container_pt = self.container.mapFromGlobal(self.viewport().mapToGlobal(pos))
+        container_x = container_pt.x()
+
+        slot = len(self.cards)
+        for i in range(len(self.cards)):
+            card_x, card_w = self._get_card_geometry(i)
+            card_mid_x = card_x + (card_w // 2)
+            if container_x < card_mid_x:
+                slot = i
+                break
+        return slot
+
+    def _update_insertion_indicator(self, pos: QPoint):
+        """
+        根据当前光标计算的插入槽位，在画廊视口中精确绘制竖线插入指示符
+        """
+        if not self.cards:
+            self._hide_insertion_indicator()
+            return
+
+        slot = self._calculate_insertion_slot(pos)
+
+        # 计算在 self.container 中的目标 X 坐标 (中心对齐)
+        if slot == 0:
+            c0_x, _ = self._get_card_geometry(0)
+            line_x = max(2, c0_x - 3)
+        elif slot < len(self.cards):
+            p_x, p_w = self._get_card_geometry(slot - 1)
+            c_x, _ = self._get_card_geometry(slot)
+            line_x = (p_x + p_w + c_x) // 2
+        else:
+            last_x, last_w = self._get_card_geometry(len(self.cards) - 1)
+            line_x = last_x + last_w + 3
+
+        # 转换为 self.viewport() 坐标系
+        viewport_pt = self.container.mapTo(self.viewport(), QPoint(line_x, 0))
+        vx = viewport_pt.x()
+
+        vp_h = self.viewport().height()
+        top_y = 6
+        ind_h = max(30, vp_h - 12)
+
+        self.indicator.setGeometry(vx - 4, top_y, 8, ind_h)
+        self.indicator.show()
+        self.indicator.raise_()
+
+    def _hide_insertion_indicator(self):
+        if hasattr(self, "indicator"):
+            self.indicator.hide()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
@@ -1268,23 +1392,36 @@ class ThumbnailGalleryWidget(QScrollArea):
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
+            self._update_insertion_indicator(event.pos())
+
+            # 视口边缘平滑自动横向滚动
+            vp_w = self.viewport().width()
+            if event.pos().x() < 30:
+                h_bar = self.horizontalScrollBar()
+                h_bar.setValue(h_bar.value() - 15)
+            elif event.pos().x() > vp_w - 30:
+                h_bar = self.horizontalScrollBar()
+                h_bar.setValue(h_bar.value() + 15)
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self._hide_insertion_indicator()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self._hide_insertion_indicator()
         if event.mimeData().hasText():
             try:
                 src_idx = int(event.mimeData().text())
-                drop_x = self.mapToGlobal(event.pos()).x()
-                target_idx = len(self.cards) - 1
-                for i, card in enumerate(self.cards):
-                    card_gx = card.mapToGlobal(QPoint(0, 0)).x()
-                    card_gw = card.width()
-                    if drop_x < card_gx + (card_gw // 2):
-                        target_idx = i
-                        break
+                slot = self._calculate_insertion_slot(event.pos())
+                if slot <= src_idx:
+                    target_idx = slot
+                else:
+                    target_idx = slot - 1
+
                 if 0 <= src_idx < len(self.main_window.image_paths) and 0 <= target_idx < len(self.main_window.image_paths):
-                    self.main_window.move_image(src_idx, target_idx)
+                    self.main_window.reorder_images(src_idx, target_idx)
                 event.acceptProposedAction()
             except Exception as e:
                 logger.debug(f"拖拽排序 dropEvent 异常: {e}")
@@ -4917,8 +5054,15 @@ class MainWindow(QMainWindow):
             return selected[:4]
         return self.image_paths[:4]
 
-    def move_image(self, src_idx: int, target_idx: int):
-        """图集顺序调整 (拖拽排序 / ◀ ▶ 移动)"""
+    def reorder_images(self, src_idx: int, target_idx: int):
+        """
+        图集核心顺序重排接口:
+        - 统一处理程序化重排与 UI 鼠标拖拽重排
+        - 联动更新内部 image_paths 顺序
+        - 联动更新当前聚焦预览索引 current_preview_index
+        - 联动同步左侧图片列表与底部缩略图画廊 (包含 X 选用状态与 #序号重绘)
+        - 实时通知界面重绘
+        """
         if not (0 <= src_idx < len(self.image_paths) and 0 <= target_idx < len(self.image_paths)):
             return
         if src_idx == target_idx:
@@ -4934,6 +5078,10 @@ class MainWindow(QMainWindow):
         self._sync_img_list_widget(block_signals=True)
         self._refresh_thumbnail_gallery()
         self._schedule_preview_refresh(instant=True)
+
+    def move_image(self, src_idx: int, target_idx: int):
+        """图集顺序调整别名/兼容接口，代理至 reorder_images"""
+        self.reorder_images(src_idx, target_idx)
 
     def remove_image(self, idx: int):
         """图集单张删除"""

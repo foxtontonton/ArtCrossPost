@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtCore import QPoint, Qt, QMimeData
+from PyQt5.QtGui import QDropEvent
 
 from app import optimize_static_image, MainWindow
 from dispatchers.deviantart import DeviantArtDispatcher
@@ -209,6 +211,113 @@ def test_reordering_updates_x_selection_order(mock_main_window):
     # 移动后，p9 处于第 1 位，因此发帖顺序应变为 [p9, p2, p5, p7]
     new_selected = win.get_x_selected_images()
     assert new_selected == [p9, p2, p5, p7]
+
+
+def test_reorder_images_interface_and_multi_platform_dispatch_order(mock_main_window):
+    """
+    reorder_images 核心接口与多平台发送顺序联动测试:
+    - 直接调用 reorder_images(src_idx, target_idx)
+    - 内部图片列表 image_paths 顺序实时更新
+    - X 选用勾选按新顺序重新映射
+    - 全平台分发源 (Patreon gallery, DA 图集等) 使用的 raw_images 与 image_paths 同步更新
+    - move_image 作为别名方法完全兼容
+    """
+    win = mock_main_window
+    p1 = win.image_paths[0]
+    p5 = win.image_paths[4]
+    p10 = win.image_paths[9]
+
+    # 初始顺序验证
+    assert win.image_paths[0] == p1
+    assert win.image_paths[4] == p5
+    assert win.image_paths[9] == p10
+
+    # 勾选第 5 张与第 10 张
+    win.thumbnail_gallery.cards[4].x_cb.setChecked(True)
+    win.thumbnail_gallery.cards[9].x_cb.setChecked(True)
+    assert win.get_x_selected_images() == [p5, p10]
+
+    # 将第 10 张 (索引 9) 通过 reorder_images 接口移动到第 1 位 (索引 0)
+    win.reorder_images(9, 0)
+
+    # 验证 image_paths 内部顺序已更新 (各平台如 Patreon gallery, DA 图集分发顺序)
+    assert win.image_paths[0] == p10
+    assert win.image_paths[1] == p1
+
+    # 验证 X 选用顺序重新映射为 [p10, p5]
+    assert win.get_x_selected_images() == [p10, p5]
+
+    # 验证 move_image 别名接口将第 5 张 (当前索引 5) 移动到首位
+    win.move_image(5, 0)
+    assert win.image_paths[0] == p5
+    assert win.image_paths[1] == p10
+    assert win.get_x_selected_images() == [p5, p10]
+
+
+def test_thumbnail_gallery_slot_calculation_and_insertion_indicator(mock_main_window):
+    """
+    缩略图画廊拖拽槽位计算与竖线插入指示符测试:
+    - 槽位 0 (首图左侧)
+    - 槽位 中间 (卡片间隙)
+    - 槽位 N (尾图右侧)
+    - 竖线指示符的显示、定位与隐藏
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    total_cards = len(gallery.cards)
+    assert total_cards == 10
+
+    # 1. 模拟鼠标移至画廊最左侧 (X=0) -> 槽位 0
+    slot_0 = gallery._calculate_insertion_slot(QPoint(0, 50))
+    assert slot_0 == 0
+
+    # 2. 模拟鼠标移至第 2 张卡片中心右侧 -> 槽位 2
+    # 卡片 1 的理论几何范围: x=130, w=118, mid=189
+    slot_2 = gallery._calculate_insertion_slot(QPoint(200, 50))
+    assert slot_2 == 2
+
+    # 3. 模拟鼠标移至最右侧 (X=9999) -> 槽位 10 (末尾)
+    slot_end = gallery._calculate_insertion_slot(QPoint(9999, 50))
+    assert slot_end == total_cards
+
+    # 4. 指示符显示与定位
+    assert hasattr(gallery, "indicator")
+    gallery._update_insertion_indicator(QPoint(200, 50))
+    assert gallery.indicator.isVisible() is True
+    assert gallery.indicator.width() == 8
+
+    # 5. 隐藏指示符
+    gallery._hide_insertion_indicator()
+    assert gallery.indicator.isVisible() is False
+
+
+def test_thumbnail_gallery_drop_event_triggers_reordering(mock_main_window):
+    """
+    UI 鼠标拖拽松开落定 (dropEvent) 触发重排与联动测试:
+    - 模拟从索引 8 拖至槽位 0
+    - 验证 dropEvent 解析 slot 并调用 reorder_images
+    - 验证竖线插入符在 drop 结束后被隐藏
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    orig_p9 = win.image_paths[8]
+
+    # 激活指示符
+    gallery._update_insertion_indicator(QPoint(0, 50))
+    assert gallery.indicator.isVisible() is True
+
+    # 构造拖拽落定事件 (将原索引 8 拖拽落定至最左侧 slot 0)
+    mime = QMimeData()
+    mime.setText("8")
+    drop_ev = QDropEvent(QPoint(0, 50), Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+
+    gallery.dropEvent(drop_ev)
+
+    # 落定后指示符必须隐藏
+    assert gallery.indicator.isVisible() is False
+
+    # 内部图片顺序已更新至首位
+    assert win.image_paths[0] == orig_p9
 
 
 def test_remove_image_updates_gallery_and_selection(mock_main_window):
