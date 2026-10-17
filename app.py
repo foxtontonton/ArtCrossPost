@@ -1076,6 +1076,7 @@ class ThumbnailCardWidget(QFrame):
         self.setFixedWidth(118)
         self.setFixedHeight(136)
         self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptDrops(True)
 
         is_active = (idx == getattr(main_window, "current_preview_index", 0))
         bg_color = "#1e1e2d" if is_active else "#14141e"
@@ -1098,6 +1099,7 @@ class ThumbnailCardWidget(QFrame):
 
         order_lbl = QLabel(f"#{idx + 1}")
         order_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; font-size: 10px; border: none; background: transparent;")
+        order_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         top_row.addWidget(order_lbl)
         top_row.addStretch()
 
@@ -1154,6 +1156,7 @@ class ThumbnailCardWidget(QFrame):
         self.img_lbl.setAlignment(Qt.AlignCenter)
         self.img_lbl.setFixedHeight(70)
         self.img_lbl.setStyleSheet("border: none; background-color: #0b0b10; border-radius: 4px;")
+        self.img_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         pix = self.main_window._get_cached_thumbnail(self.img_path)
         if pix and not pix.isNull():
@@ -1191,6 +1194,17 @@ class ThumbnailCardWidget(QFrame):
 
         layout.addLayout(bot_row)
 
+    def update_active_state(self, is_active: bool):
+        """轻量级更新选中态高亮，无需重建整个卡片控件"""
+        bg_color = "#1e1e2d" if is_active else "#14141e"
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {bg_color};
+                border: {'2px solid #6366f1' if is_active else '1px solid #2e2e40'};
+                border-radius: 6px;
+            }}
+        """)
+
     def _on_x_check_changed(self, state):
         checked = (state == Qt.Checked)
         if checked:
@@ -1208,8 +1222,15 @@ class ThumbnailCardWidget(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_pos = event.pos()
-            self.main_window.select_preview_image(self.idx)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.drag_start_pos is not None:
+                # 纯点击且未触发拖拽：切换大图预览
+                self.main_window.select_preview_image(self.idx)
+            self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton and self.drag_start_pos is not None:
@@ -1244,6 +1265,24 @@ class ThumbnailCardWidget(QFrame):
                 self.drag_start_pos = None
                 return
         super().mouseMoveEvent(event)
+
+    def dragEnterEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.dragEnterEvent(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.handle_drag_move_from_widget(self, event.pos(), event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.handle_drop_from_widget(self, event.pos(), event)
+        else:
+            event.ignore()
 
 
 class InsertionIndicatorWidget(QWidget):
@@ -1308,14 +1347,35 @@ class ThumbnailGalleryWidget(QScrollArea):
 
         self.container = QWidget()
         self.container.setStyleSheet("background-color: transparent;")
+        self.container.setAcceptDrops(True)
         self.hlayout = QHBoxLayout(self.container)
         self.hlayout.setContentsMargins(6, 4, 6, 4)
         self.hlayout.setSpacing(6)
         self.hlayout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.setWidget(self.container)
 
+        self.viewport().setAcceptDrops(True)
+        self.viewport().installEventFilter(self)
+        self.container.installEventFilter(self)
+
         # 拖拽插入位置指示符 (作为视口浮层子控件，不影响内部布局与拖拽事件)
         self.indicator = InsertionIndicatorWidget(self.viewport())
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, "container") and obj in (self.viewport(), self.container):
+            if event.type() == QEvent.DragEnter:
+                self.dragEnterEvent(event)
+                return True
+            elif event.type() == QEvent.DragMove:
+                self.handle_drag_move_from_widget(obj, event.pos(), event)
+                return True
+            elif event.type() == QEvent.DragLeave:
+                self.dragLeaveEvent(event)
+                return True
+            elif event.type() == QEvent.Drop:
+                self.handle_drop_from_widget(obj, event.pos(), event)
+                return True
+        return super().eventFilter(obj, event)
 
     def _get_card_geometry(self, i: int):
         """获取第 i 张卡片的实际或理论几何尺寸 (x, width)"""
@@ -1327,15 +1387,31 @@ class ThumbnailGalleryWidget(QScrollArea):
             cx = card.x()
         return cx, cw
 
-    def _calculate_insertion_slot(self, pos: QPoint) -> int:
-        """
-        根据当前光标位置计算在图集中的插入槽位 (0 到 len(self.cards))
-        """
+    def _get_container_x_from_widget_pos(self, obj, pos: QPoint) -> int:
+        """从任意子控件坐标安全换算至 self.container 内部水平坐标 X"""
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        if obj is self.container:
+            return pos.x()
+        if hasattr(obj, "idx") and isinstance(getattr(obj, "idx", None), int):
+            cx, _ = self._get_card_geometry(obj.idx)
+            return cx + pos.x()
+        if hasattr(self, "viewport") and obj is self.viewport():
+            return pos.x() + h_scroll
+        if hasattr(obj, "x"):
+            return obj.x() + pos.x()
+        return pos.x()
+
+    def _get_viewport_x_from_widget_pos(self, obj, pos: QPoint) -> int:
+        """换算至 self.viewport() 内部水平坐标 X"""
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        if hasattr(self, "viewport") and obj is self.viewport():
+            return pos.x()
+        container_x = self._get_container_x_from_widget_pos(obj, pos)
+        return container_x - h_scroll
+
+    def _calculate_insertion_slot_from_container_x(self, container_x: int) -> int:
         if not self.cards:
             return 0
-        container_pt = self.container.mapFromGlobal(self.viewport().mapToGlobal(pos))
-        container_x = container_pt.x()
-
         slot = len(self.cards)
         for i in range(len(self.cards)):
             card_x, card_w = self._get_card_geometry(i)
@@ -1345,17 +1421,25 @@ class ThumbnailGalleryWidget(QScrollArea):
                 break
         return slot
 
-    def _update_insertion_indicator(self, pos: QPoint):
-        """
-        根据当前光标计算的插入槽位，在画廊视口中精确绘制竖线插入指示符
-        """
+    def _calculate_insertion_slot(self, pos: QPoint) -> int:
+        """从视口或局部坐标计算槽位"""
+        cx = self._get_container_x_from_widget_pos(self.viewport(), pos)
+        return self._calculate_insertion_slot_from_container_x(cx)
+
+    def _calculate_insertion_slot_from_global(self, global_pos: QPoint) -> int:
+        if hasattr(self, "container"):
+            try:
+                c_pt = self.container.mapFromGlobal(global_pos)
+                return self._calculate_insertion_slot_from_container_x(c_pt.x())
+            except Exception:
+                pass
+        return 0
+
+    def _update_insertion_indicator_at_slot(self, slot: int):
         if not self.cards:
             self._hide_insertion_indicator()
             return
 
-        slot = self._calculate_insertion_slot(pos)
-
-        # 计算在 self.container 中的目标 X 坐标 (中心对齐)
         if slot == 0:
             c0_x, _ = self._get_card_geometry(0)
             line_x = max(2, c0_x - 3)
@@ -1367,11 +1451,10 @@ class ThumbnailGalleryWidget(QScrollArea):
             last_x, last_w = self._get_card_geometry(len(self.cards) - 1)
             line_x = last_x + last_w + 3
 
-        # 转换为 self.viewport() 坐标系
-        viewport_pt = self.container.mapTo(self.viewport(), QPoint(line_x, 0))
-        vx = viewport_pt.x()
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        vx = line_x - h_scroll
 
-        vp_h = self.viewport().height()
+        vp_h = self.viewport().height() if hasattr(self, "viewport") else 150
         top_y = 6
         ind_h = max(30, vp_h - 12)
 
@@ -1379,42 +1462,44 @@ class ThumbnailGalleryWidget(QScrollArea):
         self.indicator.show()
         self.indicator.raise_()
 
+    def _update_insertion_indicator(self, pos: QPoint):
+        slot = self._calculate_insertion_slot(pos)
+        self._update_insertion_indicator_at_slot(slot)
+
+    def _update_insertion_indicator_from_global(self, global_pos: QPoint):
+        slot = self._calculate_insertion_slot_from_global(global_pos)
+        self._update_insertion_indicator_at_slot(slot)
+
     def _hide_insertion_indicator(self):
         if hasattr(self, "indicator"):
             self.indicator.hide()
 
-    def dragEnterEvent(self, event):
+    def handle_drag_move_from_widget(self, obj, pos: QPoint, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-            self._update_insertion_indicator(event.pos())
+            cx = self._get_container_x_from_widget_pos(obj, pos)
+            slot = self._calculate_insertion_slot_from_container_x(cx)
+            self._update_insertion_indicator_at_slot(slot)
 
             # 视口边缘平滑自动横向滚动
+            vx = self._get_viewport_x_from_widget_pos(obj, pos)
             vp_w = self.viewport().width()
-            if event.pos().x() < 30:
+            if vx < 30:
                 h_bar = self.horizontalScrollBar()
                 h_bar.setValue(h_bar.value() - 15)
-            elif event.pos().x() > vp_w - 30:
+            elif vx > vp_w - 30:
                 h_bar = self.horizontalScrollBar()
                 h_bar.setValue(h_bar.value() + 15)
         else:
             event.ignore()
 
-    def dragLeaveEvent(self, event):
-        self._hide_insertion_indicator()
-        super().dragLeaveEvent(event)
-
-    def dropEvent(self, event):
+    def handle_drop_from_widget(self, obj, pos: QPoint, event):
         self._hide_insertion_indicator()
         if event.mimeData().hasText():
             try:
                 src_idx = int(event.mimeData().text())
-                slot = self._calculate_insertion_slot(event.pos())
+                cx = self._get_container_x_from_widget_pos(obj, pos)
+                slot = self._calculate_insertion_slot_from_container_x(cx)
                 if slot <= src_idx:
                     target_idx = slot
                 else:
@@ -1426,6 +1511,32 @@ class ThumbnailGalleryWidget(QScrollArea):
             except Exception as e:
                 logger.debug(f"拖拽排序 dropEvent 异常: {e}")
                 event.ignore()
+
+    def handle_drag_move(self, global_pos: QPoint, event):
+        if hasattr(self, "container"):
+            c_pt = self.container.mapFromGlobal(global_pos)
+            self.handle_drag_move_from_widget(self.container, c_pt, event)
+
+    def handle_drop(self, global_pos: QPoint, event):
+        if hasattr(self, "container"):
+            c_pt = self.container.mapFromGlobal(global_pos)
+            self.handle_drop_from_widget(self.container, c_pt, event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.handle_drag_move_from_widget(self.viewport(), event.pos(), event)
+
+    def dragLeaveEvent(self, event):
+        self._hide_insertion_indicator()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.handle_drop_from_widget(self.viewport(), event.pos(), event)
 
 
 class NotificationBar(QFrame):
@@ -3043,7 +3154,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "title_input") or not hasattr(self, "tags_input") or not hasattr(self, "desc_input"):
             return
         title = self.title_input.text().strip()
-        tags = self.tags_input.text().strip()
+        tags = (self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text()).strip()
         desc = self.desc_input.toPlainText().strip()
         if not title and not tags and not desc:
             if draft_file.exists():
@@ -3054,7 +3165,7 @@ class MainWindow(QMainWindow):
             return
         data = {
             "title": self.title_input.text(),
-            "tags": self.tags_input.text(),
+            "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
             "description": self.desc_input.toPlainText(),
             "updated_at": datetime.now().isoformat()
         }
@@ -3079,7 +3190,10 @@ class MainWindow(QMainWindow):
             if t and hasattr(self, "title_input"):
                 self.title_input.setText(t)
             if tags and hasattr(self, "tags_input"):
-                self.tags_input.setText(tags)
+                if hasattr(self.tags_input, "setPlainText"):
+                    self.tags_input.setPlainText(tags)
+                else:
+                    self.tags_input.setText(tags)
             if desc and hasattr(self, "desc_input"):
                 self.desc_input.setPlainText(desc)
             if t or tags or desc:
@@ -5109,8 +5223,15 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.image_paths):
             self.current_preview_index = idx
             self._sync_img_list_widget(block_signals=True)
-            self._refresh_thumbnail_gallery(cards_only=True)
+            self._update_thumbnail_active_states()
             self._schedule_preview_refresh(instant=True)
+
+    def _update_thumbnail_active_states(self):
+        """仅更新缩略图卡片高亮选中态，绝不触发全量控件重建与事件重置"""
+        if not hasattr(self, "thumbnail_gallery"):
+            return
+        for i, card in enumerate(self.thumbnail_gallery.cards):
+            card.update_active_state(i == self.current_preview_index)
 
     def _sync_img_list_widget(self, block_signals=False):
         """同步左栏图片列表控件"""
@@ -5129,6 +5250,10 @@ class MainWindow(QMainWindow):
     def _refresh_thumbnail_gallery(self, cards_only=False):
         """刷新中央预览区底部的多图缩略图画廊"""
         if not hasattr(self, "thumbnail_gallery"):
+            return
+
+        if cards_only and len(self.thumbnail_gallery.cards) == len(self.image_paths):
+            self._update_thumbnail_active_states()
             return
 
         while self.thumbnail_gallery.hlayout.count():

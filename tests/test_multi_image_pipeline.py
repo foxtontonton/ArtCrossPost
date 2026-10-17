@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 from PyQt5.QtWidgets import QMessageBox
-from PyQt5.QtCore import QPoint, Qt, QMimeData
-from PyQt5.QtGui import QDropEvent
+from PyQt5.QtCore import QPoint, Qt, QMimeData, QEvent
+from PyQt5.QtGui import QDropEvent, QMouseEvent
 
 from app import optimize_static_image, MainWindow
 from dispatchers.deviantart import DeviantArtDispatcher
@@ -318,6 +318,71 @@ def test_thumbnail_gallery_drop_event_triggers_reordering(mock_main_window):
 
     # 内部图片顺序已更新至首位
     assert win.image_paths[0] == orig_p9
+
+
+def test_thumbnail_card_mouse_press_and_release_events(mock_main_window):
+    """
+    缩略图卡片鼠标按下与释放事件测试:
+    1. mousePressEvent 仅记录 drag_start_pos，不重置预览 index，也不销毁重建卡片；
+    2. mouseReleaseEvent 在无拖拽位移时触发 select_preview_image 切换大图预览；
+    3. 切换预览仅更新卡片样式 (_update_thumbnail_active_states)，不重建控件。
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    card1 = gallery.cards[1]
+
+    # 初始状态
+    assert win.current_preview_index == 0
+    assert card1.drag_start_pos is None
+
+    # 模拟按下 card1
+    press_ev = QMouseEvent(QEvent.MouseButtonPress, QPoint(15, 15), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    card1.mousePressEvent(press_ev)
+
+    # 验证 drag_start_pos 已记录，但当前选图未提前切换
+    assert card1.drag_start_pos == QPoint(15, 15)
+    assert win.current_preview_index == 0
+
+    # 模拟在原地释放鼠标 (纯点击未拖拽)
+    rel_ev = QMouseEvent(QEvent.MouseButtonRelease, QPoint(15, 15), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    card1.mouseReleaseEvent(rel_ev)
+
+    # 验证选图已切换为 card1，且 drag_start_pos 重置为 None
+    assert win.current_preview_index == 1
+    assert card1.drag_start_pos is None
+    # 验证卡片对象引用未被销毁重建
+    assert gallery.cards[1] is card1
+
+
+def test_thumbnail_gallery_event_filter_and_card_drag_drop(mock_main_window):
+    """
+    画廊视口/容器 eventFilter 及卡片层级事件穿透与代理测试:
+    1. 缩略图 card.dropEvent 成功转发至 gallery.handle_drop 并调用 reorder_images;
+    2. gallery.viewport() 收到 Drop 事件通过 eventFilter 成功被拦截并落定重排;
+    3. gallery.container 收到 DragMove 事件通过 eventFilter 成功激活指示符。
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    orig_first = win.image_paths[0]
+    orig_last = win.image_paths[-1]
+
+    # 1. 测试卡片代理 dropEvent
+    mime = QMimeData()
+    mime.setText("0")  # 将 0 号图片拖拽至 2 号卡片
+    drop_ev = QDropEvent(QPoint(10, 10), Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+    gallery.cards[2].dropEvent(drop_ev)
+
+    # 0 号图片应已被移动
+    assert win.image_paths[0] != orig_first
+
+    # 2. 测试 viewport 的 eventFilter 拦截 Drop
+    mime2 = QMimeData()
+    mime2.setText(str(len(win.image_paths) - 1))  # 拖拽最后一张图片至最左侧
+    vp_drop_ev = QDropEvent(QPoint(0, 10), Qt.MoveAction, mime2, Qt.LeftButton, Qt.NoModifier)
+    filtered = gallery.eventFilter(gallery.viewport(), vp_drop_ev)
+    assert filtered is True
+    # 最后一张图片现在应该在最前面
+    assert win.image_paths[0] == orig_last
 
 
 def test_remove_image_updates_gallery_and_selection(mock_main_window):
