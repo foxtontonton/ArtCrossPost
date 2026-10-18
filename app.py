@@ -3541,6 +3541,13 @@ class MainWindow(QMainWindow):
         top_bar.addLayout(font_bar)
         top_bar.addSpacing(8)
 
+        self.open_cache_btn = QPushButton("📁 缓存目录")
+        self.open_cache_btn.setObjectName("secondaryBtn")
+        self.open_cache_btn.setMinimumHeight(28)
+        self.open_cache_btn.setToolTip("在系统文件管理器中一键打开生成的图片缓存目录 (data/cache)")
+        self.open_cache_btn.clicked.connect(self._open_cache_directory)
+        top_bar.addWidget(self.open_cache_btn)
+
         self.settings_btn = QPushButton("⚙️ 系统设置")
         self.settings_btn.setObjectName("secondaryBtn")
         self.settings_btn.setMinimumHeight(28)
@@ -3962,6 +3969,12 @@ class MainWindow(QMainWindow):
         export_preview_btn.setObjectName("secondaryBtn")
         export_preview_btn.clicked.connect(self._export_preview_image)
         p_top_bar.addWidget(export_preview_btn)
+
+        open_cache_preview_btn = QPushButton("📁 缓存目录")
+        open_cache_preview_btn.setObjectName("secondaryBtn")
+        open_cache_preview_btn.setToolTip("在系统文件管理器中一键打开生成的图片缓存目录 (data/cache)")
+        open_cache_preview_btn.clicked.connect(self._open_cache_directory)
+        p_top_bar.addWidget(open_cache_preview_btn)
 
         preview_vlayout.addLayout(p_top_bar)
 
@@ -5103,6 +5116,25 @@ class MainWindow(QMainWindow):
             if save_path:
                 self._current_rendered_pixmap.save(save_path)
                 self.notify(f"合成图已成功导出至: {Path(save_path).name}", level="success")
+
+    def _open_cache_directory(self):
+        """在系统文件资源管理器中一键打开 data/cache 目录"""
+        try:
+            cache_path = Path(CACHE_DIR).resolve()
+            cache_path.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(cache_path))
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(cache_path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(cache_path)])
+            self.notify(f"📂 已在文件管理器中打开缓存目录: {cache_path}", level="info")
+            logger.info(f"[Cache] 已唤起文件管理器打开缓存目录: {cache_path}")
+        except Exception as e:
+            logger.error(f"[Cache] 打开缓存目录失败: {e}")
+            self.notify(f"打开缓存目录失败: {e}", level="error")
 
     def _on_canvas_boxes_changed(self, boxes):
         if self.image_paths and 0 <= self.current_preview_index < len(self.image_paths):
