@@ -1,47 +1,79 @@
-# ArtCrossPost (多平台艺术创作同步分发工具)
+# ArtCrossPost
 
-专为画师与漫画创作者定制的极简、轻量级、免 API 月费的多平台一键发布桌面客户端。
+A free, open-source Windows desktop client for artists who publish the same artwork
+on multiple platforms — write it once, post it everywhere.
 
-## 核心特性
+[中文说明](README.zh-CN.md)
 
-1. **精简聚焦 6 大核心平台**：
-   - 社交与社区：**X (Twitter)**、**DeviantArt**、**Bluesky**
-   - 二次元枢纽：**Pixiv (P站)**
-   - 创作者赞助：**Patreon**、**Ko-fi**
-2. **Pixiv 专属 AI 自动打码分流**：
-   - 导入一张无码原图，后台自动通过智能检测生成 Pixiv 合规版本（支持纯黑条、经典马赛克、高斯模糊）。
-   - **分流机制**：无码原图分发至 Patreon / Ko-fi / X / Bluesky；合规打码图单独分发至 Pixiv。
-3. **免 API 月费与防风控**：
-   - 基于本地安全会话与 Playwright 自动化，免去 X 每月 100 美元的高昂 API 费用与 Patreon 发帖接口限制。
-   - 复用创作者本机 Chrome 浏览器登录凭证，抗风控能力极强。
-4. **一键赞助引流与预设模板**：
-   - 支持一键追加 Patreon/Ko-fi 引流尾巴、记住各平台常用标签与分级状态。
+## Why ArtCrossPost?
 
-## 快速启动
+Re-uploading the same image and re-typing the same title, tags, and description on
+every platform is slow and error-prone. ArtCrossPost keeps one local workspace for
+the artwork, its metadata, and its platform-specific variants, then posts to each
+selected platform through a local Playwright-driven browser session — no paid
+platform APIs, no monthly API fees, and your logins never leave your machine.
 
-双击根目录下的 `start.bat`，或者在终端运行：
+## Features
+
+- **One post, multiple platforms** — built-in dispatchers for **DeviantArt**,
+  **X (Twitter)**, **Patreon**, and **Ko-fi** (via the monetization dispatcher).
+- **DeviantArt multi-image deviations** — publish a single deviation with multiple
+  images (10 by default, configurable): title, description, tags, gallery, and
+  Mature/AI flags are filled in once, and the published image count is verified
+  against the expected count after submission.
+- **Local AI censoring** — ONNX NudeNet detection generates platform-compliant
+  variants automatically (black bar, mosaic, or blur, with adjustable coverage),
+  while the original can still go to platforms that allow it.
+- **Watermarking** — configurable text watermark (font, size, opacity, position)
+  applied only to the copies that need it.
+- **Live preview & GIF optimization** — dark three-pane UI with a responsive
+  canvas, interactive censor box adjustments, and GIF optimization, so animated
+  work can be checked and compressed before it goes out.
+- **Per-platform controls** — sensitive-content flags, visibility/tiers, image-size
+  limits with automatic compression only when a platform limit is exceeded,
+  publish guards, and success assertions instead of "fire and forget" posting.
+- **Presets & signature** — reusable default tags, per-platform preferences, and a
+  support-me signature template (e.g. Patreon / Ko-fi) appended on demand.
+- **Local-first & private** — sessions, presets, and window state live in a local
+  `data/` folder (git-ignored); nothing is uploaded anywhere except the posts you
+  explicitly publish.
+
+## Requirements
+
+- Windows 10/11
+- Python 3.10+
+- Microsoft Edge (used by the Playwright automation)
+
+## Quick start
+
+Double-click `start.bat`, or run:
 
 ```bash
+pip install -r requirements.txt
 python app.py
 ```
 
-## 项目目录结构
+On first use, sign in to each platform inside the app's browser window; the
+session is stored locally for later runs.
+
+## Project structure
 
 ```
-art_crosspost/
-├── app.py                 # PyQt5 桌面主程序
-├── config.py              # 全局配置与预设管理
-├── censor_engine.py       # Pixiv 自动打码合规引擎
-├── start.bat              # Windows 双击一键启动脚本
-├── requirements.txt       # 依赖清单
-├── dispatchers/           # 6 大平台专属分发器
-│   ├── base.py            # 分发器基类
-│   ├── x_twitter.py       # X (Twitter)
-│   ├── pixiv.py           # Pixiv (专属打码分流)
-│   ├── bluesky.py         # Bluesky (分级标签)
-│   ├── deviantart.py      # DeviantArt (Mature 选项)
-│   └── monetization.py    # Patreon & Ko-fi (可见档位)
-└── data/
-    ├── cookies/           # 各平台持久化本地会话凭证
-    └── cache/             # 自动打码缓存文件
+├── app.py                # PyQt5 desktop application & unified preview canvas
+├── config.py             # Configuration & presets manager
+├── censor_engine.py      # Local AI censoring (ONNX NudeNet)
+├── watermark_engine.py   # Watermarking engine
+├── diagnostics.py        # System health & pre-flight diagnostics
+├── x_text_utils.py       # X post text handling & truncation
+├── logger.py             # Unified logging system
+├── dispatchers/
+│   ├── base.py           # Base dispatcher & Playwright session manager
+│   ├── deviantart.py     # DeviantArt (incl. multi-image deviations)
+│   ├── x_twitter.py      # X (Twitter) dispatcher
+│   └── monetization.py   # Patreon & Ko-fi dispatchers
+└── data/                 # Local sessions & presets (git-ignored)
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
