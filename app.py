@@ -45,6 +45,8 @@ from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
 from x_text_utils import calculate_x_char_count, format_x_full_text
+from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
+from schedule_dialogs import ScheduledPublishDialog, ExpiredTasksDialog
 
 
 class NoWheelEventFilter(QObject):
@@ -3166,6 +3168,20 @@ class MainWindow(QMainWindow):
             if def_t:
                 self.tags_input.setPlainText(normalize_tags_to_string(def_t))
 
+        # 定时发布管理器 (v1: 30s QTimer 轮询 + 启动过期检测)
+        self.schedule_manager = ScheduleManager(storage_path=self.data_dir / "scheduled_posts.json")
+        self._is_scheduled_task_running = False
+        self._current_scheduled_task_id = None
+        self._schedule_poll_timer = QTimer(self)
+        self._schedule_poll_timer.setInterval(30000)
+        self._schedule_poll_timer.timeout.connect(self._poll_scheduled_tasks)
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            self._schedule_poll_timer.start()
+            self._startup_expired_timer = QTimer(self)
+            self._startup_expired_timer.setSingleShot(True)
+            self._startup_expired_timer.timeout.connect(self._check_startup_expired_tasks)
+            self._startup_expired_timer.start(1200)
+
     def _save_draft(self):
         """P1-6: 自动将当前草稿保存至 data/draft.json"""
         draft_file = self.data_dir / "draft.json"
@@ -3388,6 +3404,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, "_config_save_timer") and self._config_save_timer.isActive():
             self._config_save_timer.stop()
+        if hasattr(self, "_schedule_poll_timer"):
+            self._schedule_poll_timer.stop()
+        if hasattr(self, "_startup_expired_timer"):
+            self._startup_expired_timer.stop()
         if hasattr(self, "_layout_save_timer"):
             self._layout_save_timer.stop()
         self._save_window_layout()
@@ -4116,6 +4136,24 @@ class MainWindow(QMainWindow):
         self.publish_btn.setObjectName("publishBtn")
         self.publish_btn.clicked.connect(self._start_publishing)
         btn_row.addWidget(self.publish_btn, stretch=3)
+
+        self.schedule_publish_btn = QPushButton("⏱️ 定时发布")
+        self.schedule_publish_btn.setObjectName("schedulePublishBtn")
+        self.schedule_publish_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0f766e;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 10px 12px;
+                border-radius: 6px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #0d9488;
+            }
+        """)
+        self.schedule_publish_btn.clicked.connect(self._open_schedule_dialog)
+        btn_row.addWidget(self.schedule_publish_btn, stretch=1)
 
         self.diagnose_btn = QPushButton("🔍 一键自检")
         self.diagnose_btn.setStyleSheet("""
@@ -5444,22 +5482,42 @@ class MainWindow(QMainWindow):
             self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
         self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
 
-    def _start_publishing(self):
-        if not self.image_paths:
+    def _start_publishing(self, scheduled_snapshot=None):
+        if scheduled_snapshot:
+            images_to_use = [Path(p) for p in scheduled_snapshot.get("image_paths", [])]
+            title_val = scheduled_snapshot.get("title", "")
+            desc_val = scheduled_snapshot.get("description", "")
+            tags_val = scheduled_snapshot.get("tags", [])
+            selected_names = scheduled_snapshot.get("selected_platforms", [])
+            selected = [d for d in self.dispatchers if d.name in selected_names]
+            platform_options = dict(scheduled_snapshot.get("platform_options", {}))
+            is_nsfw = scheduled_snapshot.get("is_nsfw", False)
+            is_ai = scheduled_snapshot.get("is_ai", False)
+            custom_boxes_source = scheduled_snapshot.get("custom_censor_boxes", {})
+        else:
+            images_to_use = self.image_paths
+            title_val = self.title_input.text().strip()
+            desc_val = self.desc_input.toPlainText().strip()
+            tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+            selected = []
+            for name, ctrl in self.platform_controls.items():
+                if ctrl["checkbox"].isChecked():
+                    selected.append(ctrl["dispatcher"])
+            platform_options = {}
+            is_nsfw = self.nsfw_checkbox.isChecked()
+            is_ai = self.ai_checkbox.isChecked()
+            custom_boxes_source = getattr(self, "custom_censor_boxes", {})
+
+        if not images_to_use:
             self.notify("发布内容必须包含至少一张作品图片！", level="warning")
             return
-
-        selected = []
-        for name, ctrl in self.platform_controls.items():
-            if ctrl["checkbox"].isChecked():
-                selected.append(ctrl["dispatcher"])
 
         if not selected:
             self.notify("请至少勾选一个发布平台！", level="warning")
             return
 
         # 需求一: 标题合规门禁快速拦截
-        if not self.title_input.text().strip():
+        if not title_val:
             self.notify("⚠️ 发布前门禁拦截: 请先填写作品标题！", level="warning")
             return
 
@@ -5469,7 +5527,7 @@ class MainWindow(QMainWindow):
                 "deviantart_max_images_per_deviation",
                 self.config.get("deviantart_max_images_per_deviation", 10)
             )
-            curr_count = len(self.image_paths)
+            curr_count = len(images_to_use)
             if curr_count > da_max:
                 warn_text = f"DA 单作品上限 {da_max} 张，当前 {curr_count} 张"
                 logger.warning(f"[发布前门禁] {warn_text}，已中止发布")
@@ -5487,8 +5545,8 @@ class MainWindow(QMainWindow):
                 return
 
         # 需求 4.c: 混合素材 (GIF + 静态图) 自动按平台能力拆分与发布前确认
-        has_gif = any(p.lower().endswith(".gif") for p in self.image_paths)
-        has_static = any(not p.lower().endswith(".gif") for p in self.image_paths)
+        has_gif = any(str(p).lower().endswith(".gif") for p in images_to_use)
+        has_static = any(not str(p).lower().endswith(".gif") for p in images_to_use)
         if has_gif and has_static:
             logger.info("[发布检查] 检测到包含动图与静态图片的混合素材批次")
             try:
@@ -5515,7 +5573,7 @@ class MainWindow(QMainWindow):
                 logger.debug(f"[混合素材确认] 提示: {me}")
 
         # 准备分发图片资源
-        raw_images = [str(p) for p in self.image_paths]
+        raw_images = [str(p) for p in images_to_use]
         da_images = []
         x_images = []
         x_images_map = {}
@@ -5556,7 +5614,7 @@ class MainWindow(QMainWindow):
         else:
             logger.info(f"[发布准备] 文字水印未启用或未勾选同步发布: enabled={wm_enabled}, apply_publish={apply_wm_publish}, has_text={bool(wm_text)}")
 
-        for idx, p in enumerate(self.image_paths):
+        for idx, p in enumerate(images_to_use):
             is_gif = p.lower().endswith(".gif")
             orig_sfx = Path(p).suffix.lstrip(".").lower()
             ext = "gif" if is_gif else (orig_sfx if orig_sfx in ("jpg", "jpeg", "png", "webp") else "jpg")
@@ -5583,7 +5641,7 @@ class MainWindow(QMainWindow):
                             orig_w, orig_h = tmp_im.width, tmp_im.height
                     except Exception as e:
                         logger.debug(f"读取动图尺寸异常: {e}")
-                    custom_boxes = self.custom_censor_boxes.get(p)
+                    custom_boxes = custom_boxes_source.get(p) or custom_boxes_source.get(str(p))
                     base_boxes = custom_boxes or getattr(self, "_detected_boxes_cache", {}).get(p, [])
                     final_boxes = self.censor_engine.resolve_final_boxes(
                         base_boxes, orig_w, orig_h, mode=mode, custom_ratio=ratio,
@@ -6174,6 +6232,18 @@ class MainWindow(QMainWindow):
         msg_level = "success" if all_ok else ("warning" if success_count > 0 else "error")
         summary_msg = f"全平台分发已结束！共 {total_count} 个平台，成功 {success_count} 个"
 
+        # 定时发布任务生命周期回调
+        if getattr(self, "_current_scheduled_task_id", None):
+            cur_tid = self._current_scheduled_task_id
+            self._current_scheduled_task_id = None
+            self._is_scheduled_task_running = False
+            if all_ok:
+                self.schedule_manager.mark_completed(cur_tid, summary_msg)
+            else:
+                self.schedule_manager.mark_failed(cur_tid, summary_msg)
+            # 6. 并发冲突处理: 完成后唤醒轮询以处理后续排队任务
+            QTimer.singleShot(1500, self._poll_scheduled_tasks)
+
         # 内嵌通知条与富文本日志汇报（严格遵守红线 #8: 严禁 QMessageBox）
         self.notify(summary_msg, level=msg_level, auto_dismiss=False)
         self.notification_bar.append_rich_log(
@@ -6281,12 +6351,123 @@ class MainWindow(QMainWindow):
             self.notify("暂未生成诊断报告文件，请先点击 [一键自检]", level="warning")
 
 
-def setup_dark_palette(app):
-    """根据 presets.json 中的外观配置初始化调色板与全局暗色样式"""
-    initial_cfg = load_config()
-    theme_name = initial_cfg.get("ui_theme", "pure_dark")
-    font_size = initial_cfg.get("ui_font_size", 13)
-    apply_app_appearance(app, theme_name=theme_name, font_size=font_size)
+
+    def _capture_current_post_snapshot(self):
+        if not self.image_paths:
+            self.notify("⚠️ 定时发布需包含至少一张作品图片！", level="warning")
+            return None
+        if not self.title_input.text().strip():
+            self.notify("⚠️ 请先填写作品标题！", level="warning")
+            return None
+        selected_names = [name for name, ctrl in self.platform_controls.items() if ctrl["checkbox"].isChecked()]
+        if not selected_names:
+            self.notify("⚠️ 请至少勾选一个发布平台！", level="warning")
+            return None
+
+        # 提取当前所有平台专属配置
+        platform_options = {}
+        if "x_twitter" in self.platform_controls:
+            opts = self.platform_controls["x_twitter"]["options"]
+            if "sensitive" in opts:
+                platform_options["x_sensitive"] = opts["sensitive"].isChecked()
+            if "ai" in opts:
+                platform_options["x_ai"] = opts["ai"].isChecked()
+            if "premium" in opts:
+                platform_options["x_premium"] = opts["premium"].isChecked()
+                platform_options["x_char_limit"] = 25000 if opts["premium"].isChecked() else 280
+            if "policy" in opts:
+                platform_options["x_over_limit_policy"] = opts["policy"].currentData()
+
+        if "deviantart" in self.platform_controls:
+            opts = self.platform_controls["deviantart"]["options"]
+            if "mature" in opts:
+                txt = opts["mature"].currentText().lower()
+                if "moderate" in txt:
+                    platform_options["deviantart_mature"] = "moderate"
+                elif "none" in txt:
+                    platform_options["deviantart_mature"] = "none"
+                else:
+                    platform_options["deviantart_mature"] = "strict"
+            if "gallery" in opts:
+                platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
+            if "ai" in opts:
+                platform_options["deviantart_ai"] = opts["ai"].isChecked()
+            da_limit_val = self.config.get("defaults", {}).get(
+                "deviantart_max_images_per_deviation",
+                self.config.get("deviantart_max_images_per_deviation", 10)
+            )
+            platform_options["deviantart_max_images_per_deviation"] = da_limit_val
+
+        if "patreon" in self.platform_controls:
+            opts = self.platform_controls["patreon"]["options"]
+            if "visibility" in opts:
+                txt = opts["visibility"].currentText().lower()
+                if "public" in txt or "公开" in txt:
+                    platform_options["patreon_visibility"] = "public"
+                elif "tiers" in txt or "档位" in txt:
+                    platform_options["patreon_visibility"] = "tiers"
+                else:
+                    platform_options["patreon_visibility"] = "patrons"
+            if "ai" in opts:
+                platform_options["patreon_ai"] = opts["ai"].isChecked()
+
+        if "kofi" in self.platform_controls:
+            opts = self.platform_controls["kofi"]["options"]
+            if "visibility" in opts:
+                txt = opts["visibility"].currentText().lower()
+                if "everyone" in txt or "公开" in txt or "所有" in txt:
+                    platform_options["kofi_visibility"] = "everyone"
+                else:
+                    platform_options["kofi_visibility"] = "supporters"
+            if "ai" in opts:
+                platform_options["kofi_ai"] = opts["ai"].isChecked()
+
+        tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+        return {
+            "title": self.title_input.text().strip(),
+            "description": self.desc_input.toPlainText().strip(),
+            "tags": tags_val,
+            "image_paths": [str(p) for p in self.image_paths],
+            "selected_platforms": selected_names,
+            "platform_options": platform_options,
+            "is_nsfw": self.nsfw_checkbox.isChecked(),
+            "is_ai": self.ai_checkbox.isChecked(),
+            "custom_censor_boxes": {str(k): v for k, v in getattr(self, "custom_censor_boxes", {}).items()}
+        }
+
+    def _open_schedule_dialog(self):
+        dlg = ScheduledPublishDialog(self, self.schedule_manager)
+        dlg.exec_()
+
+    def _check_startup_expired_tasks(self):
+        try:
+            expired = self.schedule_manager.check_expired_tasks()
+            if expired:
+                dlg = ExpiredTasksDialog(self, expired, self.schedule_manager)
+                dlg.exec_()
+                self._poll_scheduled_tasks()
+        except Exception as e:
+            logger.debug(f"[ScheduledPublish] 启动过期检查提示: {e}")
+
+    def _poll_scheduled_tasks(self):
+        # 6. 并发冲突: 触发时若正有发布在跑 -> 排队等当前发布结束
+        if getattr(self, "_is_scheduled_task_running", False) or (isinstance(getattr(self, "thread", None), QThread) and self.thread.isRunning()):
+            return
+
+        task = self.schedule_manager.get_next_ready_task()
+        if not task:
+            return
+
+        logger.info(f"[ScheduledPublish] 到点触发定时发布: {task.id} (标题: {task.snapshot.get('title')})")
+        self._execute_scheduled_task(task)
+
+    def _execute_scheduled_task(self, task):
+        self._is_scheduled_task_running = True
+        self._current_scheduled_task_id = task.id
+        self.schedule_manager.mark_running(task.id)
+        self.notify(f"⏱️ 正在执行定时发布任务: {task.snapshot.get('title', '未命名')}...", level="info")
+        self._start_publishing(scheduled_snapshot=task.snapshot)
+
 
 def main():
     app = QApplication(sys.argv)
@@ -6298,3 +6479,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def setup_dark_palette(app):
+    """根据 presets.json 中的外观配置初始化调色板与全局暗色样式"""
+    initial_cfg = load_config()
+    theme_name = initial_cfg.get("ui_theme", "pure_dark")
+    font_size = initial_cfg.get("ui_font_size", 13)
+    apply_app_appearance(app, theme_name=theme_name, font_size=font_size)
+
