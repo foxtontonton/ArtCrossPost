@@ -3866,6 +3866,28 @@ class MainWindow(QMainWindow):
         self.retry_btn.clicked.connect(self._retry_failed_publishing)
         exec_layout.addWidget(self.retry_btn)
 
+        # 发布结果面板 (P0-1: 每平台一行，失败行带单独重试按钮)
+        self.publish_results_panel = QFrame()
+        self.publish_results_panel.setObjectName("publishResultsPanel")
+        self.publish_results_panel.setStyleSheet("""
+            #publishResultsPanel {
+                background-color: #1a1a26;
+                border: 1px solid #374151;
+                border-radius: 8px;
+                padding: 10px;
+                margin-top: 8px;
+            }
+        """)
+        self.publish_results_layout = QVBoxLayout(self.publish_results_panel)
+        self.publish_results_layout.setContentsMargins(8, 8, 8, 8)
+        self.publish_results_layout.setSpacing(6)
+        self.publish_results_panel.hide()
+        exec_layout.addWidget(self.publish_results_panel)
+
+        self._platform_retry_buttons = {}
+        self._platform_result_labels = {}
+        self._last_publish_results = {}
+
         right_layout.addWidget(exec_group)
 
         # ==================== 嵌入式诊断报告面板 (需求四，绝对禁止 QMessageBox) ====================
@@ -5554,6 +5576,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "retry_btn"):
             self.retry_btn.hide()
         self._last_publish_payload = payload
+        self._last_publish_results = {}
+        if hasattr(self, "publish_results_panel"):
+            self.publish_results_panel.hide()
         self.progress_bar.setValue(0)
         self.notify(f"开始向已选中的 {len(selected)} 个平台分发作品...", level="info")
 
@@ -5567,15 +5592,191 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
         self.notify(text, level="info", auto_dismiss=False)
 
+    def _update_publish_results_panel(self, results: dict):
+        """P0-1: 刷新发布结果面板，每个平台一行，失败行带单独重试按钮"""
+        if not hasattr(self, "publish_results_layout"):
+            return
+
+        while self.publish_results_layout.count():
+            item = self.publish_results_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        self._platform_retry_buttons.clear()
+        self._platform_result_labels.clear()
+
+        if not results:
+            self.publish_results_panel.hide()
+            return
+
+        header_lbl = QLabel("<b>📊 分发结果面板</b>")
+        header_lbl.setStyleSheet("color: #e2e8f0; font-size: 13px; margin-bottom: 4px;")
+        self.publish_results_layout.addWidget(header_lbl)
+
+        for disp_name, v in results.items():
+            success = v[0] if isinstance(v, (tuple, list)) else bool(v)
+            msg = v[1] if isinstance(v, (tuple, list)) and len(v) > 1 else str(v)
+
+            disp = next((d for d in self.dispatchers if d.name == disp_name), None)
+            disp_title = disp.display_name if disp else disp_name
+
+            row_frame = QFrame()
+            row_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #111118;
+                    border: 1px solid #2d3748;
+                    border-radius: 6px;
+                    padding: 4px 8px;
+                }
+            """)
+            row_layout = QHBoxLayout(row_frame)
+            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setSpacing(10)
+
+            name_lbl = QLabel(f"<b>{disp_title}</b>")
+            name_lbl.setStyleSheet("color: #f1f5f9; min-width: 90px;")
+            row_layout.addWidget(name_lbl)
+
+            status_lbl = QLabel()
+            status_lbl.setWordWrap(True)
+            if success:
+                status_lbl.setText(f"<font color='#34d399'>● 成功</font> <span style='color:#9ca3af;'>({msg})</span>")
+            else:
+                status_lbl.setText(f"<font color='#f87171'>● 失败</font> <span style='color:#fca5a5;'>({msg})</span>")
+            row_layout.addWidget(status_lbl, stretch=1)
+            self._platform_result_labels[disp_name] = status_lbl
+
+            retry_btn = QPushButton("🔄 重试")
+            retry_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #d97706;
+                    color: #ffffff;
+                    font-weight: bold;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #b45309;
+                }
+                QPushButton:disabled {
+                    background-color: #374151;
+                    color: #9ca3af;
+                }
+            """)
+            retry_btn.clicked.connect(lambda checked=False, p=disp_name: self._retry_single_platform(p))
+            if success:
+                retry_btn.hide()
+            else:
+                retry_btn.show()
+
+            self._platform_retry_buttons[disp_name] = retry_btn
+            row_layout.addWidget(retry_btn)
+
+            self.publish_results_layout.addWidget(row_frame)
+
+        self.publish_results_panel.show()
+
+    def _retry_single_platform(self, platform_name: str):
+        """P0-1: 点击只重跑该失败平台，复用本次发布的渲染产物与文案快照 (不重新压水印/渲染)"""
+        if not getattr(self, "_last_publish_payload", None):
+            self.notify("未找到上次发布数据快照，无法重试", level="warning")
+            return
+
+        disp = next((d for d in self.dispatchers if d.name == platform_name), None)
+        if not disp:
+            self.notify(f"未找到对应平台分发器: {platform_name}", level="error")
+            return
+
+        if isinstance(getattr(self, "thread", None), QThread) and self.thread.isRunning():
+            self.notify("已有发布任务正在运行中，请稍候...", level="warning")
+            return
+
+        self.publish_btn.setEnabled(False)
+        btn = self._platform_retry_buttons.get(platform_name)
+        if btn:
+            btn.setEnabled(False)
+            btn.setText("重试中...")
+
+        self.status_label.setText(f"正在重试 {disp.display_name}...")
+        self.notify(f"正在单独重试平台 [{disp.display_name}]...", level="info")
+
+        self.thread = PublishThread([disp], self._last_publish_payload)
+        self.thread.progress_signal.connect(self._on_progress)
+        self.thread.completed_signal.connect(lambda res: self._on_single_platform_retry_completed(platform_name, res))
+        self.thread.start()
+
+    def _on_single_platform_retry_completed(self, platform_name: str, res: dict):
+        """P0-1: 单个平台重试结果回调"""
+        self.publish_btn.setEnabled(True)
+        if not res or platform_name not in res:
+            logger.warning(f"单个平台重试返回空结果: {res}")
+            return
+
+        val = res[platform_name]
+        success = val[0] if isinstance(val, (tuple, list)) else bool(val)
+        msg = val[1] if isinstance(val, (tuple, list)) and len(val) > 1 else str(val)
+
+        if not hasattr(self, "_last_publish_results"):
+            self._last_publish_results = {}
+        self._last_publish_results[platform_name] = val
+
+        disp = next((d for d in self.dispatchers if d.name == platform_name), None)
+        disp_title = disp.display_name if disp else platform_name
+
+        lbl = self._platform_result_labels.get(platform_name)
+        btn = self._platform_retry_buttons.get(platform_name)
+
+        if success:
+            if lbl:
+                lbl.setText(f"<font color='#34d399'>● 成功</font> <span style='color:#9ca3af;'>({msg})</span>")
+            if btn:
+                btn.hide()
+
+            if hasattr(self, "_last_failed_dispatchers"):
+                self._last_failed_dispatchers = [d for d in self._last_failed_dispatchers if d.name != platform_name]
+
+            all_ok = all(v[0] for v in self._last_publish_results.values())
+            if all_ok:
+                self._clear_draft()
+                if hasattr(self, "retry_btn"):
+                    self.retry_btn.hide()
+                self.notify(f"🎉 平台 [{disp_title}] 重试成功！所有平台均已发布完成", level="success")
+            else:
+                if hasattr(self, "retry_btn"):
+                    if self._last_failed_dispatchers:
+                        self.retry_btn.setText(f"🔄 重试所有失败项 ({len(self._last_failed_dispatchers)} 个平台)")
+                        self.retry_btn.show()
+                    else:
+                        self.retry_btn.hide()
+                self.notify(f"平台 [{disp_title}] 重试发布成功！", level="success")
+        else:
+            if lbl:
+                lbl.setText(f"<font color='#f87171'>● 失败</font> <span style='color:#fca5a5;'>({msg})</span>")
+            if btn:
+                btn.setEnabled(True)
+                btn.setText("🔄 重试")
+                btn.show()
+            self.notify(f"平台 [{disp_title}] 重试依然失败: {msg}", level="error")
+
     def _on_completed(self, results):
         self.publish_btn.setEnabled(True)
-        success_count = sum(1 for v in results.values() if v[0])
-        total_count = len(results)
+        if not hasattr(self, "_last_publish_results") or not self._last_publish_results:
+            self._last_publish_results = dict(results)
+        else:
+            self._last_publish_results.update(results)
+
+        if hasattr(self, "publish_results_panel"):
+            self._update_publish_results_panel(self._last_publish_results)
+
+        success_count = sum(1 for v in self._last_publish_results.values() if v[0])
+        total_count = len(self._last_publish_results)
 
         summary_rows = []
         unconfirmed_warnings = []
 
-        for k, v in results.items():
+        for k, v in self._last_publish_results.items():
             success = v[0]
             msg = v[1]
             compliance = v[2] if len(v) > 2 else []
@@ -5609,10 +5810,10 @@ class MainWindow(QMainWindow):
             if hasattr(self, "retry_btn"):
                 self.retry_btn.hide()
         else:
-            failed_keys = [k for k, v in results.items() if not v[0]]
+            failed_keys = [k for k, v in self._last_publish_results.items() if not v[0]]
             self._last_failed_dispatchers = [d for d in self.dispatchers if d.name in failed_keys]
             if hasattr(self, "retry_btn") and self._last_failed_dispatchers:
-                self.retry_btn.setText(f"🔄 重试失败项 ({len(self._last_failed_dispatchers)} 个平台)")
+                self.retry_btn.setText(f"🔄 重试所有失败项 ({len(self._last_failed_dispatchers)} 个平台)")
                 self.retry_btn.show()
 
         msg_level = "success" if all_ok else ("warning" if success_count > 0 else "error")
