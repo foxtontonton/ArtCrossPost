@@ -214,7 +214,8 @@ class TestMainWindowScheduleIntegration:
     """测试 MainWindow 与定时发布机制的集成交互"""
 
     @pytest.fixture
-    def window(self, tmp_path, qapp):
+    def window(self, tmp_path, qapp, monkeypatch):
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
         img_p = tmp_path / "art.jpg"
         im = Image.new("RGB", (200, 200), color=(100, 150, 200))
         im.save(img_p, "JPEG")
@@ -227,7 +228,10 @@ class TestMainWindowScheduleIntegration:
             win.schedule_manager = ScheduleManager(storage_path=tmp_path / "scheduled_posts.json")
             if hasattr(win, "_schedule_poll_timer"):
                 win._schedule_poll_timer.stop()
-            return win
+            yield win
+            for t_attr in ("_draft_save_timer", "_layout_save_timer", "_config_save_timer", "_preview_timer", "x_counter_timer", "_schedule_poll_timer"):
+                if hasattr(win, t_attr) and getattr(win, t_attr).isActive():
+                    getattr(win, t_attr).stop()
 
     def test_capture_current_post_snapshot(self, window):
         window.title_input.setText("Anime Goddess")

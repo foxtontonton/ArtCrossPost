@@ -4,6 +4,8 @@ Tests for P0-1: 失败平台单独重试 (Individual Platform Retry)
 """
 import sys
 from unittest.mock import MagicMock, patch
+if "onnxruntime" not in sys.modules:
+    sys.modules["onnxruntime"] = MagicMock()
 import pytest
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QThread
@@ -20,11 +22,11 @@ def qapp():
 @pytest.fixture
 def mock_main_window(tmp_path, qapp, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
-    monkeypatch.setitem(sys.modules, "onnxruntime", MagicMock())
 
     from app import MainWindow
 
-    win = MainWindow()
+    with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
+        win = MainWindow()
 
     win.notify = MagicMock()
     win._clear_draft = MagicMock()

@@ -4,7 +4,9 @@ Tests for P0-2: Ko-fi 移出发布列表 (Hide Ko-fi from Publish List by Defaul
 """
 import sys
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+if "onnxruntime" not in sys.modules:
+    sys.modules["onnxruntime"] = MagicMock()
 import pytest
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QThread
@@ -21,24 +23,23 @@ def qapp():
 @pytest.fixture
 def mock_main_window(tmp_path, qapp, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
-    monkeypatch.setitem(sys.modules, "onnxruntime", MagicMock())
 
     from app import MainWindow
 
-    win = MainWindow()
-    win.data_dir = tmp_path
-    win.notify = MagicMock()
+    with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
+        win = MainWindow()
+        win.data_dir = tmp_path
+        win.notify = MagicMock()
 
-    yield win
+        yield win
 
-    # Cleanup timers to avoid crash on teardown
-    if hasattr(win, "_draft_save_timer") and win._draft_save_timer.isActive():
-        win._draft_save_timer.stop()
-    if hasattr(win, "_layout_save_timer") and win._layout_save_timer.isActive():
-        win._layout_save_timer.stop()
-    if hasattr(win, "thread") and isinstance(win.thread, QThread) and win.thread.isRunning():
-        win.thread.quit()
-        win.thread.wait()
+        # Cleanup timers to avoid crash on teardown
+        for t_attr in ("_draft_save_timer", "_layout_save_timer", "_config_save_timer", "_preview_timer", "x_counter_timer", "_schedule_poll_timer"):
+            if hasattr(win, t_attr) and getattr(win, t_attr).isActive():
+                getattr(win, t_attr).stop()
+        if hasattr(win, "thread") and isinstance(win.thread, QThread) and win.thread.isRunning():
+            win.thread.quit()
+            win.thread.wait()
 
 
 class TestHideKofi:
