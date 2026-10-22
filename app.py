@@ -3427,10 +3427,16 @@ class MainWindow(QMainWindow):
         media_layout.setSpacing(6)
 
         btn_row = QHBoxLayout()
-        add_img_btn = QPushButton("📁 导入作品图片")
+        add_img_btn = QPushButton("🖼️ 导入作品图片")
         add_img_btn.setObjectName("accentBtn")
         add_img_btn.clicked.connect(self._select_images)
         btn_row.addWidget(add_img_btn)
+
+        import_folder_btn = QPushButton("📂 导入文件夹")
+        import_folder_btn.setObjectName("secondaryBtn")
+        import_folder_btn.setToolTip("按同前缀、序号与章节规则自动识别分组为多套作品")
+        import_folder_btn.clicked.connect(self._import_folder_with_auto_group)
+        btn_row.addWidget(import_folder_btn)
 
         clear_img_btn = QPushButton("清空图片")
         clear_img_btn.setObjectName("secondaryBtn")
@@ -5066,6 +5072,38 @@ class MainWindow(QMainWindow):
         if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
             self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
         self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
+
+    def _import_folder_with_auto_group(self, folder_dir: str = None):
+        """P2-2: 导入文件夹并按文件名规则自动分组为多套作品，弹窗微调后载入草稿箱"""
+        from auto_grouper import scan_and_group_folder
+        from auto_group_dialog import AutoGroupReviewDialog
+
+        if not folder_dir:
+            folder_dir = QFileDialog.getExistingDirectory(self, "选择包含作品图片的文件夹", "")
+            if not folder_dir:
+                return
+
+        groups = scan_and_group_folder(folder_dir)
+        if not groups:
+            self.notify("⚠️ 所选文件夹中未找到支持的图片素材", level="warning")
+            return
+
+        dlg = AutoGroupReviewDialog(groups, self.data_dir, parent=self)
+        if dlg.exec_() == QDialog.Accepted and dlg.confirmed_groups:
+            total_groups = len(dlg.confirmed_groups)
+            total_images = sum(len(imgs) for imgs in dlg.confirmed_groups.values())
+            self.notify(f"🎉 成功识别并载入 {total_groups} 套作品（共 {total_images} 张素材）到草稿箱！", level="success")
+
+            first_title, first_imgs = next(iter(dlg.confirmed_groups.items()))
+            if not self.title_input.text().strip():
+                self.title_input.setText(first_title)
+
+            self.image_paths = list(first_imgs)
+            self.current_preview_index = 0
+            self._sync_img_list_widget()
+            self._refresh_thumbnail_gallery()
+            self._schedule_preview_refresh(instant=True)
+            self.notify(f"已将首套作品 [{first_title}] 载入当前编辑区", level="info")
 
     def _start_publishing(self):
         if not self.image_paths:
