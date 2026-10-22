@@ -2726,6 +2726,8 @@ class SettingsDialog(QDialog):
         self.account_row_widgets = {}
 
         for disp in self.dispatchers:
+            if disp.name == "kofi" and not self.config.get("platform_kofi_enabled", False):
+                continue
             card = QFrame()
             card.setStyleSheet("""
                 QFrame {
@@ -2990,8 +2992,29 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(da_vbox)
 
+        # 4. Ko-fi 平台发布开关 (P0-2)
+        layout.addWidget(self._create_separator())
+        kofi_box = QVBoxLayout()
+        kofi_box.setSpacing(6)
+        self.kofi_enable_check = QCheckBox("启用 Ko-fi 赞助平台发布 (实验性)")
+        self.kofi_enable_check.setStyleSheet("font-weight: 600; color: #d1d5db;")
+        self.kofi_enable_check.setChecked(self.config.get("platform_kofi_enabled", False))
+        kofi_enable_desc = QLabel("开启后将在主界面发布平台列表中显示 Ko-fi 发布选项与打码配置 (默认隐藏关闭)。")
+        kofi_enable_desc.setStyleSheet("color: #9ca3af;")
+        kofi_box.addWidget(self.kofi_enable_check)
+        kofi_box.addWidget(kofi_enable_desc)
+        self.kofi_enable_check.stateChanged.connect(self._on_kofi_enabled_changed)
+        layout.addLayout(kofi_box)
+
         layout.addStretch()
         return self._wrap_in_scroll(content)
+
+    def _on_kofi_enabled_changed(self, state):
+        self.config["platform_kofi_enabled"] = bool(state)
+        if self.main_window and hasattr(self.main_window, "_refresh_platform_cards"):
+            self.main_window.config["platform_kofi_enabled"] = bool(state)
+            self.main_window._refresh_platform_cards()
+        self._notify_saved()
 
     def _adjust_sig_edit_height(self):
         if not hasattr(self, "sig_edit"):
@@ -3158,10 +3181,12 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.debug(f"清理空草稿文件异常: {e}")
             return
+        selected_plats = [name for name, ctrl in self.platform_controls.items() if ctrl["checkbox"].isChecked()] if hasattr(self, "platform_controls") else []
         data = {
             "title": self.title_input.text(),
             "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
             "description": self.desc_input.toPlainText(),
+            "selected_platforms": selected_plats,
             "updated_at": datetime.now().isoformat()
         }
         try:
@@ -3172,7 +3197,7 @@ class MainWindow(QMainWindow):
             logger.warning(f"草稿自动保存失败: {e}")
 
     def _load_draft(self):
-        """P1-6: 启动时自动恢复上次草稿"""
+        """P1-6 / P0-2: 启动时自动恢复上次草稿，自动忽略已禁用的平台 (如 Ko-fi)"""
         draft_file = self.data_dir / "draft.json"
         if not draft_file.exists():
             return
@@ -3191,6 +3216,16 @@ class MainWindow(QMainWindow):
                     self.tags_input.setText(tags)
             if desc and hasattr(self, "desc_input"):
                 self.desc_input.setPlainText(desc)
+
+            saved_plats = data.get("selected_platforms") or data.get("platforms")
+            if saved_plats is not None and hasattr(self, "platform_controls"):
+                kofi_enabled = self.config.get("platform_kofi_enabled", False)
+                for name, ctrl in self.platform_controls.items():
+                    if name == "kofi" and not kofi_enabled:
+                        ctrl["checkbox"].setChecked(False)
+                        continue
+                    ctrl["checkbox"].setChecked(name in saved_plats)
+
             if t or tags or desc:
                 self.notify("📝 已恢复上次未发布的草稿内容", level="info")
                 logger.info("已成功恢复上次草稿内容")
@@ -4014,12 +4049,10 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(12)
 
         plat_group = QGroupBox("4. 目标平台发布配置 (点击⚙️管理账号)")
-        plat_layout = QVBoxLayout(plat_group)
+        self.plat_layout = QVBoxLayout(plat_group)
 
         self.platform_controls = {}
-        for disp in self.dispatchers:
-            card = self._create_platform_card(disp)
-            plat_layout.addWidget(card)
+        self._refresh_platform_cards()
 
         right_layout.addWidget(plat_group)
 
@@ -4209,6 +4242,25 @@ class MainWindow(QMainWindow):
         # 初始化 X 字符统计状态
         self._update_x_char_counter()
 
+    def _refresh_platform_cards(self):
+        """P0-2: 根据 platform_kofi_enabled 等配置动态生成平台卡片列表"""
+        if not hasattr(self, "plat_layout"):
+            return
+
+        while self.plat_layout.count():
+            item = self.plat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self.platform_controls = {}
+        kofi_enabled = self.config.get("platform_kofi_enabled", False)
+
+        for disp in self.dispatchers:
+            if disp.name == "kofi" and not kofi_enabled:
+                continue
+            card = self._create_platform_card(disp)
+            self.plat_layout.addWidget(card)
+
     def _create_platform_card(self, disp):
         card = QFrame()
         card.setStyleSheet("background-color: #181822; border: 1px solid #2e2e3e; border-radius: 8px; margin-bottom: 6px; padding: 6px;")
@@ -4223,7 +4275,10 @@ class MainWindow(QMainWindow):
 
         cb = QCheckBox(disp.display_name)
         selected_plats = self.config.get("selected_platforms", ["x_twitter", "deviantart"])
-        cb.setChecked(disp.name in selected_plats)
+        if disp.name == "kofi" and not self.config.get("platform_kofi_enabled", False):
+            cb.setChecked(False)
+        else:
+            cb.setChecked(disp.name in selected_plats)
         cb.setStyleSheet("font-weight: bold;")
         cb.stateChanged.connect(lambda: self._schedule_config_save())
         header.addWidget(cb)
