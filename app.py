@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QPushButton, QCheckBox, QComboBox,
     QFileDialog, QListWidget, QGroupBox, QSplitter,
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
-    QTextBrowser, QDialog, QTabWidget, QSpinBox
+    QTextBrowser, QDialog, QTabWidget, QSpinBox, QPlainTextEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
@@ -44,7 +44,7 @@ from config import load_config, save_config, load_window_state, save_window_stat
 from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
-from x_text_utils import calculate_x_char_count, format_x_full_text
+from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_teaser_post
 
 
 class NoWheelEventFilter(QObject):
@@ -3361,6 +3361,7 @@ class MainWindow(QMainWindow):
         self.tags_input.setPlaceholderText("通用标签 (输入空格、逗号或回车自动识别添加逗号，支持 # 识别)...")
         self.tags_input.setMinimumHeight(70)
         self.tags_input.textChanged.connect(self._update_x_char_counter)
+        self.tags_input.textChanged.connect(self._update_x_text_preview)
         tags_layout.addWidget(self.tags_input)
         meta_layout.addLayout(tags_layout)
 
@@ -3416,6 +3417,8 @@ class MainWindow(QMainWindow):
 
         self.title_input.textChanged.connect(lambda: self.x_counter_timer.start())
         self.desc_input.textChanged.connect(lambda: self.x_counter_timer.start())
+        self.title_input.textChanged.connect(self._update_x_text_preview)
+        self.desc_input.textChanged.connect(self._update_x_text_preview)
         self.title_input.textChanged.connect(lambda: self._draft_save_timer.start())
         self.tags_input.textChanged.connect(lambda: self._draft_save_timer.start())
         self.desc_input.textChanged.connect(lambda: self._draft_save_timer.start())
@@ -3742,7 +3745,39 @@ class MainWindow(QMainWindow):
         self.thumbnail_gallery = ThumbnailGalleryWidget(self)
         preview_vlayout.addWidget(self.thumbnail_gallery)
 
-        center_layout.addWidget(preview_group)
+        # 中间区域使用 Tab 切换：图像合成预览 vs X (Twitter) 推文实时文案预览 (P1-1)
+        self.center_tabs = QTabWidget()
+        self.center_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2e2e3e;
+                background-color: #121218;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background: #181822;
+                color: #9ca3af;
+                padding: 8px 16px;
+                font-weight: bold;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #2563eb;
+                color: #ffffff;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #222230;
+                color: #e2e8f0;
+            }
+        """)
+        self.center_tabs.addTab(preview_group, "🖼️ 综合效果图预览")
+
+        # X 文案实时预览面板 (P1-1)
+        self.x_preview_tab = self._build_x_text_preview_tab()
+        self.center_tabs.addTab(self.x_preview_tab, "🐦 X (Twitter) 推文预览")
+
+        center_layout.addWidget(self.center_tabs)
         self.main_splitter.addWidget(center_widget)
 
         # ==================== 第 3 栏 (右侧)：目标平台矩阵与发布控制 ====================
@@ -3947,8 +3982,132 @@ class MainWindow(QMainWindow):
             self.log_drawer.viewport().setObjectName("log_drawer_viewport")
         root_vlayout.addWidget(self.notification_bar)
 
-        # 初始化 X 字符统计状态
+        # 初始化 X 字符统计与推文文案预览
         self._update_x_char_counter()
+        self._update_x_text_preview()
+
+    def _build_x_text_preview_tab(self):
+        """P1-1: 构建 X (Twitter) 文案实时预览面板"""
+        panel = QFrame()
+        panel.setObjectName("x_preview_panel")
+        panel.setStyleSheet("background-color: #121218; border-radius: 8px;")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 14, 12, 12)
+        layout.setSpacing(10)
+
+        # 头部说明与复制按钮
+        header_row = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        header_title = QLabel("🐦 <b>X (Twitter) 实时发帖文案预览</b>")
+        header_title.setStyleSheet("color: #60a5fa; font-size: 14px;")
+        header_sub = QLabel("严格按官方加权与方案 B (预告 + DA引流 + 标签) 渲染，与实际发送内容 100% 同步")
+        header_sub.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        title_box.addWidget(header_title)
+        title_box.addWidget(header_sub)
+        header_row.addLayout(title_box, 1)
+
+        copy_btn = QPushButton("📋 复制文案")
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+        """)
+        copy_btn.clicked.connect(self._copy_x_preview_text)
+        header_row.addWidget(copy_btn)
+        layout.addLayout(header_row)
+
+        # 推文模拟展示文本框
+        self.x_preview_text_edit = QPlainTextEdit()
+        self.x_preview_text_edit.setReadOnly(True)
+        self.x_preview_text_edit.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0b0e14;
+                color: #e2e8f0;
+                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+                font-size: 14px;
+                line-height: 1.5;
+                padding: 12px;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+            }
+        """)
+        layout.addWidget(self.x_preview_text_edit, 1)
+
+        # 底部状态栏与加权字数统计
+        footer_row = QHBoxLayout()
+        self.x_preview_status_lbl = QLabel("● 预告排版就绪")
+        self.x_preview_status_lbl.setStyleSheet("color: #34d399; font-weight: 500;")
+        footer_row.addWidget(self.x_preview_status_lbl, 1)
+
+        self.x_preview_counter_lbl = QLabel("加权字数: <b>0/280</b>")
+        self.x_preview_counter_lbl.setStyleSheet("color: #38bdf8; font-size: 13px; font-weight: bold;")
+        footer_row.addWidget(self.x_preview_counter_lbl)
+        layout.addLayout(footer_row)
+
+        return panel
+
+    def _copy_x_preview_text(self):
+        text = self.x_preview_text_edit.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+            self.notify("📋 已成功复制 X 推文预览文案到剪贴板", level="success")
+        else:
+            self.notify("⚠️ 当前预览文案为空", level="warning")
+
+    def _update_x_text_preview(self):
+        """P1-1: 标题/描述/标签任一变化即实时刷新，内容必须调用与实际发送同一个 format_x_teaser_post，禁止另写一套预览逻辑"""
+        if not hasattr(self, "x_preview_text_edit"):
+            return
+
+        title = self.title_input.text().strip() if hasattr(self, "title_input") else ""
+        desc = self.desc_input.toPlainText().strip() if hasattr(self, "desc_input") else ""
+        tags = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+        limit = self._get_x_char_limit()
+
+        da_link = None
+        nsfw_notice = None
+        if hasattr(self, "config") and "defaults" in self.config:
+            da_link = self.config["defaults"].get("x_da_link")
+            nsfw_notice = self.config["defaults"].get("x_nsfw_notice")
+
+        # 核心红线：内容必须调用与实际发送同一个 format_x_teaser_post，禁止另写一套预览逻辑
+        preview_text = format_x_teaser_post(
+            title=title,
+            desc=desc,
+            tags=tags,
+            da_link=da_link,
+            nsfw_notice=nsfw_notice,
+            limit=limit
+        )
+
+        self.x_preview_text_edit.setPlainText(preview_text)
+
+        count = calculate_x_char_count(preview_text)
+        ratio = count / max(1, limit)
+
+        if count > limit:
+            color = "#ef4444"
+            status_text = f"<font color='#ef4444'>⚠️ 超出限制 (超 {count - limit} 字)</font>"
+        elif ratio >= 0.9:
+            color = "#fbbf24"
+            status_text = "<font color='#fbbf24'>● 接近推文长度上限</font>"
+        else:
+            color = "#34d399"
+            status_text = "<font color='#34d399'>● 预告排版就绪，在限制内</font>"
+
+        if hasattr(self, "x_preview_counter_lbl"):
+            self.x_preview_counter_lbl.setText(f"加权字数: <font color='{color}'><b>{count}/{limit}</b></font>")
+        if hasattr(self, "x_preview_status_lbl"):
+            self.x_preview_status_lbl.setText(status_text)
 
     def _create_platform_card(self, disp):
         card = QFrame()
@@ -4387,6 +4546,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "x_limit_confirm_widget") and self.x_limit_confirm_widget.isVisible() and count <= limit:
             self.x_limit_confirm_widget.hide()
             self.publish_btn.setEnabled(True)
+
+        self._update_x_text_preview()
 
     def _on_x_premium_toggled(self, state):
         if getattr(self, "_is_restoring_config", False):
