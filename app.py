@@ -3009,6 +3009,54 @@ class SettingsDialog(QDialog):
         self.kofi_enable_check.stateChanged.connect(self._on_kofi_enabled_changed)
         layout.addLayout(kofi_box)
 
+        # 5. 数据备份与恢复 (P2-1)
+        layout.addWidget(self._create_separator())
+        backup_header = self._create_section_header("数据备份与恢复", "导出或导入应用配置、草稿箱、各平台登录凭据、定时任务及发布历史")
+        layout.addLayout(backup_header)
+
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(10)
+
+        export_data_btn = QPushButton("📦 导出全部数据 (.zip)")
+        export_data_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2563eb;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 6px 14px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
+        """)
+        export_data_btn.clicked.connect(self._on_export_data_clicked)
+        btn_box.addWidget(export_data_btn)
+
+        import_data_btn = QPushButton("📥 导入数据恢复 (.zip)")
+        import_data_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #374151;
+                color: #e2e8f0;
+                font-weight: bold;
+                padding: 6px 14px;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #4b5563;
+            }
+        """)
+        import_data_btn.clicked.connect(self._on_import_data_clicked)
+        btn_box.addWidget(import_data_btn)
+        btn_box.addStretch()
+
+        layout.addLayout(btn_box)
+
+        warn_desc = QLabel("⚠️ 注意：导出的压缩包中包含平台登录态凭证，请妥善保管，切勿泄露给他人。导入覆盖前会自动创建时间戳安全备份。")
+        warn_desc.setStyleSheet("color: #fbbf24; font-size: 11px;")
+        warn_desc.setWordWrap(True)
+        layout.addWidget(warn_desc)
+
         layout.addStretch()
         return self._wrap_in_scroll(content)
 
@@ -3018,6 +3066,37 @@ class SettingsDialog(QDialog):
             self.main_window.config["platform_kofi_enabled"] = bool(state)
             self.main_window._refresh_platform_cards()
         self._notify_saved()
+
+    def _on_export_data_clicked(self):
+        from data_transfer import export_user_data
+        default_name = f"ArtCrossPost_Backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        save_path, _ = QFileDialog.getSaveFileName(self, "导出全部数据 (包含登录凭证，请妥善保管)", default_name, "ZIP 压缩包 (*.zip)")
+        if save_path:
+            try:
+                data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+                export_user_data(data_dir, save_path)
+                if self.main_window:
+                    self.main_window.notify(f"📦 数据已成功导出至 {Path(save_path).name}（包含登录凭证，请妥善保管）", level="success")
+            except Exception as e:
+                if self.main_window:
+                    self.main_window.notify(f"导出数据失败: {e}", level="error")
+
+    def _on_import_data_clicked(self):
+        from data_transfer import import_user_data
+        zip_path, _ = QFileDialog.getOpenFileName(self, "选择恢复数据包 (.zip)", "", "ZIP 压缩包 (*.zip)")
+        if zip_path:
+            data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+            success, msg, backup_dir = import_user_data(zip_path, data_dir)
+            if success:
+                b_name = backup_dir.name if backup_dir else "data_backup"
+                if self.main_window:
+                    self.main_window.notify(f"🎉 数据恢复成功！现有数据已安全备份至 {b_name}", level="success")
+                    if hasattr(self.main_window, "_load_draft"):
+                        self.main_window._load_draft()
+                self.accept()
+            else:
+                if self.main_window:
+                    self.main_window.notify(f"导入数据失败: {msg}", level="error")
 
     def _adjust_sig_edit_height(self):
         if not hasattr(self, "sig_edit"):
@@ -3259,6 +3338,35 @@ class MainWindow(QMainWindow):
                 logger.info("发布成功，已清理草稿文件")
             except Exception as e:
                 logger.warning(f"清理草稿文件失败: {e}")
+
+    def _export_all_data(self, target_zip_path: str = None) -> Path | None:
+        """P2-1: 导出全部数据"""
+        from data_transfer import export_user_data
+        if not target_zip_path:
+            default_name = f"ArtCrossPost_Backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            target_zip_path, _ = QFileDialog.getSaveFileName(self, "导出全部数据 (包含登录凭证，请妥善保管)", default_name, "ZIP 压缩包 (*.zip)")
+            if not target_zip_path:
+                return None
+        res_path = export_user_data(self.data_dir, target_zip_path)
+        self.notify(f"📦 数据已成功导出至 {Path(target_zip_path).name}（包含登录凭证，请妥善保管）", level="success")
+        return res_path
+
+    def _import_all_data(self, zip_path: str = None) -> tuple[bool, str, Path | None]:
+        """P2-1: 导入数据并安全备份"""
+        from data_transfer import import_user_data
+        if not zip_path:
+            zip_path, _ = QFileDialog.getOpenFileName(self, "选择恢复数据包 (.zip)", "", "ZIP 压缩包 (*.zip)")
+            if not zip_path:
+                return False, "用户取消", None
+        success, msg, backup_dir = import_user_data(zip_path, self.data_dir)
+        if success:
+            b_name = backup_dir.name if backup_dir else "data_backup"
+            self.notify(f"🎉 数据恢复成功！现有数据已安全备份至 {b_name}", level="success")
+            if hasattr(self, "_load_draft"):
+                self._load_draft()
+        else:
+            self.notify(f"导入数据失败: {msg}", level="error")
+        return success, msg, backup_dir
 
     def _retry_failed_publishing(self):
         """P1-7: 手动重试上次失败的平台"""
