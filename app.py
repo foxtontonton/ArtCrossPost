@@ -1076,6 +1076,7 @@ class ThumbnailCardWidget(QFrame):
         self.setFixedWidth(118)
         self.setFixedHeight(136)
         self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptDrops(True)
 
         is_active = (idx == getattr(main_window, "current_preview_index", 0))
         bg_color = "#1e1e2d" if is_active else "#14141e"
@@ -1098,6 +1099,7 @@ class ThumbnailCardWidget(QFrame):
 
         order_lbl = QLabel(f"#{idx + 1}")
         order_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; font-size: 10px; border: none; background: transparent;")
+        order_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         top_row.addWidget(order_lbl)
         top_row.addStretch()
 
@@ -1131,14 +1133,14 @@ class ThumbnailCardWidget(QFrame):
         left_btn.setStyleSheet(btn_style)
         left_btn.setEnabled(idx > 0)
         left_btn.setToolTip("向左移动 (提前排序)")
-        left_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i - 1))
+        left_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.reorder_images(i, i - 1))
         top_row.addWidget(left_btn)
 
         right_btn = QPushButton("▶")
         right_btn.setStyleSheet(btn_style)
         right_btn.setEnabled(idx < total_count - 1)
         right_btn.setToolTip("向右移动 (后置排序)")
-        right_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.move_image(i, i + 1))
+        right_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.reorder_images(i, i + 1))
         top_row.addWidget(right_btn)
 
         del_btn = QPushButton("✕")
@@ -1154,6 +1156,7 @@ class ThumbnailCardWidget(QFrame):
         self.img_lbl.setAlignment(Qt.AlignCenter)
         self.img_lbl.setFixedHeight(70)
         self.img_lbl.setStyleSheet("border: none; background-color: #0b0b10; border-radius: 4px;")
+        self.img_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         pix = self.main_window._get_cached_thumbnail(self.img_path)
         if pix and not pix.isNull():
@@ -1191,6 +1194,17 @@ class ThumbnailCardWidget(QFrame):
 
         layout.addLayout(bot_row)
 
+    def update_active_state(self, is_active: bool):
+        """轻量级更新选中态高亮，无需重建整个卡片控件"""
+        bg_color = "#1e1e2d" if is_active else "#14141e"
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {bg_color};
+                border: {'2px solid #6366f1' if is_active else '1px solid #2e2e40'};
+                border-radius: 6px;
+            }}
+        """)
+
     def _on_x_check_changed(self, state):
         checked = (state == Qt.Checked)
         if checked:
@@ -1208,8 +1222,15 @@ class ThumbnailCardWidget(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_pos = event.pos()
-            self.main_window.select_preview_image(self.idx)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.drag_start_pos is not None:
+                # 纯点击且未触发拖拽：切换大图预览
+                self.main_window.select_preview_image(self.idx)
+            self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton and self.drag_start_pos is not None:
@@ -1218,21 +1239,94 @@ class ThumbnailCardWidget(QFrame):
                 mime = QMimeData()
                 mime.setText(str(self.idx))
                 drag.setMimeData(mime)
-                pix = self.img_lbl.pixmap()
-                if pix and not pix.isNull():
-                    drag.setPixmap(pix)
-                    drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
-                drag.exec_(Qt.MoveAction)
+
+                # 拖拽视觉反馈: 卡片半透明跟随渲染 (0.65 不透明度)
+                card_pix = self.grab()
+                if card_pix and not card_pix.isNull():
+                    trans_pix = QPixmap(card_pix.size())
+                    trans_pix.fill(Qt.transparent)
+                    painter = QPainter(trans_pix)
+                    painter.setOpacity(0.65)
+                    painter.drawPixmap(0, 0, card_pix)
+                    painter.end()
+                    drag.setPixmap(trans_pix)
+                    drag.setHotSpot(self.drag_start_pos)
+                else:
+                    pix = self.img_lbl.pixmap()
+                    if pix and not pix.isNull():
+                        drag.setPixmap(pix)
+                        drag.setHotSpot(QPoint(pix.width() // 2, pix.height() // 2))
+
+                try:
+                    drag.exec_(Qt.MoveAction)
+                finally:
+                    if hasattr(self.main_window, "thumbnail_gallery"):
+                        self.main_window.thumbnail_gallery._hide_insertion_indicator()
                 self.drag_start_pos = None
                 return
         super().mouseMoveEvent(event)
+
+    def dragEnterEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.dragEnterEvent(event)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.handle_drag_move_from_widget(self, event.pos(), event)
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if hasattr(self.main_window, "thumbnail_gallery"):
+            self.main_window.thumbnail_gallery.handle_drop_from_widget(self, event.pos(), event)
+        else:
+            event.ignore()
+
+
+class InsertionIndicatorWidget(QWidget):
+    """
+    缩略图画廊拖拽插入位置指示符 (竖线插入符):
+    - 高对比度强调色竖线 (#818cf8 / #6366f1)
+    - 顶部与底部指示圆点，视觉清晰醒目
+    - 鼠标事件穿透 (WA_TransparentForMouseEvents)，不干扰拖拽响应
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setFixedWidth(8)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 竖线: 宽度 3px，高对比度主题色 #818cf8
+        pen = QPen(QColor("#818cf8"), 3)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+
+        mid_x = self.width() // 2
+        top_y = 6
+        bot_y = self.height() - 6
+        painter.drawLine(mid_x, top_y, mid_x, bot_y)
+
+        # 顶部与底部高亮圆点
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#a5b4fc")))
+        painter.drawEllipse(QPoint(mid_x, top_y), 3, 3)
+        painter.drawEllipse(QPoint(mid_x, bot_y), 3, 3)
+        painter.end()
 
 
 class ThumbnailGalleryWidget(QScrollArea):
     """
     中央预览区底部多图缩略图画廊滚动容器:
     - 横向平铺展示全部素材卡片
-    - 支持整栏拖拽排序与快速点选
+    - 支持整栏鼠标拖拽重排与快速点选
+    - 拖拽过程中显示竖线插入符与半透明卡片预览
     """
     def __init__(self, main_window):
         super().__init__()
@@ -1253,11 +1347,180 @@ class ThumbnailGalleryWidget(QScrollArea):
 
         self.container = QWidget()
         self.container.setStyleSheet("background-color: transparent;")
+        self.container.setAcceptDrops(True)
         self.hlayout = QHBoxLayout(self.container)
         self.hlayout.setContentsMargins(6, 4, 6, 4)
         self.hlayout.setSpacing(6)
         self.hlayout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.setWidget(self.container)
+
+        self.viewport().setAcceptDrops(True)
+        self.viewport().installEventFilter(self)
+        self.container.installEventFilter(self)
+
+        # 拖拽插入位置指示符 (作为视口浮层子控件，不影响内部布局与拖拽事件)
+        self.indicator = InsertionIndicatorWidget(self.viewport())
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, "container") and obj in (self.viewport(), self.container):
+            if event.type() == QEvent.DragEnter:
+                self.dragEnterEvent(event)
+                return True
+            elif event.type() == QEvent.DragMove:
+                self.handle_drag_move_from_widget(obj, event.pos(), event)
+                return True
+            elif event.type() == QEvent.DragLeave:
+                self.dragLeaveEvent(event)
+                return True
+            elif event.type() == QEvent.Drop:
+                self.handle_drop_from_widget(obj, event.pos(), event)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _get_card_geometry(self, i: int):
+        """获取第 i 张卡片的实际或理论几何尺寸 (x, width)"""
+        card = self.cards[i]
+        cw = card.width() if card.width() > 0 else 118
+        if i > 0 and card.x() == 0:
+            cx = 6 + i * (cw + self.hlayout.spacing())
+        else:
+            cx = card.x()
+        return cx, cw
+
+    def _get_container_x_from_widget_pos(self, obj, pos: QPoint) -> int:
+        """从任意子控件坐标安全换算至 self.container 内部水平坐标 X"""
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        if obj is self.container:
+            return pos.x()
+        if hasattr(obj, "idx") and isinstance(getattr(obj, "idx", None), int):
+            cx, _ = self._get_card_geometry(obj.idx)
+            return cx + pos.x()
+        if hasattr(self, "viewport") and obj is self.viewport():
+            return pos.x() + h_scroll
+        if hasattr(obj, "x"):
+            return obj.x() + pos.x()
+        return pos.x()
+
+    def _get_viewport_x_from_widget_pos(self, obj, pos: QPoint) -> int:
+        """换算至 self.viewport() 内部水平坐标 X"""
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        if hasattr(self, "viewport") and obj is self.viewport():
+            return pos.x()
+        container_x = self._get_container_x_from_widget_pos(obj, pos)
+        return container_x - h_scroll
+
+    def _calculate_insertion_slot_from_container_x(self, container_x: int) -> int:
+        if not self.cards:
+            return 0
+        slot = len(self.cards)
+        for i in range(len(self.cards)):
+            card_x, card_w = self._get_card_geometry(i)
+            card_mid_x = card_x + (card_w // 2)
+            if container_x < card_mid_x:
+                slot = i
+                break
+        return slot
+
+    def _calculate_insertion_slot(self, pos: QPoint) -> int:
+        """从视口或局部坐标计算槽位"""
+        cx = self._get_container_x_from_widget_pos(self.viewport(), pos)
+        return self._calculate_insertion_slot_from_container_x(cx)
+
+    def _calculate_insertion_slot_from_global(self, global_pos: QPoint) -> int:
+        if hasattr(self, "container"):
+            try:
+                c_pt = self.container.mapFromGlobal(global_pos)
+                return self._calculate_insertion_slot_from_container_x(c_pt.x())
+            except Exception:
+                pass
+        return 0
+
+    def _update_insertion_indicator_at_slot(self, slot: int):
+        if not self.cards:
+            self._hide_insertion_indicator()
+            return
+
+        if slot == 0:
+            c0_x, _ = self._get_card_geometry(0)
+            line_x = max(2, c0_x - 3)
+        elif slot < len(self.cards):
+            p_x, p_w = self._get_card_geometry(slot - 1)
+            c_x, _ = self._get_card_geometry(slot)
+            line_x = (p_x + p_w + c_x) // 2
+        else:
+            last_x, last_w = self._get_card_geometry(len(self.cards) - 1)
+            line_x = last_x + last_w + 3
+
+        h_scroll = self.horizontalScrollBar().value() if hasattr(self, "horizontalScrollBar") else 0
+        vx = line_x - h_scroll
+
+        vp_h = self.viewport().height() if hasattr(self, "viewport") else 150
+        top_y = 6
+        ind_h = max(30, vp_h - 12)
+
+        self.indicator.setGeometry(vx - 4, top_y, 8, ind_h)
+        self.indicator.show()
+        self.indicator.raise_()
+
+    def _update_insertion_indicator(self, pos: QPoint):
+        slot = self._calculate_insertion_slot(pos)
+        self._update_insertion_indicator_at_slot(slot)
+
+    def _update_insertion_indicator_from_global(self, global_pos: QPoint):
+        slot = self._calculate_insertion_slot_from_global(global_pos)
+        self._update_insertion_indicator_at_slot(slot)
+
+    def _hide_insertion_indicator(self):
+        if hasattr(self, "indicator"):
+            self.indicator.hide()
+
+    def handle_drag_move_from_widget(self, obj, pos: QPoint, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+            cx = self._get_container_x_from_widget_pos(obj, pos)
+            slot = self._calculate_insertion_slot_from_container_x(cx)
+            self._update_insertion_indicator_at_slot(slot)
+
+            # 视口边缘平滑自动横向滚动
+            vx = self._get_viewport_x_from_widget_pos(obj, pos)
+            vp_w = self.viewport().width()
+            if vx < 30:
+                h_bar = self.horizontalScrollBar()
+                h_bar.setValue(h_bar.value() - 15)
+            elif vx > vp_w - 30:
+                h_bar = self.horizontalScrollBar()
+                h_bar.setValue(h_bar.value() + 15)
+        else:
+            event.ignore()
+
+    def handle_drop_from_widget(self, obj, pos: QPoint, event):
+        self._hide_insertion_indicator()
+        if event.mimeData().hasText():
+            try:
+                src_idx = int(event.mimeData().text())
+                cx = self._get_container_x_from_widget_pos(obj, pos)
+                slot = self._calculate_insertion_slot_from_container_x(cx)
+                if slot <= src_idx:
+                    target_idx = slot
+                else:
+                    target_idx = slot - 1
+
+                if 0 <= src_idx < len(self.main_window.image_paths) and 0 <= target_idx < len(self.main_window.image_paths):
+                    self.main_window.reorder_images(src_idx, target_idx)
+                event.acceptProposedAction()
+            except Exception as e:
+                logger.debug(f"拖拽排序 dropEvent 异常: {e}")
+                event.ignore()
+
+    def handle_drag_move(self, global_pos: QPoint, event):
+        if hasattr(self, "container"):
+            c_pt = self.container.mapFromGlobal(global_pos)
+            self.handle_drag_move_from_widget(self.container, c_pt, event)
+
+    def handle_drop(self, global_pos: QPoint, event):
+        if hasattr(self, "container"):
+            c_pt = self.container.mapFromGlobal(global_pos)
+            self.handle_drop_from_widget(self.container, c_pt, event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -1266,29 +1529,14 @@ class ThumbnailGalleryWidget(QScrollArea):
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        self.handle_drag_move_from_widget(self.viewport(), event.pos(), event)
+
+    def dragLeaveEvent(self, event):
+        self._hide_insertion_indicator()
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
-        if event.mimeData().hasText():
-            try:
-                src_idx = int(event.mimeData().text())
-                drop_x = self.mapToGlobal(event.pos()).x()
-                target_idx = len(self.cards) - 1
-                for i, card in enumerate(self.cards):
-                    card_gx = card.mapToGlobal(QPoint(0, 0)).x()
-                    card_gw = card.width()
-                    if drop_x < card_gx + (card_gw // 2):
-                        target_idx = i
-                        break
-                if 0 <= src_idx < len(self.main_window.image_paths) and 0 <= target_idx < len(self.main_window.image_paths):
-                    self.main_window.move_image(src_idx, target_idx)
-                event.acceptProposedAction()
-            except Exception as e:
-                logger.debug(f"拖拽排序 dropEvent 异常: {e}")
-                event.ignore()
+        self.handle_drop_from_widget(self.viewport(), event.pos(), event)
 
 
 class NotificationBar(QFrame):
@@ -1431,16 +1679,18 @@ class NotificationBar(QFrame):
 
 def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]"):
     """
-    通用高保真自适应 GIF 动图渐进式压缩引擎：
-    阶段 1: 调色板自适应阶梯式降级 (256 -> 192 -> 128 -> 96 -> 64 色)
-    阶段 2: 智能隔帧抽帧 (当帧数 >= 16 时，隔一帧采样并等比例延长每帧 duration，播放节奏与总时长 100% 保持一致，体积立减 ~40%-50%，且不牺牲分辨率)
-    阶段 3: 严格保等比自适应分辨率缩放 (杜绝画面拉扯形变，下限维持等比，绝不因单边触底提前报死)
+    通用高保真自适应 GIF 动图渐进式压缩引擎 (2026-10-23 新规降级顺序):
+    阶段 1: 先降分辨率 (按 0.9 -> 0.8 -> 0.7 -> 0.6 -> 0.5 比例逐步缩放；下限：长边不低于 640px 或缩到原图 50%，先到为准)
+    阶段 2: 分辨率到下限仍超限，才降色彩 (256 -> 192 -> 128 -> 96 -> 64 色)
+    阶段 3: 前两步都到底仍超限，最后才智能隔帧抽帧 (严格保持播放节奏与总时长)
+    每步重编码后查体积，达标即停。
     """
     target_limit_bytes = int(max_limit_mb * 1024 * 1024)
     out_p = Path(out_p)
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
-    current_frames = list(frames)
+    orig_frames = list(frames)
+    current_frames = list(orig_frames)
     cur_duration = duration if duration else 100
     cur_colors = 256
 
@@ -1458,14 +1708,31 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
     if out_p.stat().st_size <= target_limit_bytes:
         return str(out_p)
 
-    # 阶段 1: 调色板阶梯式降级 (192, 128, 96, 64)
-    color_steps = [192, 128, 96, 64]
-    for colors in color_steps:
+    # 阶段 1: 先降分辨率 (0.9 -> 0.8 -> 0.7 -> 0.6 -> 0.5)
+    # 下限：长边不低于 640px 或缩到原图 50%，先到为准
+    orig_w, orig_h = orig_frames[0].size
+    orig_long = max(orig_w, orig_h)
+    min_scale = max(0.5, 640.0 / orig_long) if orig_long > 640 else 0.5
+
+    scale_ratios = [0.9, 0.8, 0.7, 0.6, 0.5]
+    for r in scale_ratios:
         if out_p.stat().st_size <= target_limit_bytes:
             break
+        s = max(r, min_scale)
+        new_w = max(1, int(round(orig_w * s)))
+        new_h = max(1, int(round(orig_h * s)))
+
+        if (new_w, new_h) == current_frames[0].size:
+            if s == min_scale or r == 0.5:
+                break
+            continue
+
         cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-        cur_colors = colors
-        logger.info(f"{log_prefix} 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
+        logger.info(
+            f"{log_prefix} 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，"
+            f"自适应降低分辨率 ({s:.2f}x): {current_frames[0].size[0]}x{current_frames[0].size[1]} -> {new_w}x{new_h}..."
+        )
+        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in orig_frames]
         p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
         p_frames[0].save(
             str(out_p),
@@ -1476,11 +1743,41 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             optimize=True
         )
 
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
+
+        if s == min_scale or r == 0.5:
+            break
+
     if out_p.stat().st_size <= target_limit_bytes:
         return str(out_p)
 
-    # 阶段 2: 智能隔帧抽帧 (当帧数较多 >= 16 帧时，优先通过隔帧采样压缩体积，100% 保持原始分辨率与宽高比)
-    if out_p.stat().st_size > target_limit_bytes and len(current_frames) >= 16:
+    # 阶段 2: 分辨率到下限仍超限，才降色彩 (192, 128, 96, 64)
+    color_steps = [192, 128, 96, 64]
+    for colors in color_steps:
+        if out_p.stat().st_size <= target_limit_bytes:
+            break
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        cur_colors = colors
+        logger.info(f"{log_prefix} 分辨率已至下限仍超限 ({cur_size_mb:.2f}MB)，自适应降级至 {colors} 色调色板...")
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=cur_duration,
+            loop=loop,
+            optimize=True
+        )
+
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    # 阶段 3: 前两步都到底仍超限，最后才智能隔帧抽帧
+    while out_p.stat().st_size > target_limit_bytes and len(current_frames) >= 4:
         cur_size_mb = out_p.stat().st_size / (1024 * 1024)
         old_count = len(current_frames)
         current_frames = current_frames[::2]
@@ -1488,7 +1785,10 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
         else:
             cur_duration = max(20, int(cur_duration * 2))
-        logger.info(f"{log_prefix} 帧数较多导致体积居高 ({cur_size_mb:.2f}MB, {old_count} 帧)，启动智能隔帧抽帧 (当前 {len(current_frames)} 帧，完全保持原始播放节奏)...")
+        logger.info(
+            f"{log_prefix} 分辨率与调色板均达下限仍超限 ({cur_size_mb:.2f}MB)，"
+            f"启动智能隔帧抽帧 ({old_count} 帧 -> {len(current_frames)} 帧，完全保持原始播放节奏)..."
+        )
         p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
         p_frames[0].save(
             str(out_p),
@@ -1498,65 +1798,8 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             loop=loop,
             optimize=True
         )
-
-    if out_p.stat().st_size <= target_limit_bytes:
-        return str(out_p)
-
-    # 阶段 3: 严格保等比自适应分辨率缩放
-    max_rescale_rounds = 10
-    round_idx = 0
-    while out_p.stat().st_size > target_limit_bytes and round_idx < max_rescale_rounds:
-        round_idx += 1
-        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-        cur_w, cur_h = current_frames[0].size
-
-        # 基于面积与文件体积比例预估缩放因子
-        scale = min(0.88, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
-        new_w = max(1, int(round(cur_w * scale)))
-        new_h = max(1, int(round(cur_h * scale)))
-
-        # 严格保等比：设定合理的最小分辨率基线 (例如短边不低于 160，若原图已小于 160 则不低于 120)
-        min_dim = 160
-        if min(new_w, new_h) < min_dim:
-            fit_scale = min_dim / max(1, min(cur_w, cur_h))
-            new_w = max(120, int(round(cur_w * fit_scale)))
-            new_h = max(120, int(round(cur_h * fit_scale)))
-
-        if new_w >= cur_w and new_h >= cur_h:
-            # 尺寸触底无法继续缩小，若帧数仍较多 (>= 16)，执行二次隔帧抽帧挽救
-            if len(current_frames) >= 16:
-                old_count = len(current_frames)
-                current_frames = current_frames[::2]
-                if isinstance(cur_duration, (list, tuple)):
-                    cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
-                else:
-                    cur_duration = max(20, int(cur_duration * 2))
-                logger.info(f"{log_prefix} 尺寸触及基线，执行二次隔帧抽帧 ({old_count} 帧 -> {len(current_frames)} 帧)...")
-                p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
-                p_frames[0].save(
-                    str(out_p),
-                    save_all=True,
-                    append_images=p_frames[1:],
-                    duration=cur_duration,
-                    loop=loop,
-                    optimize=True
-                )
-                if out_p.stat().st_size <= target_limit_bytes:
-                    return str(out_p)
-                continue
-            break
-
-        logger.info(f"{log_prefix} 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
-        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
-        p_frames[0].save(
-            str(out_p),
-            save_all=True,
-            append_images=p_frames[1:],
-            duration=cur_duration,
-            loop=loop,
-            optimize=True
-        )
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
 
     if out_p.stat().st_size > target_limit_bytes:
         final_mb = out_p.stat().st_size / (1024 * 1024)
@@ -2906,7 +3149,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "title_input") or not hasattr(self, "tags_input") or not hasattr(self, "desc_input"):
             return
         title = self.title_input.text().strip()
-        tags = self.tags_input.text().strip()
+        tags = (self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text()).strip()
         desc = self.desc_input.toPlainText().strip()
         if not title and not tags and not desc:
             if draft_file.exists():
@@ -2917,7 +3160,7 @@ class MainWindow(QMainWindow):
             return
         data = {
             "title": self.title_input.text(),
-            "tags": self.tags_input.text(),
+            "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
             "description": self.desc_input.toPlainText(),
             "updated_at": datetime.now().isoformat()
         }
@@ -2942,7 +3185,10 @@ class MainWindow(QMainWindow):
             if t and hasattr(self, "title_input"):
                 self.title_input.setText(t)
             if tags and hasattr(self, "tags_input"):
-                self.tags_input.setText(tags)
+                if hasattr(self.tags_input, "setPlainText"):
+                    self.tags_input.setPlainText(tags)
+                else:
+                    self.tags_input.setText(tags)
             if desc and hasattr(self, "desc_input"):
                 self.desc_input.setPlainText(desc)
             if t or tags or desc:
@@ -3289,6 +3535,13 @@ class MainWindow(QMainWindow):
 
         top_bar.addLayout(font_bar)
         top_bar.addSpacing(8)
+
+        self.open_cache_btn = QPushButton("📁 缓存目录")
+        self.open_cache_btn.setObjectName("secondaryBtn")
+        self.open_cache_btn.setMinimumHeight(28)
+        self.open_cache_btn.setToolTip("在系统文件管理器中一键打开生成的图片缓存目录 (data/cache)")
+        self.open_cache_btn.clicked.connect(self._open_cache_directory)
+        top_bar.addWidget(self.open_cache_btn)
 
         self.settings_btn = QPushButton("⚙️ 系统设置")
         self.settings_btn.setObjectName("secondaryBtn")
@@ -3711,6 +3964,12 @@ class MainWindow(QMainWindow):
         export_preview_btn.setObjectName("secondaryBtn")
         export_preview_btn.clicked.connect(self._export_preview_image)
         p_top_bar.addWidget(export_preview_btn)
+
+        open_cache_preview_btn = QPushButton("📁 缓存目录")
+        open_cache_preview_btn.setObjectName("secondaryBtn")
+        open_cache_preview_btn.setToolTip("在系统文件管理器中一键打开生成的图片缓存目录 (data/cache)")
+        open_cache_preview_btn.clicked.connect(self._open_cache_directory)
+        p_top_bar.addWidget(open_cache_preview_btn)
 
         preview_vlayout.addLayout(p_top_bar)
 
@@ -4853,6 +5112,25 @@ class MainWindow(QMainWindow):
                 self._current_rendered_pixmap.save(save_path)
                 self.notify(f"合成图已成功导出至: {Path(save_path).name}", level="success")
 
+    def _open_cache_directory(self):
+        """在系统文件资源管理器中一键打开 data/cache 目录"""
+        try:
+            cache_path = Path(CACHE_DIR).resolve()
+            cache_path.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(str(cache_path))
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(cache_path)])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", str(cache_path)])
+            self.notify(f"📂 已在文件管理器中打开缓存目录: {cache_path}", level="info")
+            logger.info(f"[Cache] 已唤起文件管理器打开缓存目录: {cache_path}")
+        except Exception as e:
+            logger.error(f"[Cache] 打开缓存目录失败: {e}")
+            self.notify(f"打开缓存目录失败: {e}", level="error")
+
     def _on_canvas_boxes_changed(self, boxes):
         if self.image_paths and 0 <= self.current_preview_index < len(self.image_paths):
             current_img = self.image_paths[self.current_preview_index]
@@ -4917,8 +5195,15 @@ class MainWindow(QMainWindow):
             return selected[:4]
         return self.image_paths[:4]
 
-    def move_image(self, src_idx: int, target_idx: int):
-        """图集顺序调整 (拖拽排序 / ◀ ▶ 移动)"""
+    def reorder_images(self, src_idx: int, target_idx: int):
+        """
+        图集核心顺序重排接口:
+        - 统一处理程序化重排与 UI 鼠标拖拽重排
+        - 联动更新内部 image_paths 顺序
+        - 联动更新当前聚焦预览索引 current_preview_index
+        - 联动同步左侧图片列表与底部缩略图画廊 (包含 X 选用状态与 #序号重绘)
+        - 实时通知界面重绘
+        """
         if not (0 <= src_idx < len(self.image_paths) and 0 <= target_idx < len(self.image_paths)):
             return
         if src_idx == target_idx:
@@ -4934,6 +5219,10 @@ class MainWindow(QMainWindow):
         self._sync_img_list_widget(block_signals=True)
         self._refresh_thumbnail_gallery()
         self._schedule_preview_refresh(instant=True)
+
+    def move_image(self, src_idx: int, target_idx: int):
+        """图集顺序调整别名/兼容接口，代理至 reorder_images"""
+        self.reorder_images(src_idx, target_idx)
 
     def remove_image(self, idx: int):
         """图集单张删除"""
@@ -4961,8 +5250,15 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.image_paths):
             self.current_preview_index = idx
             self._sync_img_list_widget(block_signals=True)
-            self._refresh_thumbnail_gallery(cards_only=True)
+            self._update_thumbnail_active_states()
             self._schedule_preview_refresh(instant=True)
+
+    def _update_thumbnail_active_states(self):
+        """仅更新缩略图卡片高亮选中态，绝不触发全量控件重建与事件重置"""
+        if not hasattr(self, "thumbnail_gallery"):
+            return
+        for i, card in enumerate(self.thumbnail_gallery.cards):
+            card.update_active_state(i == self.current_preview_index)
 
     def _sync_img_list_widget(self, block_signals=False):
         """同步左栏图片列表控件"""
@@ -4981,6 +5277,10 @@ class MainWindow(QMainWindow):
     def _refresh_thumbnail_gallery(self, cards_only=False):
         """刷新中央预览区底部的多图缩略图画廊"""
         if not hasattr(self, "thumbnail_gallery"):
+            return
+
+        if cards_only and len(self.thumbnail_gallery.cards) == len(self.image_paths):
+            self._update_thumbnail_active_states()
             return
 
         while self.thumbnail_gallery.hlayout.count():
@@ -5215,7 +5515,7 @@ class MainWindow(QMainWindow):
 
                 # 1. DeviantArt 动图
                 da_out_path = None
-                clean_da_gif_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_gif_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
                 clean_da_gif = CACHE_DIR / f"{clean_da_gif_stem}.gif"
                 if is_da_censor:
                     da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
@@ -5381,9 +5681,9 @@ class MainWindow(QMainWindow):
                 else:
                     pub_raw_path = Path(p)
 
-                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名)
+                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名；首图必须为作品本体名不带编号)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
-                clean_da_stem = safe_title if len(self.image_paths) == 1 else f"{safe_title}_{idx + 1}"
+                clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
                 clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
                 try:
                     if Path(da_target).exists():
@@ -5522,7 +5822,7 @@ class MainWindow(QMainWindow):
             elif policy == "thread":
                 x_action = "thread"
             else: # "ask"
-                sig_hint = "<br><font color='#34d399'>💡 选择智能截断将优先保留正文，按顺序自动裁剪赞助引流链接 (Patreon/Ko-fi) 与标签。</font>"
+                sig_hint = "<br><font color='#34d399'>💡 选择发布将自动应用预告+DA引流格式（在句子边界截取预告，必保 DA 外链与标签）。</font>"
                 self.x_limit_msg_lbl.setText(
                     f"X (Twitter) 文本计为 <b>{x_count}</b> 字符 (限额 <b>{x_limit}</b> 字符)，已超限 <b>{x_count - x_limit}</b> 字。{sig_hint}<br>请确认发布方式："
                 )

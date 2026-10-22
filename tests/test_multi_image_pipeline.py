@@ -15,6 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtCore import QPoint, Qt, QMimeData, QEvent
+from PyQt5.QtGui import QDropEvent, QMouseEvent
 
 from app import optimize_static_image, MainWindow
 from dispatchers.deviantart import DeviantArtDispatcher
@@ -209,6 +211,178 @@ def test_reordering_updates_x_selection_order(mock_main_window):
     # 移动后，p9 处于第 1 位，因此发帖顺序应变为 [p9, p2, p5, p7]
     new_selected = win.get_x_selected_images()
     assert new_selected == [p9, p2, p5, p7]
+
+
+def test_reorder_images_interface_and_multi_platform_dispatch_order(mock_main_window):
+    """
+    reorder_images 核心接口与多平台发送顺序联动测试:
+    - 直接调用 reorder_images(src_idx, target_idx)
+    - 内部图片列表 image_paths 顺序实时更新
+    - X 选用勾选按新顺序重新映射
+    - 全平台分发源 (Patreon gallery, DA 图集等) 使用的 raw_images 与 image_paths 同步更新
+    - move_image 作为别名方法完全兼容
+    """
+    win = mock_main_window
+    p1 = win.image_paths[0]
+    p5 = win.image_paths[4]
+    p10 = win.image_paths[9]
+
+    # 初始顺序验证
+    assert win.image_paths[0] == p1
+    assert win.image_paths[4] == p5
+    assert win.image_paths[9] == p10
+
+    # 勾选第 5 张与第 10 张
+    win.thumbnail_gallery.cards[4].x_cb.setChecked(True)
+    win.thumbnail_gallery.cards[9].x_cb.setChecked(True)
+    assert win.get_x_selected_images() == [p5, p10]
+
+    # 将第 10 张 (索引 9) 通过 reorder_images 接口移动到第 1 位 (索引 0)
+    win.reorder_images(9, 0)
+
+    # 验证 image_paths 内部顺序已更新 (各平台如 Patreon gallery, DA 图集分发顺序)
+    assert win.image_paths[0] == p10
+    assert win.image_paths[1] == p1
+
+    # 验证 X 选用顺序重新映射为 [p10, p5]
+    assert win.get_x_selected_images() == [p10, p5]
+
+    # 验证 move_image 别名接口将第 5 张 (当前索引 5) 移动到首位
+    win.move_image(5, 0)
+    assert win.image_paths[0] == p5
+    assert win.image_paths[1] == p10
+    assert win.get_x_selected_images() == [p5, p10]
+
+
+def test_thumbnail_gallery_slot_calculation_and_insertion_indicator(mock_main_window):
+    """
+    缩略图画廊拖拽槽位计算与竖线插入指示符测试:
+    - 槽位 0 (首图左侧)
+    - 槽位 中间 (卡片间隙)
+    - 槽位 N (尾图右侧)
+    - 竖线指示符的显示、定位与隐藏
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    total_cards = len(gallery.cards)
+    assert total_cards == 10
+
+    # 1. 模拟鼠标移至画廊最左侧 (X=0) -> 槽位 0
+    slot_0 = gallery._calculate_insertion_slot(QPoint(0, 50))
+    assert slot_0 == 0
+
+    # 2. 模拟鼠标移至第 2 张卡片中心右侧 -> 槽位 2
+    # 卡片 1 的理论几何范围: x=130, w=118, mid=189
+    slot_2 = gallery._calculate_insertion_slot(QPoint(200, 50))
+    assert slot_2 == 2
+
+    # 3. 模拟鼠标移至最右侧 (X=9999) -> 槽位 10 (末尾)
+    slot_end = gallery._calculate_insertion_slot(QPoint(9999, 50))
+    assert slot_end == total_cards
+
+    # 4. 指示符显示与定位
+    assert hasattr(gallery, "indicator")
+    gallery._update_insertion_indicator(QPoint(200, 50))
+    assert gallery.indicator.isVisible() is True
+    assert gallery.indicator.width() == 8
+
+    # 5. 隐藏指示符
+    gallery._hide_insertion_indicator()
+    assert gallery.indicator.isVisible() is False
+
+
+def test_thumbnail_gallery_drop_event_triggers_reordering(mock_main_window):
+    """
+    UI 鼠标拖拽松开落定 (dropEvent) 触发重排与联动测试:
+    - 模拟从索引 8 拖至槽位 0
+    - 验证 dropEvent 解析 slot 并调用 reorder_images
+    - 验证竖线插入符在 drop 结束后被隐藏
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    orig_p9 = win.image_paths[8]
+
+    # 激活指示符
+    gallery._update_insertion_indicator(QPoint(0, 50))
+    assert gallery.indicator.isVisible() is True
+
+    # 构造拖拽落定事件 (将原索引 8 拖拽落定至最左侧 slot 0)
+    mime = QMimeData()
+    mime.setText("8")
+    drop_ev = QDropEvent(QPoint(0, 50), Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+
+    gallery.dropEvent(drop_ev)
+
+    # 落定后指示符必须隐藏
+    assert gallery.indicator.isVisible() is False
+
+    # 内部图片顺序已更新至首位
+    assert win.image_paths[0] == orig_p9
+
+
+def test_thumbnail_card_mouse_press_and_release_events(mock_main_window):
+    """
+    缩略图卡片鼠标按下与释放事件测试:
+    1. mousePressEvent 仅记录 drag_start_pos，不重置预览 index，也不销毁重建卡片；
+    2. mouseReleaseEvent 在无拖拽位移时触发 select_preview_image 切换大图预览；
+    3. 切换预览仅更新卡片样式 (_update_thumbnail_active_states)，不重建控件。
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    card1 = gallery.cards[1]
+
+    # 初始状态
+    assert win.current_preview_index == 0
+    assert card1.drag_start_pos is None
+
+    # 模拟按下 card1
+    press_ev = QMouseEvent(QEvent.MouseButtonPress, QPoint(15, 15), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    card1.mousePressEvent(press_ev)
+
+    # 验证 drag_start_pos 已记录，但当前选图未提前切换
+    assert card1.drag_start_pos == QPoint(15, 15)
+    assert win.current_preview_index == 0
+
+    # 模拟在原地释放鼠标 (纯点击未拖拽)
+    rel_ev = QMouseEvent(QEvent.MouseButtonRelease, QPoint(15, 15), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    card1.mouseReleaseEvent(rel_ev)
+
+    # 验证选图已切换为 card1，且 drag_start_pos 重置为 None
+    assert win.current_preview_index == 1
+    assert card1.drag_start_pos is None
+    # 验证卡片对象引用未被销毁重建
+    assert gallery.cards[1] is card1
+
+
+def test_thumbnail_gallery_event_filter_and_card_drag_drop(mock_main_window):
+    """
+    画廊视口/容器 eventFilter 及卡片层级事件穿透与代理测试:
+    1. 缩略图 card.dropEvent 成功转发至 gallery.handle_drop 并调用 reorder_images;
+    2. gallery.viewport() 收到 Drop 事件通过 eventFilter 成功被拦截并落定重排;
+    3. gallery.container 收到 DragMove 事件通过 eventFilter 成功激活指示符。
+    """
+    win = mock_main_window
+    gallery = win.thumbnail_gallery
+    orig_first = win.image_paths[0]
+    orig_last = win.image_paths[-1]
+
+    # 1. 测试卡片代理 dropEvent
+    mime = QMimeData()
+    mime.setText("0")  # 将 0 号图片拖拽至 2 号卡片
+    drop_ev = QDropEvent(QPoint(10, 10), Qt.MoveAction, mime, Qt.LeftButton, Qt.NoModifier)
+    gallery.cards[2].dropEvent(drop_ev)
+
+    # 0 号图片应已被移动
+    assert win.image_paths[0] != orig_first
+
+    # 2. 测试 viewport 的 eventFilter 拦截 Drop
+    mime2 = QMimeData()
+    mime2.setText(str(len(win.image_paths) - 1))  # 拖拽最后一张图片至最左侧
+    vp_drop_ev = QDropEvent(QPoint(0, 10), Qt.MoveAction, mime2, Qt.LeftButton, Qt.NoModifier)
+    filtered = gallery.eventFilter(gallery.viewport(), vp_drop_ev)
+    assert filtered is True
+    # 最后一张图片现在应该在最前面
+    assert win.image_paths[0] == orig_last
 
 
 def test_remove_image_updates_gallery_and_selection(mock_main_window):
@@ -422,47 +596,333 @@ def test_deviantart_mature_and_ai_flags_rule(tmp_path, monkeypatch):
     assert captured_flags["is_ai"] is True
 
 
-def test_deviantart_real_submit_deviation_method_no_nameerror(tmp_path, monkeypatch):
+class MockFileChooserInfo:
+    def __init__(self, fc):
+        self.value = fc
+
+
+class MockFileChooserContext:
+    def __init__(self, fc, raise_exc=None):
+        self.fc = fc
+        self.raise_exc = raise_exc
+
+    def __enter__(self):
+        if self.raise_exc:
+            raise self.raise_exc
+        return MockFileChooserInfo(self.fc)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+def test_deviantart_v2_file_chooser_append_and_submit_success(tmp_path, monkeypatch):
     """
-    真实执行 _submit_deviation 内部流程，验证首图作为封面不可重排，无 NameError 或未定义变量。
+    DA 多图投稿重写 v2 核心主流程:
+    1. 首图上传: 仅传入 [images[0]]
+    2. 填表单
+    3. 机制 A 成功: 点击 '+' 按钮，通过 expect_file_chooser() 捕获并注入 images[1:]
+    4. 缩略图轮询: evaluate 检测到 len(images) 张缩略图就绪
+    5. Submit 提交成功
     """
     monkeypatch.setattr(time, "sleep", lambda x: None)
 
-    disp_real = DeviantArtDispatcher(tmp_path)
-    disp_real.assert_attached = MagicMock(return_value=(True, ""))
-    disp_real.assert_field_value = MagicMock(return_value=(True, ""))
-    disp_real.check_selector_state = MagicMock(return_value=(True, "ok"))
-    disp_real.assert_submitted = MagicMock(return_value=(True, ""))
-    disp_real._cleanup_orphan_draft = MagicMock()
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
 
-    mock_real_page = MagicMock()
-    mock_real_page.url = "https://www.deviantart.com/art/view-12345"
-    mock_real_page.inner_text = MagicMock(return_value="")
-    mock_file_in = MagicMock()
-    mock_file_in.inner_text.return_value = "Submit"
-    mock_file_in.is_enabled.return_value = True
-    mock_file_in.get_attribute.return_value = "false"
-    mock_real_page.query_selector_all = MagicMock(return_value=[mock_file_in])
-    mock_real_page.query_selector = MagicMock(return_value=mock_file_in)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-12345"
+    mock_page.inner_text = MagicMock(return_value="")
 
-    mock_real_context = MagicMock()
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png,image/jpeg"
+
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_plus_btn.get_attribute.return_value = "Attach additional media"
+
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    mock_fc = MagicMock()
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(mock_fc))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel or "thumbnail" in sel or "add" in sel or "additional media" in sel or "Attach" in sel:
+            return [mock_plus_btn]
+        if "Submit" in sel:
+            return [mock_submit_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if ("+" in sel or "additional media" in sel or "Attach" in sel) else mock_cover_fi))
+
+    # evaluate 返回 dict 结构 (真实 DOM: 3 张文件就绪且羊驼后台转码完毕)
+    mock_page.evaluate = MagicMock(return_value={"count": 3, "llama": False})
+
+    mock_context = MagicMock()
     mock_studio_page = MagicMock()
     mock_studio_page.inner_text = MagicMock(return_value="No drafts here")
-    mock_real_context.new_page = MagicMock(return_value=mock_studio_page)
+    mock_studio_page.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio_page)
 
     images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
     for p in images:
         Path(p).write_bytes(b"dummy")
 
     comp_list = []
-    res_ok, res_msg = disp_real._submit_deviation(
-        mock_real_page, mock_real_context, images, "Latex Sessions Vol. 1",
-        "Description", ["tag1"], False, "strict", False, "", comp_list
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Multi Artwork V2",
+        "Description", ["art"], False, "strict", False, "", comp_list
     )
+
     assert res_ok is True
     assert res_msg == ""
-    # 断言 set_input_files 接收到完整的包含首图在内的图片列表
-    mock_file_in.set_input_files.assert_called_once_with(images)
+    # 步骤 1: 首图作为 source file 单独先传
+    mock_cover_fi.set_input_files.assert_called_once_with([images[0]])
+    # 步骤 3: 机制 A 通过 file_chooser 一次性注入剩余全部
+    mock_fc.set_files.assert_called_once_with(images[1:])
+    # 步骤 5: Submit 点击
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_deviantart_v2_mechanism_b_hidden_input_append_success(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 机制 B 回退:
+    - 机制 A expect_file_chooser 捕获失败 (超时抛异常)
+    - 机制 B 捕获到弹窗内新增/隐藏的 input[type='file'] 并 set_input_files(images[1:])
+    - 缩略图轮询成功，Submit 成功
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-12345"
+    mock_page.inner_text = MagicMock(return_value="")
+
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png,image/jpeg"
+
+    mock_hidden_fi = MagicMock()
+    mock_hidden_fi.get_attribute.return_value = "image/*"
+
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_plus_btn.get_attribute.return_value = "Add"
+
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    # expect_file_chooser 模拟超时抛异常
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(None, raise_exc=Exception("Timeout waiting for FileChooser")))
+
+    def fake_query_selector_all(sel):
+        if ".ReactModal__Content input[type='file']" in sel:
+            return [mock_hidden_fi]
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel or "thumbnail" in sel or "add" in sel:
+            return [mock_plus_btn]
+        if "Submit" in sel:
+            return [mock_submit_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else (mock_plus_btn if "+" in sel else mock_cover_fi))
+    mock_page.evaluate = MagicMock(return_value=3)
+
+    mock_context = MagicMock()
+    mock_studio_page = MagicMock()
+    mock_studio_page.inner_text = MagicMock(return_value="No drafts")
+    mock_studio_page.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio_page)
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    comp_list = []
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Multi Artwork B",
+        "Desc", [], False, "strict", False, "", comp_list
+    )
+
+    assert res_ok is True
+    # 首图
+    mock_cover_fi.set_input_files.assert_called_once_with([images[0]])
+    # 机制 B 隐藏 input 注入
+    mock_hidden_fi.set_input_files.assert_called_once_with(images[1:])
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_deviantart_v2_append_failure_both_mechanisms_loud_error(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 容错安全门禁:
+    - 机制 A (FileChooser) 与机制 B (隐藏Input) 均告失败；
+    - 必须大声报错中止并清理孤儿草稿，严禁静默跳过，严禁提交残缺作品！
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png"
+
+    # expect_file_chooser 失败
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(None, raise_exc=Exception("Timeout")))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            # 只有首图的 cover input，没有追加专用的 input
+            return [mock_cover_fi]
+        # 没有 + 按钮
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(return_value=mock_cover_fi)
+
+    mock_context = MagicMock()
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Failed Append",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is False
+    assert "DeviantArt 多图追加失败" in res_msg
+    assert "机制 A (FileChooser) 与机制 B (隐藏Input) 均未能提交剩余图片" in res_msg
+    # 必须执行孤儿草稿清理
+    disp._cleanup_orphan_draft.assert_called_once()
+
+
+def test_deviantart_v2_thumbnail_polling_timeout_loud_error(tmp_path, monkeypatch):
+    """
+    DA 多图投稿重写 v2 缩略图等待超时路径:
+    - 机制 A 注入了剩余图片，但缩略图栏轮询未能检测到全部素材就绪 (超时)；
+    - 必须大声报错中止并清理孤儿草稿，绝不提交未就绪作品！
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_plus_btn = MagicMock()
+    mock_plus_btn.inner_text.return_value = "+"
+    mock_fc = MagicMock()
+    mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContext(mock_fc))
+
+    def fake_query_selector_all(sel):
+        if "input[type='file']" in sel:
+            return [mock_cover_fi]
+        if "+" in sel:
+            return [mock_plus_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
+    mock_page.query_selector = MagicMock(return_value=mock_cover_fi)
+
+    # 缩略图评估始终返回 1 (小于期望的 3 张)
+    mock_page.evaluate = MagicMock(return_value=1)
+
+    mock_context = MagicMock()
+
+    images = [str(tmp_path / f"da_{i}.jpg") for i in range(3)]
+    for p in images:
+        Path(p).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, images, "Timeout Append",
+        "Desc", [], False, "strict", False, "", [], thumb_wait_timeout=0.01
+    )
+
+    assert res_ok is False
+    assert "缩略图栏等待超时" in res_msg
+    disp._cleanup_orphan_draft.assert_called_once()
+
+
+def test_deviantart_v2_single_image_skips_plus_and_thumbnails(tmp_path, monkeypatch):
+    """
+    DA 单图投稿边界验证:
+    - 当 images 只有 1 张时，直接跳过步骤 3 (+) 与步骤 4 (缩略图轮询)，走原单图提交流程。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+    disp._cleanup_orphan_draft = MagicMock()
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/view-single"
+    mock_cover_fi = MagicMock()
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    mock_page.query_selector_all = MagicMock(side_effect=lambda sel: [mock_submit_btn] if "Submit" in sel else [mock_cover_fi])
+    mock_page.query_selector = MagicMock(side_effect=lambda sel: mock_submit_btn if "Submit" in sel else mock_cover_fi)
+    mock_page.expect_file_chooser = MagicMock()
+
+    mock_context = MagicMock()
+    mock_studio = MagicMock()
+    mock_studio.inner_text.return_value = "clean"
+    mock_studio.url = "https://www.deviantart.com/studio"
+    mock_context.new_page = MagicMock(return_value=mock_studio)
+
+    img_1 = str(tmp_path / "da_single.jpg")
+    Path(img_1).write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, mock_context, [img_1], "Solo Artwork",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is True
+    assert res_msg == ""
+    # 首图上传
+    mock_cover_fi.set_input_files.assert_called_once_with([img_1])
+    # 步骤 3 的 expect_file_chooser 绝不调用
+    mock_page.expect_file_chooser.assert_not_called()
+    assert mock_submit_btn.evaluate.called or mock_submit_btn.click.called
 
 
 # ==================== 4. X (Twitter) 4-Image Posting Tests ====================

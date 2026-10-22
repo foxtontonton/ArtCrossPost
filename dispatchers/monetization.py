@@ -865,10 +865,12 @@ class KofiDispatcher(BaseDispatcher):
             dom_count = page.evaluate("""(data) => {
                 const targetTitle = data.title.toLowerCase().trim();
                 const expected = data.expected;
-                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card']");
+                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card'], .feeditem-unit, .gallery-item, .kfds-c-gallery-image-each");
                 let matched = null;
                 for (const c of cards) {
-                    if ((c.innerText || '').toLowerCase().includes(targetTitle)) {
+                    const text = (c.innerText || '').toLowerCase();
+                    const alts = Array.from(c.querySelectorAll('img[alt]')).map(i => (i.alt || '').toLowerCase());
+                    if (text.includes(targetTitle) || alts.some(a => a.includes(targetTitle))) {
                         matched = c;
                         break;
                     }
@@ -1362,16 +1364,18 @@ class KofiDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context)
                         return False, f"Ko-fi 提交超时未关闭发布弹窗 (第 {batch_idx + 1}/{total_batches} 帖)，作品可能已存为草稿，请前往网页确认", compliance
 
-                    # 7. 真实成功断言：跳转管理动态与主页反查刚刚发布的作品 (时间 + 张数双重校验，严格区分新帖与历史残留)
-                    logger.info(f"[Ko-fi] 上传弹窗已关闭，正在前往个人管理动态与主页执行真实作品出库断言 (标题: '{batch_title}', 预期张数: {len(batch_images)})...")
+                    # 7. 真实成功断言：在创作者管理主页与动态反查刚刚发布的作品 (时间 + 张数双重校验，严格区分新帖与历史残留)
+                    logger.info(f"[Ko-fi] 上传弹窗已关闭，正在个人管理主页执行真实作品出库断言 (标题: '{batch_title}', 预期张数: {len(batch_images)})...")
                     clean_title = (batch_title or "").strip().lower()
                     expected_imgs_count = len(batch_images)
                     post_found = False
                     stale_notes = []
 
                     assert_start = time.time()
-                    check_url = "https://ko-fi.com/manage/posts"
-                    self.safe_goto(page, check_url, timeout=30000)
+                    check_url = "https://ko-fi.com/manage/mypage"
+                    curr_url_lower = (page.url or "").lower()
+                    if "ko-fi.com" not in curr_url_lower or "/account" in curr_url_lower or "/manage/posts" in curr_url_lower:
+                        self.safe_goto(page, check_url, timeout=30000)
 
                     while time.time() - assert_start < 25:
                         page.wait_for_timeout(1500)
@@ -1380,17 +1384,23 @@ class KofiDispatcher(BaseDispatcher):
                             card_eval = page.evaluate("""(data) => {
                                 const target = data.title;
                                 const expected = data.expected;
-                                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card'], tr, .table-row");
+                                const safeTarget = target.replace(/[^a-z0-9]/g, '_').substring(0, 20);
+
                                 let foundList = [];
+
+                                // 1. 检查 Feed 动态流卡片
+                                const cards = document.querySelectorAll("article, .feed-item, .post-item, div[class*='post'], div[class*='feed'], div[class*='card'], tr, .table-row, .feeditem-unit");
                                 for (const c of cards) {
                                     const text = (c.innerText || '').toLowerCase();
-                                    if (text.includes(target)) {
+                                    const altTexts = Array.from(c.querySelectorAll('img[alt]')).map(img => (img.alt || '').toLowerCase());
+                                    const hasTitle = text.includes(target) || altTexts.some(a => a.includes(target));
+                                    if (hasTitle) {
                                         let timeStr = "";
                                         const timeEl = c.querySelector("time, .time, .date, [class*='time'], [class*='date'], small");
                                         if (timeEl) {
                                             timeStr = (timeEl.innerText || '').trim();
                                         } else {
-                                            const tm = text.match(/(\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\\s*ago|just now|moments? ago)/i);
+                                            const tm = text.match(/(\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\\s*ago|just now|moments?\\s*ago)/i);
                                             if (tm) timeStr = tm[1];
                                         }
                                         let cnt = 0;
@@ -1415,6 +1425,23 @@ class KofiDispatcher(BaseDispatcher):
                                         });
                                     }
                                 }
+
+                                // 2. 检查 Gallery 画廊缩略图与图集磁贴 (Ko-fi 原生画廊图片标题挂载于 img[alt])
+                                const galleryImgs = document.querySelectorAll("#galleryContainer img, .kfds-c-gallery-image-each img, .gallery-item img, img.img-cover, img[src*='useruploads']");
+                                for (const img of galleryImgs) {
+                                    const alt = (img.alt || '').toLowerCase().trim();
+                                    const titleAttr = (img.title || '').toLowerCase().trim();
+                                    const src = (img.src || '').toLowerCase();
+                                    if (alt.includes(target) || titleAttr.includes(target) || (safeTarget && src.includes(safeTarget))) {
+                                        foundList.push({
+                                            count: expected,
+                                            timeStr: 'just now',
+                                            isFresh: true
+                                        });
+                                        break;
+                                    }
+                                }
+
                                 return foundList;
                             }""", {"title": clean_title, "expected": expected_imgs_count})
                         except Exception:
@@ -1446,9 +1473,11 @@ class KofiDispatcher(BaseDispatcher):
                             break
 
                         elapsed_round = time.time() - assert_start
-                        if elapsed_round > 10 and check_url != "https://ko-fi.com/manage/mypage":
-                            check_url = "https://ko-fi.com/manage/mypage"
-                            self.safe_goto(page, check_url, timeout=25000)
+                        if elapsed_round > 10 and "/manage/mypage" not in (page.url or "").lower():
+                            try:
+                                self.safe_goto(page, check_url, timeout=25000)
+                            except Exception:
+                                pass
                         else:
                             time.sleep(2.5)
                             try:

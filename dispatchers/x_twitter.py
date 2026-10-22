@@ -16,7 +16,7 @@ except ImportError:
     from ..logger import get_logger
 
 try:
-    from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads, format_x_full_text
+    from x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads, format_x_full_text, format_x_teaser_post
 except ImportError:
     from ..x_text_utils import calculate_x_char_count, truncate_x_text, split_into_x_threads, format_x_full_text
 
@@ -278,32 +278,52 @@ class XTwitterDispatcher(BaseDispatcher):
         char_limit = 25000 if is_premium else payload.get("platform_options", {}).get("x_char_limit", 280)
         over_limit_action = payload.get("platform_options", {}).get("x_over_limit_action", "truncate")
 
-        full_text = format_x_full_text(title, desc, tags)
-        current_count = calculate_x_char_count(full_text)
+        cfg = load_config()
+        da_link = (
+            payload.get("x_da_link")
+            or payload.get("platform_options", {}).get("x_da_link")
+            or cfg.get("defaults", {}).get("x_da_link")
+        )
+        nsfw_notice = (
+            payload.get("x_nsfw_notice")
+            or payload.get("platform_options", {}).get("x_nsfw_notice")
+            or cfg.get("defaults", {}).get("x_nsfw_notice")
+        )
 
         truncated = False
         truncated_chars = 0
         signature_preserved = False
         thread_count = 1
 
-        if current_count <= char_limit:
-            thread_chunks = [full_text]
+        if over_limit_action == "thread":
+            raw_full = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+            if tags:
+                clean_tags = " ".join([f"#{str(t).strip().lstrip('#')}" for t in tags if str(t).strip()])
+                raw_full = f"{raw_full}\n\n{clean_tags}".strip() if raw_full else clean_tags
+            thread_chunks = split_into_x_threads(raw_full, limit=char_limit)
+            thread_count = len(thread_chunks)
+            current_count = calculate_x_char_count(raw_full)
         else:
-            if over_limit_action == "thread":
-                thread_chunks = split_into_x_threads(full_text, limit=char_limit)
-                thread_count = len(thread_chunks)
-            else:
-                trunc_text, cut_num, sig_ok = truncate_x_text(full_text, limit=char_limit)
-                thread_chunks = [trunc_text]
-                truncated = True
-                truncated_chars = cut_num
-                signature_preserved = sig_ok
+            # 方案 B: 统一预告 + 引流格式
+            post_text = format_x_teaser_post(
+                title=title,
+                desc=desc,
+                tags=tags,
+                da_link=da_link,
+                nsfw_notice=nsfw_notice,
+                limit=char_limit
+            )
+            thread_chunks = [post_text]
+            current_count = calculate_x_char_count(post_text)
+            orig_body = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+            truncated = bool(orig_body and orig_body not in post_text)
+            truncated_chars = max(0, len(orig_body) - len(post_text))
+            signature_preserved = bool(da_link and da_link in post_text)
 
         cookies = self.get_cookies()
         if not cookies:
             return False, "发布失败: X 尚未登录，请先在卡片上点击登录", []
 
-        cfg = load_config()
         wait_button_timeout = payload.get("x_wait_button_timeout", cfg.get("defaults", {}).get("x_wait_button_timeout", 120))
 
         logger.info(f"[X] 执行官方原生发布: 原字数={current_count}, 限额={char_limit}, 策略={over_limit_action}, 分条数={thread_count}, 图片数={len(abs_images)}, 按钮超时={wait_button_timeout}s")
@@ -718,10 +738,9 @@ class XTwitterDispatcher(BaseDispatcher):
                         if thread_count > 1:
                             succ_msg = f"X (Twitter) 串推发布成功 (已拆成 {thread_count} 条推文发布，成功 {actual_images_count}/{actual_images_count} 张)"
                         elif truncated:
-                            sig_note = "，已优先裁剪赞助引流/标签以保护正文"
-                            succ_msg = f"X (Twitter) 发布成功 (正文超限，已截断 {truncated_chars} 字符{sig_note}，成功 {actual_images_count}/{actual_images_count} 张)"
+                            succ_msg = f"X (Twitter) 发布成功 (正文已按句子边界精简为预告并保留 DA 引流，成功 {actual_images_count}/{actual_images_count} 张)"
                         else:
-                            succ_msg = f"X (Twitter) 发布成功 (已勾选官方 Made with AI 及 Nudity 警告，成功 {actual_images_count}/{actual_images_count} 张)"
+                            succ_msg = f"X (Twitter) 发布成功 (已应用预告+DA引流格式，成功 {actual_images_count}/{actual_images_count} 张)"
                         return True, succ_msg, compliance
 
                     # 超时未激活：如果还有重试机会，刷新重试
