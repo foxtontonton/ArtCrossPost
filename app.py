@@ -45,6 +45,7 @@ from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
 from dispatchers import get_all_dispatchers
 from x_text_utils import calculate_x_char_count, format_x_full_text
+from history_manager import PublishHistoryManager
 
 
 class NoWheelEventFilter(QObject):
@@ -2838,6 +2839,7 @@ class MainWindow(QMainWindow):
 
         self.data_dir = Path(__file__).resolve().parent / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.history_manager = PublishHistoryManager(self.data_dir)
         self._last_publish_payload = None
         self._last_failed_dispatchers = []
 
@@ -3297,7 +3299,55 @@ class MainWindow(QMainWindow):
         self.settings_btn.clicked.connect(lambda: self._open_settings_dialog(target_tab=None))
         top_bar.addWidget(self.settings_btn)
 
+        self.history_btn = QPushButton("📜 发布历史")
+        self.history_btn.setObjectName("secondaryBtn")
+        self.history_btn.setMinimumHeight(28)
+        self.history_btn.setToolTip("查看全平台作品历史发布记录与直链")
+        self.history_btn.clicked.connect(self._open_history_dialog)
+        top_bar.addWidget(self.history_btn)
+
         root_vlayout.addLayout(top_bar)
+
+        # P1-2: 顶部黄色横幅提示 (重复发布预警)
+        self.history_warning_banner = QFrame()
+        self.history_warning_banner.setObjectName("history_warning_banner")
+        self.history_warning_banner.setStyleSheet("""
+            #history_warning_banner {
+                background-color: #451a03;
+                border: 1px solid #f59e0b;
+                border-radius: 6px;
+                padding: 6px 12px;
+                margin-top: 4px;
+                margin-bottom: 4px;
+            }
+        """)
+        banner_layout = QHBoxLayout(self.history_warning_banner)
+        banner_layout.setContentsMargins(6, 4, 6, 4)
+        banner_layout.setSpacing(10)
+
+        self.history_warning_banner_lbl = QLabel()
+        self.history_warning_banner_lbl.setStyleSheet("color: #fde68a; font-weight: bold; font-size: 13px;")
+        banner_layout.addWidget(self.history_warning_banner_lbl, 1)
+
+        banner_close_btn = QPushButton("✕ 忽略")
+        banner_close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #78350f;
+                color: #fef3c7;
+                border: 1px solid #b45309;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #92400e;
+            }
+        """)
+        banner_close_btn.clicked.connect(lambda: self.history_warning_banner.hide())
+        banner_layout.addWidget(banner_close_btn)
+
+        self.history_warning_banner.hide()
+        root_vlayout.addWidget(self.history_warning_banner)
 
         # 核心主体：三栏黄金分割 Splitter
         self.main_splitter = QSplitter(Qt.Horizontal)
@@ -5047,6 +5097,7 @@ class MainWindow(QMainWindow):
                 self._sync_img_list_widget()
                 self._refresh_thumbnail_gallery()
                 self._schedule_preview_refresh(instant=True)
+                self._check_image_duplicate_history()
                 self.notify(f"已成功导入 {added} 张素材，效果已在中央预览框中实时合成！", level="success")
 
     def _clear_images(self):
@@ -5058,6 +5109,39 @@ class MainWindow(QMainWindow):
         self.img_list_widget.clear()
         self.current_preview_index = 0
         self.preview_canvas.clear_image()
+        if hasattr(self, "history_warning_banner"):
+            self.history_warning_banner.hide()
+
+    def _check_image_duplicate_history(self):
+        """P1-2: 导入图片时查历史：若命中已发布过的图片指纹，界面顶部黄色横幅提示"""
+        if not hasattr(self, "history_manager") or not hasattr(self, "history_warning_banner"):
+            return
+
+        duplicates = []
+        for img_p in self.image_paths:
+            hit = self.history_manager.check_duplicate_image(img_p)
+            if hit:
+                duplicates.append((Path(img_p).name, hit))
+
+        if duplicates:
+            first_name, first_hit = duplicates[0]
+            date = first_hit["date"]
+            plats_str = ", ".join(first_hit["platforms"]) if first_hit["platforms"] else "其他平台"
+            banner_text = f"该图片曾于 {date} 发布至 [{plats_str}]，请确认是否重复发布"
+            if len(duplicates) > 1:
+                banner_text += f" (共检测到 {len(duplicates)} 张素材曾发布过)"
+
+            self.history_warning_banner_lbl.setText(f"⚠️ {banner_text}")
+            self.history_warning_banner.show()
+            self.notify(f"⚠️ {banner_text}", level="warning", auto_dismiss=False)
+        else:
+            self.history_warning_banner.hide()
+
+    def _open_history_dialog(self):
+        """P1-2: 打开历史发布记录查看器弹窗 (只读按倒序查看)"""
+        from history_dialog import PublishHistoryDialog
+        dlg = PublishHistoryDialog(self.history_manager, parent=self)
+        dlg.exec_()
         self.preview_info_lbl.setText("当前未选择图片")
         self.preview_status_lbl.setText("🛡️ 打码: 未开启  |  💧 水印: 未开启")
         self._current_rendered_pixmap = None
@@ -5569,6 +5653,18 @@ class MainWindow(QMainWindow):
 
     def _on_completed(self, results):
         self.publish_btn.setEnabled(True)
+        # P1-2: 每次发布结束后追加一条记录到 data/publish_history.json
+        if hasattr(self, "history_manager"):
+            try:
+                self.history_manager.append_record(
+                    title=self.title_input.text().strip() if hasattr(self, "title_input") else "",
+                    image_paths=list(self.image_paths) if hasattr(self, "image_paths") else [],
+                    publish_results=results,
+                    payload=getattr(self, "_last_publish_payload", None)
+                )
+            except Exception as e:
+                logger.warning(f"保存发布历史记录异常: {e}")
+
         success_count = sum(1 for v in results.values() if v[0])
         total_count = len(results)
 
