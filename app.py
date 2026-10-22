@@ -1679,16 +1679,18 @@ class NotificationBar(QFrame):
 
 def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]"):
     """
-    通用高保真自适应 GIF 动图渐进式压缩引擎：
-    阶段 1: 调色板自适应阶梯式降级 (256 -> 192 -> 128 -> 96 -> 64 色)
-    阶段 2: 智能隔帧抽帧 (当帧数 >= 16 时，隔一帧采样并等比例延长每帧 duration，播放节奏与总时长 100% 保持一致，体积立减 ~40%-50%，且不牺牲分辨率)
-    阶段 3: 严格保等比自适应分辨率缩放 (杜绝画面拉扯形变，下限维持等比，绝不因单边触底提前报死)
+    通用高保真自适应 GIF 动图渐进式压缩引擎 (2026-10-23 新规降级顺序):
+    阶段 1: 先降分辨率 (按 0.9 -> 0.8 -> 0.7 -> 0.6 -> 0.5 比例逐步缩放；下限：长边不低于 640px 或缩到原图 50%，先到为准)
+    阶段 2: 分辨率到下限仍超限，才降色彩 (256 -> 192 -> 128 -> 96 -> 64 色)
+    阶段 3: 前两步都到底仍超限，最后才智能隔帧抽帧 (严格保持播放节奏与总时长)
+    每步重编码后查体积，达标即停。
     """
     target_limit_bytes = int(max_limit_mb * 1024 * 1024)
     out_p = Path(out_p)
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
-    current_frames = list(frames)
+    orig_frames = list(frames)
+    current_frames = list(orig_frames)
     cur_duration = duration if duration else 100
     cur_colors = 256
 
@@ -1706,14 +1708,31 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
     if out_p.stat().st_size <= target_limit_bytes:
         return str(out_p)
 
-    # 阶段 1: 调色板阶梯式降级 (192, 128, 96, 64)
-    color_steps = [192, 128, 96, 64]
-    for colors in color_steps:
+    # 阶段 1: 先降分辨率 (0.9 -> 0.8 -> 0.7 -> 0.6 -> 0.5)
+    # 下限：长边不低于 640px 或缩到原图 50%，先到为准
+    orig_w, orig_h = orig_frames[0].size
+    orig_long = max(orig_w, orig_h)
+    min_scale = max(0.5, 640.0 / orig_long) if orig_long > 640 else 0.5
+
+    scale_ratios = [0.9, 0.8, 0.7, 0.6, 0.5]
+    for r in scale_ratios:
         if out_p.stat().st_size <= target_limit_bytes:
             break
+        s = max(r, min_scale)
+        new_w = max(1, int(round(orig_w * s)))
+        new_h = max(1, int(round(orig_h * s)))
+
+        if (new_w, new_h) == current_frames[0].size:
+            if s == min_scale or r == 0.5:
+                break
+            continue
+
         cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-        cur_colors = colors
-        logger.info(f"{log_prefix} 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，自适应降级至 {colors} 色调色板...")
+        logger.info(
+            f"{log_prefix} 动图体积 {cur_size_mb:.2f}MB 超出 {max_limit_mb}MB 限制，"
+            f"自适应降低分辨率 ({s:.2f}x): {current_frames[0].size[0]}x{current_frames[0].size[1]} -> {new_w}x{new_h}..."
+        )
+        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in orig_frames]
         p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
         p_frames[0].save(
             str(out_p),
@@ -1724,11 +1743,41 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             optimize=True
         )
 
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
+
+        if s == min_scale or r == 0.5:
+            break
+
     if out_p.stat().st_size <= target_limit_bytes:
         return str(out_p)
 
-    # 阶段 2: 智能隔帧抽帧 (当帧数较多 >= 16 帧时，优先通过隔帧采样压缩体积，100% 保持原始分辨率与宽高比)
-    if out_p.stat().st_size > target_limit_bytes and len(current_frames) >= 16:
+    # 阶段 2: 分辨率到下限仍超限，才降色彩 (192, 128, 96, 64)
+    color_steps = [192, 128, 96, 64]
+    for colors in color_steps:
+        if out_p.stat().st_size <= target_limit_bytes:
+            break
+        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
+        cur_colors = colors
+        logger.info(f"{log_prefix} 分辨率已至下限仍超限 ({cur_size_mb:.2f}MB)，自适应降级至 {colors} 色调色板...")
+        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
+        p_frames[0].save(
+            str(out_p),
+            save_all=True,
+            append_images=p_frames[1:],
+            duration=cur_duration,
+            loop=loop,
+            optimize=True
+        )
+
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
+
+    if out_p.stat().st_size <= target_limit_bytes:
+        return str(out_p)
+
+    # 阶段 3: 前两步都到底仍超限，最后才智能隔帧抽帧
+    while out_p.stat().st_size > target_limit_bytes and len(current_frames) >= 4:
         cur_size_mb = out_p.stat().st_size / (1024 * 1024)
         old_count = len(current_frames)
         current_frames = current_frames[::2]
@@ -1736,7 +1785,10 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
         else:
             cur_duration = max(20, int(cur_duration * 2))
-        logger.info(f"{log_prefix} 帧数较多导致体积居高 ({cur_size_mb:.2f}MB, {old_count} 帧)，启动智能隔帧抽帧 (当前 {len(current_frames)} 帧，完全保持原始播放节奏)...")
+        logger.info(
+            f"{log_prefix} 分辨率与调色板均达下限仍超限 ({cur_size_mb:.2f}MB)，"
+            f"启动智能隔帧抽帧 ({old_count} 帧 -> {len(current_frames)} 帧，完全保持原始播放节奏)..."
+        )
         p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
         p_frames[0].save(
             str(out_p),
@@ -1746,65 +1798,8 @@ def compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix=
             loop=loop,
             optimize=True
         )
-
-    if out_p.stat().st_size <= target_limit_bytes:
-        return str(out_p)
-
-    # 阶段 3: 严格保等比自适应分辨率缩放
-    max_rescale_rounds = 10
-    round_idx = 0
-    while out_p.stat().st_size > target_limit_bytes and round_idx < max_rescale_rounds:
-        round_idx += 1
-        cur_size_mb = out_p.stat().st_size / (1024 * 1024)
-        cur_w, cur_h = current_frames[0].size
-
-        # 基于面积与文件体积比例预估缩放因子
-        scale = min(0.88, (target_limit_bytes / out_p.stat().st_size) ** 0.5)
-        new_w = max(1, int(round(cur_w * scale)))
-        new_h = max(1, int(round(cur_h * scale)))
-
-        # 严格保等比：设定合理的最小分辨率基线 (例如短边不低于 160，若原图已小于 160 则不低于 120)
-        min_dim = 160
-        if min(new_w, new_h) < min_dim:
-            fit_scale = min_dim / max(1, min(cur_w, cur_h))
-            new_w = max(120, int(round(cur_w * fit_scale)))
-            new_h = max(120, int(round(cur_h * fit_scale)))
-
-        if new_w >= cur_w and new_h >= cur_h:
-            # 尺寸触底无法继续缩小，若帧数仍较多 (>= 16)，执行二次隔帧抽帧挽救
-            if len(current_frames) >= 16:
-                old_count = len(current_frames)
-                current_frames = current_frames[::2]
-                if isinstance(cur_duration, (list, tuple)):
-                    cur_duration = [max(20, int(d * 2)) for d in cur_duration[::2]]
-                else:
-                    cur_duration = max(20, int(cur_duration * 2))
-                logger.info(f"{log_prefix} 尺寸触及基线，执行二次隔帧抽帧 ({old_count} 帧 -> {len(current_frames)} 帧)...")
-                p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
-                p_frames[0].save(
-                    str(out_p),
-                    save_all=True,
-                    append_images=p_frames[1:],
-                    duration=cur_duration,
-                    loop=loop,
-                    optimize=True
-                )
-                if out_p.stat().st_size <= target_limit_bytes:
-                    return str(out_p)
-                continue
-            break
-
-        logger.info(f"{log_prefix} 动图仍超限 ({cur_size_mb:.2f}MB)，等比优化分辨率: {cur_w}x{cur_h} -> {new_w}x{new_h}...")
-        current_frames = [f.resize((new_w, new_h), Image.Resampling.LANCZOS) for f in current_frames]
-        p_frames = [f.convert("P", palette=Image.ADAPTIVE, colors=cur_colors) for f in current_frames]
-        p_frames[0].save(
-            str(out_p),
-            save_all=True,
-            append_images=p_frames[1:],
-            duration=cur_duration,
-            loop=loop,
-            optimize=True
-        )
+        if out_p.stat().st_size <= target_limit_bytes:
+            return str(out_p)
 
     if out_p.stat().st_size > target_limit_bytes:
         final_mb = out_p.stat().st_size / (1024 * 1024)
@@ -5827,7 +5822,7 @@ class MainWindow(QMainWindow):
             elif policy == "thread":
                 x_action = "thread"
             else: # "ask"
-                sig_hint = "<br><font color='#34d399'>💡 选择智能截断将优先保留正文，按顺序自动裁剪赞助引流链接 (Patreon/Ko-fi) 与标签。</font>"
+                sig_hint = "<br><font color='#34d399'>💡 选择发布将自动应用预告+DA引流格式（在句子边界截取预告，必保 DA 外链与标签）。</font>"
                 self.x_limit_msg_lbl.setText(
                     f"X (Twitter) 文本计为 <b>{x_count}</b> 字符 (限额 <b>{x_limit}</b> 字符)，已超限 <b>{x_count - x_limit}</b> 字。{sig_hint}<br>请确认发布方式："
                 )

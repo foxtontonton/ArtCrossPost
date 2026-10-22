@@ -1,12 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 ArtCrossPost - X (Twitter) Text & Thread Processing Utilities
-规范:
-- URL 正则提取与统一折算为 23 字符
-- 智能截断 (方案 A): 保护末尾 Patreon/Ko-fi 等签名与变现链接
-- 智能串推切分 (Thread): 保护 URL 完整性，自然换行/句号断句，追加 (1/N) 序号
+2026-10-23 方案 B: 统一预告 + 引流格式
+格式:
+[正文预告]
+
+🔞 NSFW full set on DeviantArt 👇 [DA链接]
+
+[标签行]
+
+优先级:
+- 必保: NSFW 提示句 + DA 外链 (URL 按加权 23 字计)
+- 次保: 标签，在剩余预算内尽量全保
+- 可截: 正文只留开头预告，必须在句子边界截断，不许截半句
 """
 import re
+
+DEFAULT_X_DA_LINK = "https://www.deviantart.com/foxtontonton"
+DEFAULT_X_NSFW_NOTICE = "🔞 NSFW full set on DeviantArt 👇"
+
 
 def calculate_x_char_count(text: str) -> int:
     """
@@ -30,103 +42,224 @@ def calculate_x_char_count(text: str) -> int:
     return count
 
 
-def truncate_x_text(full_text: str, limit: int = 280) -> tuple[str, int, bool]:
+def truncate_at_sentence_boundary(text: str, budget: int) -> str:
     """
-    针对 X 平台进行智能截断 (优先级反转: 优先保留正文，签名最先被裁):
-    裁剪顺序:
-    ① 赞助引流文案 (先删 Patreon/Ko-fi 等链接行，保留 DeviantArt 链接)
-    ② tags (若删完引流依然超限，从后往前逐个移除 hashtags)
-    ③ 正文 (正文优先保留，最后才动；末尾附加 '...'，杜绝中文标记)
-    返回: (truncated_text, truncated_chars, signature_preserved)
+    在句子边界进行严格截断，绝不截断半句话。
+    句子终结符判定:
+    - 中文标点: 。、！、？、…
+    - 英文标点: .、!、? 后紧跟空白符、换行符或文本末尾
+    - 换行符: \n+
+    若整段文本都在预算内，返回全文；若最长可在预算内的前缀中找不到任何完整句子终结符，返回空字符串。
+    """
+    if not text or budget <= 0:
+        return ""
+    if calculate_x_char_count(text) <= budget:
+        return text.strip()
+
+    # 二分查找权重在 budget 内的最长字符切片
+    low, high = 0, len(text)
+    best_len = 0
+    while low <= high:
+        mid = (low + high) // 2
+        cand = text[:mid]
+        if calculate_x_char_count(cand) <= budget:
+            best_len = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    prefix = text[:best_len]
+    if not prefix:
+        return ""
+
+    # 在 prefix 内向前检索最后一个句子终结符
+    pattern = r'[。！？\u2026]|\n+|[.!?]+(?=[\s\n]|$)'
+    matches = list(re.finditer(pattern, prefix))
+    if matches:
+        last_match = matches[-1]
+        cut_point = last_match.end()
+        return prefix[:cut_point].strip()
+
+    return ""
+
+
+def format_x_teaser_post(
+    title: str = "",
+    desc: str = "",
+    tags: list[str] = None,
+    da_link: str = None,
+    nsfw_notice: str = None,
+    limit: int = 280
+) -> str:
+    """
+    X (Twitter) 方案 B 预告+引流统一排版引擎:
+    1. 格式:
+       [正文预告]
+
+       🔞 NSFW full set on DeviantArt 👇 [DA链接]
+
+       [标签行]
+    2. 优先级:
+       - 必保: NSFW 提示句 + DA 外链 (URL 按加权 23 字计)
+       - 次保: 标签，在剩余预算内从尾部逐个截取尽量全保
+       - 可截: 正文只留开头预告，必须在句子边界截断，不许截半句
+    3. 预算:
+       总加权 <= 280
+       预告可用长度 = 280 - 提示句 - 23 - 标签 - 格式余量
+       正文短于可用长度 -> 全文保留
+       可用长度 <= 0 -> 先砍标签尾部，仍不够 -> 只发提示句 + 链接
+    """
+    title = (title or "").strip()
+    desc = (desc or "").strip()
+    tags = tags or []
+
+    # 规范化外部传入或默认的 DA 引流参数
+    if da_link is None:
+        try:
+            from config import load_config
+            cfg = load_config()
+            da_link = cfg.get("defaults", {}).get("x_da_link", DEFAULT_X_DA_LINK)
+        except Exception:
+            da_link = DEFAULT_X_DA_LINK
+
+    if nsfw_notice is None:
+        try:
+            from config import load_config
+            cfg = load_config()
+            nsfw_notice = cfg.get("defaults", {}).get("x_nsfw_notice", DEFAULT_X_NSFW_NOTICE)
+        except Exception:
+            nsfw_notice = DEFAULT_X_NSFW_NOTICE
+
+    da_link = (da_link or "").strip()
+    nsfw_notice = (nsfw_notice or "").strip()
+
+    if nsfw_notice and da_link:
+        notice_line = f"{nsfw_notice} {da_link}".strip()
+    else:
+        notice_line = (nsfw_notice or da_link or "").strip()
+
+    # 清理正文并剔除旧的赞助签名 (如 Patreon/Ko-fi 引流模板)
+    raw_body = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+    sig_markers = ["---", "patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp", "subscribestar", "dlsite", "gumroad"]
+    cleaned_body_lines = []
+    for line in raw_body.splitlines():
+        if any(marker in line.lower() for marker in sig_markers):
+            break
+        cleaned_body_lines.append(line)
+    body = "\n".join(cleaned_body_lines).strip()
+
+    # 规范化标签为标准推特 Hashtags (#tag)
+    hashtags = []
+    seen = set()
+    for t in tags:
+        clean = re.sub(r"^[#＃]+", "", str(t).strip())
+        clean = re.sub(r"\s+", "_", clean).strip()
+        if not clean:
+            continue
+        tag_lower = clean.lower()
+        if tag_lower in seen:
+            continue
+        if f"#{tag_lower}" in body.lower() or f"#{clean}" in body:
+            continue
+        seen.add(tag_lower)
+        hashtags.append(f"#{clean}")
+
+    # 步骤 1: 预算必保提示句 + 尽量全保标签
+    current_tags = list(hashtags)
+    while current_tags:
+        tag_str = " ".join(current_tags)
+        cand_base = f"{notice_line}\n\n{tag_str}" if notice_line else tag_str
+        if calculate_x_char_count(cand_base) <= limit:
+            break
+        current_tags.pop()
+
+    tag_str = " ".join(current_tags)
+    base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
+
+    if not body:
+        return base_without_body
+
+    # 步骤 2: 检查正文短文是否可全文保留
+    full_cand = f"{body}\n\n{base_without_body}" if base_without_body else body
+    if calculate_x_char_count(full_cand) <= limit:
+        return full_cand
+
+    # 步骤 3: 正文超限，在可用预算内按句子边界截断
+    sep_overhead = 2 if base_without_body else 0
+    body_budget = limit - calculate_x_char_count(base_without_body) - sep_overhead
+    teaser = truncate_at_sentence_boundary(body, body_budget)
+
+    # 步骤 4: 可用长度 <= 0 或连第一句也放不下时，先砍标签尾部腾出预算
+    while not teaser and current_tags:
+        current_tags.pop()
+        tag_str = " ".join(current_tags)
+        base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
+        sep_overhead = 2 if base_without_body else 0
+        body_budget = limit - calculate_x_char_count(base_without_body) - sep_overhead
+        if body_budget > 0:
+            teaser = truncate_at_sentence_boundary(body, body_budget)
+
+    # 步骤 5: 组合最终结果，仍不够则只发提示句 + 链接
+    if teaser:
+        return f"{teaser}\n\n{base_without_body}" if base_without_body else teaser
+    else:
+        return base_without_body
+
+
+def format_x_full_text(
+    title: str = "",
+    desc: str = "",
+    tags: list[str] = None,
+    da_link: str = None,
+    nsfw_notice: str = None,
+    limit: int = 280
+) -> str:
+    """
+    组合 X (Twitter) 推文完整正文 (自动应用预告+引流策略方案 B)
+    """
+    return format_x_teaser_post(
+        title=title,
+        desc=desc,
+        tags=tags,
+        da_link=da_link,
+        nsfw_notice=nsfw_notice,
+        limit=limit
+    )
+
+
+def truncate_x_text(
+    full_text: str,
+    limit: int = 280,
+    da_link: str = None,
+    nsfw_notice: str = None
+) -> tuple[str, int, bool]:
+    """
+    针对 X 平台进行智能截断 (执行方案 B 预告+引流策略，废弃旧版裁引流保正文逻辑)
+    返回: (truncated_text, truncated_chars, da_link_preserved)
     """
     orig_count = calculate_x_char_count(full_text)
     if orig_count <= limit:
-        return full_text, 0, False
+        da_ok = (da_link or DEFAULT_X_DA_LINK).lower() in full_text.lower()
+        return full_text, 0, da_ok
 
-    cur_text = full_text
+    # 提取现有文本中的 Hashtags 与正文内容
+    tag_matches = list(re.finditer(r'#[^\s#]+', full_text))
+    extracted_tags = [m.group(0) for m in tag_matches]
+    text_without_tags = re.sub(r'#[^\s#]+', '', full_text).strip()
 
-    # ① 裁剪赞助引流文案 (先删 Patreon/Ko-fi 等链接行，保留 DeviantArt 链接)
-    sponsorship_domains = [
-        "patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp",
-        "subscribestar", "gumroad", "dlsite"
-    ]
-    lines = cur_text.splitlines()
-    filtered_lines = []
-    removed_sponsorship = False
+    result = format_x_teaser_post(
+        title="",
+        desc=text_without_tags,
+        tags=extracted_tags,
+        da_link=da_link,
+        nsfw_notice=nsfw_notice,
+        limit=limit
+    )
 
-    for line in lines:
-        line_lower = line.lower()
-        if "deviantart.com" in line_lower:
-            filtered_lines.append(line)
-        elif any(domain in line_lower for domain in sponsorship_domains):
-            removed_sponsorship = True
-            continue
-        else:
-            filtered_lines.append(line)
+    cut_chars = max(0, len(full_text) - len(result))
+    da_ok = (da_link or DEFAULT_X_DA_LINK).lower() in result.lower()
+    return result, cut_chars, da_ok
 
-    if removed_sponsorship:
-        cleaned_lines = []
-        for idx, l in enumerate(filtered_lines):
-            # 若分割线后已无任何链接或有效内容，清理孤立分割线
-            if l.strip() == "---":
-                remaining = "\n".join(filtered_lines[idx+1:]).strip()
-                if not remaining or not any(m in remaining.lower() for m in ["http://", "https://", "deviantart.com"]):
-                    continue
-            cleaned_lines.append(l)
-        candidate = "\n".join(cleaned_lines).strip()
-        candidate = re.sub(r'\n{3,}', '\n\n', candidate)
-        if calculate_x_char_count(candidate) <= limit:
-            da_preserved = "deviantart.com" in candidate.lower()
-            return candidate, max(0, len(full_text) - len(candidate)), da_preserved
-        cur_text = candidate
-
-    # ② 裁剪 tags (若依然超限，从后往前逐个移除 hashtags)
-    tag_matches = list(re.finditer(r'#[^\s#]+', cur_text))
-    if tag_matches:
-        for m in reversed(tag_matches):
-            start = m.start()
-            end = m.end()
-            if start > 0 and cur_text[start - 1] == ' ':
-                start -= 1
-            cand = cur_text[:start] + cur_text[end:]
-            cand = re.sub(r'[ \t]+\n', '\n', cand)
-            cand = re.sub(r'\n{3,}', '\n\n', cand).strip()
-            cur_text = cand
-            if calculate_x_char_count(cur_text) <= limit:
-                da_preserved = "deviantart.com" in cur_text.lower()
-                return cur_text, max(0, len(full_text) - len(cur_text)), da_preserved
-
-    # ③ 裁剪正文 (正文优先保留，最后才动；末尾附加 '...')
-    has_da = "deviantart.com" in cur_text.lower()
-    if has_da:
-        lines = cur_text.splitlines()
-        da_lines = [l for l in lines if "deviantart.com" in l.lower()]
-        non_da_lines = [l for l in lines if "deviantart.com" not in l.lower()]
-        da_block = "\n".join(da_lines).strip()
-        body_part = "\n".join(non_da_lines).strip()
-
-        needed_da_budget = calculate_x_char_count(da_block) + 4
-        if limit - needed_da_budget >= 25:
-            body_budget = limit - needed_da_budget - calculate_x_char_count("...")
-            cut_b = body_part
-            while cut_b and calculate_x_char_count(cut_b) > body_budget:
-                cut_b = cut_b[:-5]
-            while cut_b and calculate_x_char_count(cut_b) > body_budget:
-                cut_b = cut_b[:-1]
-            final_text = f"{cut_b.rstrip()}...\n\n{da_block}".strip()
-            if calculate_x_char_count(final_text) <= limit:
-                return final_text, max(0, len(full_text) - len(final_text)), True
-
-    ellipsis = "..."
-    budget = limit - calculate_x_char_count(ellipsis)
-    cut = cur_text
-    while cut and calculate_x_char_count(cut) > budget:
-        cut = cut[:-5]
-    while cut and calculate_x_char_count(cut) > budget:
-        cut = cut[:-1]
-
-    final_text = cut.rstrip() + ellipsis
-    return final_text, max(0, len(full_text) - len(final_text)), False
 
 def split_into_x_threads(full_text: str, limit: int = 280) -> list[str]:
     """
@@ -214,70 +347,3 @@ def split_into_x_threads(full_text: str, limit: int = 280) -> list[str]:
         final_chunks.append(full_c)
 
     return final_chunks
-
-
-def format_x_full_text(title: str = "", desc: str = "", tags: list[str] = None) -> str:
-    """
-    组合 X (Twitter) 推文完整正文:
-    - 规范化 tags 列表为标准推特 Hashtags (#tag1 #tag2)
-    - 自动滤除正文中已包含的重复标签
-    - 优先将 Hashtag 区域置于正文末尾、引流签名 (--- / Patreon / Ko-fi) 之前
-    """
-    title = (title or "").strip()
-    desc = (desc or "").strip()
-    tags = tags or []
-
-    hashtags = []
-    seen = set()
-    desc_lower = desc.lower()
-
-    for t in tags:
-        clean = re.sub(r"^[#＃]+", "", str(t).strip())
-        # 替换内部空格为下划线，符合推特 Hashtag 语法
-        clean = re.sub(r"\s+", "_", clean).strip()
-        if not clean:
-            continue
-        tag_lower = clean.lower()
-        if tag_lower in seen:
-            continue
-        # 如果正文中已明确包含此 Hashtag，则不重复追加
-        if f"#{tag_lower}" in desc_lower or f"#{clean}" in desc:
-            continue
-        seen.add(tag_lower)
-        hashtags.append(f"#{clean}")
-
-    tag_line = " ".join(hashtags)
-
-    if not tag_line:
-        return f"{title}\n\n{desc}".strip() if title else desc
-
-    if not desc:
-        return f"{title}\n\n{tag_line}".strip() if title else tag_line
-
-    # 检查 desc 末尾是否存在签名
-    sig_markers = ["patreon.com", "ko-fi.com", "fanbox.cc", "fantia.jp", "subscribestar", "dlsite", "gumroad", "---"]
-    tail_sample = desc[-200:].lower() if len(desc) > 200 else desc.lower()
-    has_sig = any(m in tail_sample for m in sig_markers)
-
-    sig_start = -1
-    if has_sig:
-        divider_idx = desc.rfind("\n---")
-        if divider_idx != -1 and divider_idx >= len(desc) - 220:
-            sig_start = divider_idx
-        else:
-            lines = desc.splitlines(keepends=True)
-            accum = 0
-            for line in lines:
-                if any(m in line.lower() for m in sig_markers) and accum >= len(desc) - 200:
-                    sig_start = accum
-                    break
-                accum += len(line)
-
-    if sig_start != -1:
-        body = desc[:sig_start].rstrip()
-        sig = desc[sig_start:].lstrip("\r\n")
-        combined_desc = f"{body}\n\n{tag_line}\n\n{sig}".strip() if body else f"{tag_line}\n\n{sig}".strip()
-    else:
-        combined_desc = f"{desc}\n\n{tag_line}".strip()
-
-    return f"{title}\n\n{combined_desc}".strip() if title else combined_desc
