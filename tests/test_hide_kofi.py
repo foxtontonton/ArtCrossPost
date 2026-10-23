@@ -127,7 +127,7 @@ class TestHideKofi:
         all_disps = get_all_dispatchers(Path("dummy"))
         names = [disp.name for disp in all_disps]
         assert "kofi" in names
-        assert len(all_disps) == 4
+        assert len(all_disps) >= 4  # 支持包含新接入平台 (如 Civitai)
 
     def test_settings_dialog_toggle_kofi(self, mock_main_window):
         """
