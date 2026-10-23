@@ -568,6 +568,7 @@ class XTwitterDispatcher(BaseDispatcher):
                     # 3. 勾选官方 "Made with AI" 系统设置 (首条推文)
                     # 注: is_any_gif 必须在此处提前定义，供下方披露弹窗缺失分支与第 4 步复用
                     is_any_gif = any(str(x).lower().endswith(".gif") for x in abs_images)
+                    ai_compliance_entry = None
                     if is_ai:
                         ai_verified = None
                         ai_detail = "未打开披露设置弹窗"
@@ -576,19 +577,35 @@ class XTwitterDispatcher(BaseDispatcher):
                                 "button[data-testid='contentDisclosureButton'], button[aria-label*='内容披露'], button[aria-label*='披露'], button[aria-label*='disclosure' i]"
                             )
                             if disc_btns:
-                                # 选取发帖栏内的披露按钮
+                                target_btn = disc_btns[-1]
                                 try:
-                                    disc_btns[-1].click(timeout=2500, force=True)
+                                    target_btn.scroll_into_view_if_needed(timeout=2000)
                                 except Exception:
-                                    disc_btns[-1].evaluate("el => el.click()")
+                                    pass
+                                try:
+                                    target_btn.click(timeout=2500, force=True)
+                                except Exception:
+                                    target_btn.evaluate("el => el.click()")
 
+                                # 3 秒轮询 + 补点机制
+                                poll_start = time.time()
+                                last_reclick = poll_start
                                 dlg = None
-                                for _ in range(5):
-                                    time.sleep(0.4)
+                                while time.time() - poll_start < 3.0:
                                     dlgs = page.query_selector_all("div[role='dialog']")
                                     if dlgs:
                                         dlg = dlgs[-1]
                                         break
+                                    if time.time() - last_reclick >= 1.0:
+                                        last_reclick = time.time()
+                                        try:
+                                            target_btn.click(timeout=1000, force=True)
+                                        except Exception:
+                                            try:
+                                                target_btn.evaluate("el => el.click()")
+                                            except Exception:
+                                                pass
+                                    time.sleep(0.3)
 
                                 if dlg:
                                     # 精准定位 "由 AI 生成" (不误触付费合作开关)
@@ -625,12 +642,15 @@ class XTwitterDispatcher(BaseDispatcher):
                             ai_verified = False
                             ai_detail = f"设置 Made with AI 异常: {e}"
                             logger.warning(f"[X] 设置 Made with AI 时遇到异常: {e}")
-                        compliance.append(self.verify_compliance_item("x_twitter", "ai_disclosure", True, ai_verified, ai_detail))
+                        ai_compliance_entry = self.verify_compliance_item("x_twitter", "ai_disclosure", True, ai_verified, ai_detail)
+                        compliance.append(ai_compliance_entry)
                     else:
-                        compliance.append(self.verify_compliance_item("x_twitter", "ai_disclosure", False, True, "未要求开启 AI 披露"))
+                        ai_compliance_entry = self.verify_compliance_item("x_twitter", "ai_disclosure", False, True, "未要求开启 AI 披露")
+                        compliance.append(ai_compliance_entry)
 
                     # 4. 媒体级敏感警告 (Nudity) 与 官方 AI 生成标识 (首条推文)
                     # (is_any_gif 已在第 3 步前定义，此处直接复用)
+                    ai_media_verified = False
                     if abs_images and (is_sensitive or is_ai):
                         if is_any_gif:
                             # 推特官方针对动态 GIF 原生不提供局部切图与媒体弹窗，敏感度依托全局/账户披露管控
@@ -645,6 +665,10 @@ class XTwitterDispatcher(BaseDispatcher):
                                     "button[aria-label*='编辑媒体'], button[aria-label*='Edit media'], button[aria-label*='编辑'], button[aria-label*='Edit'], div[data-testid='attachments'] button:has-text('编辑')"
                                 )
                                 if edit_btn:
+                                    try:
+                                        edit_btn.scroll_into_view_if_needed(timeout=2000)
+                                    except Exception:
+                                        pass
                                     try:
                                         edit_btn.click(timeout=2500, force=True)
                                     except Exception:
@@ -704,7 +728,9 @@ class XTwitterDispatcher(BaseDispatcher):
                                                 if ai_media_cb and not ai_media_cb.is_checked():
                                                     ai_media_cb.click()
                                                     time.sleep(0.3)  # 等待复选框点击生效
-                                                    logger.info("[X] 媒体编辑中勾选官方「AI 生成」完成 (激活 UserDeclared 标识)")
+                                                if ai_media_cb:
+                                                    ai_media_verified = ai_media_cb.is_checked()
+                                                    logger.info(f"[X] 媒体编辑中勾选官方「AI 生成」完成 (激活 UserDeclared 标识, 状态: {ai_media_verified})")
 
                                         # 点击保存 (endEditingButton / 保存 / Save / 完成) 确保关闭媒体弹窗
                                         save_btn = edit_dialog.query_selector(
@@ -724,6 +750,12 @@ class XTwitterDispatcher(BaseDispatcher):
 
                             if is_sensitive:
                                 compliance.append(self.verify_compliance_item("x_twitter", "media_sensitive", True, media_verified, media_detail))
+
+                            # 级联兜底: 若披露设置弹窗未成功开启或未确认，但媒体级已成功勾选 AI 声明，则判定通过（媒体级声明兜底）
+                            if is_ai and ai_compliance_entry and (ai_compliance_entry.get("verified") is not True) and ai_media_verified:
+                                ai_compliance_entry["verified"] = True
+                                ai_compliance_entry["detail"] = "通过（媒体级声明兜底）"
+                                logger.info("[X] 全局披露弹窗未确认，但媒体级 AI 声明已生效，合规判定为: 通过（媒体级声明兜底）")
                     elif is_sensitive:
                         compliance.append(self.verify_compliance_item("x_twitter", "media_sensitive", True, None, "无图片附件可设置媒体警告"))
                     else:
