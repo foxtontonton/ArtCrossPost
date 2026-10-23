@@ -3203,6 +3203,7 @@ class MainWindow(QMainWindow):
         self.x_selected_paths = set()  # 记录用户在图集中为 X (Twitter) 单独勾选的素材路径 (最多 4 张)
         self._thumbnail_cache = {}  # {image_path: QPixmap} 缩略图缓存
         self.custom_censor_boxes = {}  # {image_path: [[x1, y1, x2, y2], ...]}
+        self.custom_censor_captured_ratios = {}  # {image_path: float} 存框时的锚定拉杆比例
         self.current_preview_index = 0
         self._current_rendered_pixmap = None
         self._platform_login_threads = {}
@@ -5187,6 +5188,76 @@ class MainWindow(QMainWindow):
         qimg = QImage(data, pil_img.width, pil_img.height, QImage.Format_RGBA8888)
         return QPixmap.fromImage(qimg)
 
+    def _get_effective_censor_boxes(
+        self,
+        img_path,
+        orig_w: int = None,
+        orig_h: int = None,
+        mode: str = None,
+        ratio: float = None,
+        custom_boxes_source: dict = None,
+        captured_ratios_source: dict = None,
+    ) -> list:
+        """
+        统一计算静态图/GIF 预览与发布路径的最终生效打码框（禁止在多处重复编写套算逻辑）：
+        - 若存在用户手调框 custom_boxes，则以手调框为锚定基准，绕各框中心按 current_ratio / captured_ratio 缩放并钳制越界（不回写 custom_censor_boxes）
+        - 若无手调框，则使用 AI 检测框（带缓存）按 mode 与 ratio 计算
+        """
+        img_key = str(img_path)
+        if mode is None or ratio is None:
+            _, cur_mode, cur_ratio = self._get_current_censor_params()
+            if mode is None:
+                mode = cur_mode
+            if ratio is None:
+                ratio = cur_ratio
+
+        if orig_w is None or orig_h is None or orig_w <= 0 or orig_h <= 0:
+            orig_w, orig_h = 800, 600
+            try:
+                with Image.open(img_key) as tmp_im:
+                    orig_w, orig_h = tmp_im.width, tmp_im.height
+            except Exception as e:
+                logger.debug(f"读取图片尺寸异常: {e}")
+
+        cb_map = custom_boxes_source if custom_boxes_source is not None else getattr(self, "custom_censor_boxes", {})
+        cr_map = captured_ratios_source if captured_ratios_source is not None else getattr(self, "custom_censor_captured_ratios", {})
+
+        custom_boxes = cb_map.get(img_path) if img_path in cb_map else cb_map.get(img_key)
+        captured_ratio = cr_map.get(img_path) if img_path in cr_map else cr_map.get(img_key)
+
+        if custom_boxes is not None and len(custom_boxes) == 0:
+            return []
+
+        if custom_boxes and len(custom_boxes) > 0:
+            base_boxes = custom_boxes
+            user_customized = True
+        else:
+            user_customized = False
+            if not hasattr(self, "_detected_boxes_cache"):
+                self._detected_boxes_cache = {}
+            if img_key not in self._detected_boxes_cache:
+                try:
+                    if img_key.lower().endswith(".gif"):
+                        with Image.open(img_key) as im:
+                            first_fr_bgr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+                            self._detected_boxes_cache[img_key] = self.censor_engine.detect_sensitive_regions(None, img_bgr=first_fr_bgr)
+                    else:
+                        self._detected_boxes_cache[img_key] = self.censor_engine.detect_sensitive_regions(img_key)
+                except Exception as e:
+                    logger.debug(f"AI 检测敏感区域异常: {e}")
+                    self._detected_boxes_cache[img_key] = []
+            base_boxes = self._detected_boxes_cache[img_key]
+
+        return self.censor_engine.resolve_final_boxes(
+            base_boxes,
+            orig_w,
+            orig_h,
+            mode=mode,
+            custom_ratio=ratio,
+            user_customized=user_customized,
+            captured_ratio=captured_ratio,
+        )
+
     def _do_refresh_live_preview(self):
         """在同一个预览框中统一执行打码与水印双重合成 (支持静态图片与动态 GIF)"""
         if not self.image_paths:
@@ -5215,7 +5286,7 @@ class MainWindow(QMainWindow):
                 self.preview_canvas.set_gif(img_path)
                 orig_w, orig_h = self.preview_canvas.get_gif_orig_size()
 
-                # 2. 准备动态打码参数 (AI检测首次自动缓存，滑动滑块时纯算术缩放，无需重复推断与重复存盘)
+                # 2. 准备动态打码参数 (统一调用 _get_effective_censor_boxes，与静态图和发布路径完全一致)
                 censor_active = self.auto_censor_cb.isChecked()
                 censor_desc = "未开启"
                 final_boxes = []
@@ -5223,29 +5294,11 @@ class MainWindow(QMainWindow):
 
                 if censor_active:
                     style, mode, ratio = self._get_current_censor_params()
-                    custom_boxes = self.custom_censor_boxes.get(img_path)
-                    if custom_boxes and len(custom_boxes) > 0:
-                        base_boxes = custom_boxes
-                    else:
-                        if not hasattr(self, "_detected_boxes_cache"):
-                            self._detected_boxes_cache = {}
-                        if img_path not in self._detected_boxes_cache:
-                            # 仅对动图第一帧运行一次 AI 识别并缓存
-                            try:
-                                with Image.open(img_path) as im:
-                                    first_fr_bgr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
-                                    self._detected_boxes_cache[img_path] = self.censor_engine.detect_sensitive_regions(None, img_bgr=first_fr_bgr)
-                            except Exception as e:
-                                logger.debug(f"动图首帧 AI 检测异常: {e}")
-                                self._detected_boxes_cache[img_path] = []
-                        base_boxes = self._detected_boxes_cache[img_path]
-
                     w_ref = orig_w if orig_w > 0 else 800
                     h_ref = orig_h if orig_h > 0 else 600
-                    # 用户手调框已是最终形态：仅钳制越界，禁止重复应用覆盖模式换算
-                    final_boxes = self.censor_engine.resolve_final_boxes(
-                        base_boxes, w_ref, h_ref, mode=mode, custom_ratio=ratio,
-                        user_customized=bool(custom_boxes))
+                    final_boxes = self._get_effective_censor_boxes(
+                        img_path, orig_w=w_ref, orig_h=h_ref, mode=mode, ratio=ratio
+                    )
 
                     style_map = {"black_bar": "纯黑条", "mosaic": "马赛克", "blur": "高斯模糊"}
                     censor_desc = f"{style_map.get(style, style)} ({int(ratio*100)}%, {len(final_boxes)}处)"
@@ -5302,20 +5355,22 @@ class MainWindow(QMainWindow):
 
         # ----------------- 针对常规静态图片的处理分支 -----------------
         try:
-            # 1. 第一阶段：打码处理 (若开启)
+            # 1. 第一阶段：打码处理 (若开启，统一通过 _get_effective_censor_boxes 计算生效框)
             censor_active = self.auto_censor_cb.isChecked()
             censor_desc = "未开启"
             boxes = []
             if censor_active:
                 style, mode, ratio = self._get_current_censor_params()
-                custom_boxes = self.custom_censor_boxes.get(img_path)
+                effective_boxes = self._get_effective_censor_boxes(
+                    img_path, mode=mode, ratio=ratio
+                )
                 censored_bgr, boxes = self.censor_engine.apply_censor(
                     img_path,
                     output_path=None,
                     style=style,
                     mode=mode,
                     custom_ratio=ratio,
-                    custom_boxes=custom_boxes
+                    resolved_boxes=effective_boxes,
                 )
                 img_step = censored_bgr
                 style_map = {"black_bar": "纯黑条", "mosaic": "马赛克", "blur": "高斯模糊"}
@@ -5506,19 +5561,16 @@ class MainWindow(QMainWindow):
                     self.notify("⏳ 正在为所有动图帧压制打码与水印，请稍候...", level="info")
                     QApplication.processEvents()
 
-                    # 提取打码框与水印设置
+                    # 提取打码框与水印设置 (统一调用 _get_effective_censor_boxes)
                     censor_params = None
                     if censor_active:
                         style, mode, ratio = self._get_current_censor_params()
-                        custom_boxes = self.custom_censor_boxes.get(current_file)
                         orig_w, orig_h = self.preview_canvas.get_gif_orig_size()
                         w_ref = orig_w if orig_w > 0 else 800
                         h_ref = orig_h if orig_h > 0 else 600
-                        base_boxes = custom_boxes or getattr(self, "_detected_boxes_cache", {}).get(current_file, [])
-                        # 用户手调框已是最终形态：仅钳制越界，禁止重复应用覆盖模式换算
-                        final_boxes = self.censor_engine.resolve_final_boxes(
-                            base_boxes, w_ref, h_ref, mode=mode, custom_ratio=ratio,
-                            user_customized=bool(custom_boxes))
+                        final_boxes = self._get_effective_censor_boxes(
+                            current_file, orig_w=w_ref, orig_h=h_ref, mode=mode, ratio=ratio
+                        )
                         censor_params = {"enabled": True, "style": style, "boxes": final_boxes}
 
                     wm_params = None
@@ -5574,7 +5626,9 @@ class MainWindow(QMainWindow):
     def _on_canvas_boxes_changed(self, boxes):
         if self.image_paths and 0 <= self.current_preview_index < len(self.image_paths):
             current_img = self.image_paths[self.current_preview_index]
-            self.custom_censor_boxes[current_img] = boxes
+            _, _, current_ratio = self._get_current_censor_params()
+            self.custom_censor_boxes[current_img] = [list(b) for b in boxes]
+            self.custom_censor_captured_ratios[current_img] = float(current_ratio)
             self._schedule_preview_refresh(instant=True)
             self.notify(f"已同步更新当前作品打码框位置与尺寸 (共 {len(boxes)} 处)！", level="info")
 
@@ -5584,6 +5638,7 @@ class MainWindow(QMainWindow):
             return
         current_img = self.image_paths[self.current_preview_index]
         self.custom_censor_boxes[current_img] = []
+        self.custom_censor_captured_ratios.pop(current_img, None)
         self.preview_canvas.clear_all_boxes()
         self._schedule_preview_refresh(instant=True)
         self.notify("已清除当前作品的所有打码框！在中央预览图中空白处拖拽可新增打码框。", level="info")
@@ -5598,6 +5653,7 @@ class MainWindow(QMainWindow):
         current_img = self.image_paths[self.current_preview_index]
         if current_img in self.custom_censor_boxes:
             del self.custom_censor_boxes[current_img]
+        self.custom_censor_captured_ratios.pop(current_img, None)
         if hasattr(self, "_detected_boxes_cache") and current_img in self._detected_boxes_cache:
             del self._detected_boxes_cache[current_img]
         self._schedule_preview_refresh(instant=True)
@@ -5671,6 +5727,7 @@ class MainWindow(QMainWindow):
         removed_p = self.image_paths.pop(idx)
         self.x_selected_paths.discard(removed_p)
         self.custom_censor_boxes.pop(removed_p, None)
+        self.custom_censor_captured_ratios.pop(removed_p, None)
         self._thumbnail_cache.pop(removed_p, None)
         if self.image_paths:
             if self.current_preview_index >= len(self.image_paths):
@@ -5796,11 +5853,20 @@ class MainWindow(QMainWindow):
         self.x_selected_paths.clear()
         self._thumbnail_cache.clear()
         self.custom_censor_boxes.clear()
+        self.custom_censor_captured_ratios.clear()
         self.img_list_widget.clear()
         self.current_preview_index = 0
         self.preview_canvas.clear_image()
         if hasattr(self, "history_warning_banner"):
             self.history_warning_banner.hide()
+        self.preview_info_lbl.setText("当前未选择图片")
+        self.preview_status_lbl.setText("🛡️ 打码: 未开启  |  💧 水印: 未开启")
+        self._current_rendered_pixmap = None
+        self._current_rendered_gif_path = None
+        self._refresh_thumbnail_gallery()
+        if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
+            self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
+        self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
 
     def _check_image_duplicate_history(self):
         """P1-2: 导入图片时查历史：若命中已发布过的图片指纹，界面顶部黄色横幅提示"""
@@ -5832,14 +5898,6 @@ class MainWindow(QMainWindow):
         from history_dialog import PublishHistoryDialog
         dlg = PublishHistoryDialog(self.history_manager, parent=self)
         dlg.exec_()
-        self.preview_info_lbl.setText("当前未选择图片")
-        self.preview_status_lbl.setText("🛡️ 打码: 未开启  |  💧 水印: 未开启")
-        self._current_rendered_pixmap = None
-        self._current_rendered_gif_path = None
-        self._refresh_thumbnail_gallery()
-        if self.config.get("auto_fill_default_tags", True) and not self.tags_input.toPlainText().strip():
-            self.tags_input.setPlainText(normalize_tags_to_string(self.config.get("default_tags", "")))
-        self.notify(f"已清空全部 {count} 张素材图片及打码缓存", level="info")
 
     def _import_folder_with_auto_group(self, folder_dir: str = None):
         """P2-2: 导入文件夹并按文件名规则自动分组为多套作品，弹窗微调后载入草稿箱"""
@@ -5875,7 +5933,7 @@ class MainWindow(QMainWindow):
 
     def _start_publishing(self, scheduled_snapshot=None):
         if scheduled_snapshot:
-            images_to_use = [Path(p) for p in scheduled_snapshot.get("image_paths", [])]
+            images_to_use = [str(p) for p in scheduled_snapshot.get("image_paths", [])]
             title_val = re.sub(r"[\r\n\t]+", " ", scheduled_snapshot.get("title", "")).strip()
             desc_val = scheduled_snapshot.get("description", "")
             tags_val = scheduled_snapshot.get("tags", [])
@@ -5885,6 +5943,7 @@ class MainWindow(QMainWindow):
             is_nsfw = scheduled_snapshot.get("is_nsfw", False)
             is_ai = scheduled_snapshot.get("is_ai", False)
             custom_boxes_source = scheduled_snapshot.get("custom_censor_boxes", {})
+            captured_ratios_source = scheduled_snapshot.get("custom_censor_captured_ratios", {})
         else:
             images_to_use = self.image_paths
             title_val = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
@@ -5898,6 +5957,7 @@ class MainWindow(QMainWindow):
             is_nsfw = self.nsfw_checkbox.isChecked()
             is_ai = self.ai_checkbox.isChecked()
             custom_boxes_source = getattr(self, "custom_censor_boxes", {})
+            captured_ratios_source = getattr(self, "custom_censor_captured_ratios", {})
 
         if not images_to_use:
             self.notify("发布内容必须包含至少一张作品图片！", level="warning")
@@ -6026,17 +6086,13 @@ class MainWindow(QMainWindow):
                 any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
                 c_params = None
                 if any_censor:
-                    orig_w, orig_h = 800, 600
-                    try:
-                        with Image.open(p) as tmp_im:
-                            orig_w, orig_h = tmp_im.width, tmp_im.height
-                    except Exception as e:
-                        logger.debug(f"读取动图尺寸异常: {e}")
-                    custom_boxes = custom_boxes_source.get(p) or custom_boxes_source.get(str(p))
-                    base_boxes = custom_boxes or getattr(self, "_detected_boxes_cache", {}).get(p, [])
-                    final_boxes = self.censor_engine.resolve_final_boxes(
-                        base_boxes, orig_w, orig_h, mode=mode, custom_ratio=ratio,
-                        user_customized=bool(custom_boxes))
+                    final_boxes = self._get_effective_censor_boxes(
+                        p,
+                        mode=mode,
+                        ratio=ratio,
+                        custom_boxes_source=custom_boxes_source,
+                        captured_ratios_source=captured_ratios_source,
+                    )
                     c_params = {"enabled": True, "style": style, "boxes": final_boxes}
 
                 # 1. DeviantArt 动图
@@ -6161,14 +6217,20 @@ class MainWindow(QMainWindow):
                 clean_censor_path = None
 
                 if any_censor:
-                    custom_boxes = self.custom_censor_boxes.get(p)
+                    effective_boxes = self._get_effective_censor_boxes(
+                        p,
+                        mode=mode,
+                        ratio=ratio,
+                        custom_boxes_source=custom_boxes_source,
+                        captured_ratios_source=captured_ratios_source,
+                    )
                     censored_bgr, _ = self.censor_engine.apply_censor(
                         p,
                         output_path=None,
                         style=style,
                         mode=mode,
                         custom_ratio=ratio,
-                        custom_boxes=custom_boxes
+                        resolved_boxes=effective_boxes,
                     )
                     if wm_info:
                         pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_wm.{ext}"
@@ -6836,7 +6898,8 @@ class MainWindow(QMainWindow):
             "platform_options": platform_options,
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
-            "custom_censor_boxes": {str(k): v for k, v in getattr(self, "custom_censor_boxes", {}).items()}
+            "custom_censor_boxes": {str(k): v for k, v in getattr(self, "custom_censor_boxes", {}).items()},
+            "custom_censor_captured_ratios": {str(k): float(v) for k, v in getattr(self, "custom_censor_captured_ratios", {}).items()},
         }
 
     def _open_schedule_dialog(self):

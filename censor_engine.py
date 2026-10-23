@@ -141,12 +141,23 @@ class CensorEngine:
         ny2 = min(img_h, cy + hh)
         return [nx1, ny1, nx2, ny2]
 
-    def resolve_final_boxes(self, boxes, img_w, img_h, mode="moderate", custom_ratio=None, user_customized=False):
+    def resolve_final_boxes(
+        self,
+        boxes,
+        img_w,
+        img_h,
+        mode="moderate",
+        custom_ratio=None,
+        user_customized=False,
+        captured_ratio=None,
+    ):
         """
         将候选框解析为最终打码框 (统一入口，禁止绕过)。
-        - user_customized=True (用户在画布上手调/手画的框): 已是最终形态，仅做
-          越界钳制，**严禁**再套 compute_censor_box 做覆盖模式换算。否则每次预览
-          刷新都会把框再收缩/移位一次，且越调越小。
+        - user_customized=True (用户在画布上手调/手画的框):
+          若提供了 current custom_ratio 与存框时的锚定比例 captured_ratio，
+          则每框绕自身中心按 (custom_ratio / captured_ratio) 缩放，再钳制越界；
+          当 custom_ratio == captured_ratio（或未传比例）时保持原存储框逐像素一致，
+          缩放结果仅用于本次渲染，绝不回写源列表。
         - user_customized=False (AI 检测框): 正常应用覆盖模式换算。
         """
         final = []
@@ -157,6 +168,25 @@ class CensorEngine:
                 except Exception as e:
                     logger.debug(f"[CensorEngine] 解析自定义打码框异常: {e}")
                     continue
+
+                if (
+                    custom_ratio is not None
+                    and captured_ratio is not None
+                    and float(captured_ratio) > 0
+                    and abs(float(custom_ratio) - float(captured_ratio)) >= 1e-9
+                ):
+                    scale = float(custom_ratio) / float(captured_ratio)
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    cx = (x1 + x2) / 2.0
+                    cy = (y1 + y2) / 2.0
+                    new_w = max(1.0, bw * scale)
+                    new_h = max(1.0, bh * scale)
+                    x1 = int(round(cx - new_w / 2.0))
+                    y1 = int(round(cy - new_h / 2.0))
+                    x2 = int(round(cx + new_w / 2.0))
+                    y2 = int(round(cy + new_h / 2.0))
+
                 x1 = max(0, min(img_w, x1))
                 y1 = max(0, min(img_h, y1))
                 x2 = max(0, min(img_w, x2))
@@ -169,10 +199,23 @@ class CensorEngine:
                     final.append(cb)
         return final
 
-    def apply_censor(self, image_path, output_path=None, style=None, mode=None, custom_ratio=None, custom_boxes=None, mosaic_size=20):
+    def apply_censor(
+        self,
+        image_path,
+        output_path=None,
+        style=None,
+        mode=None,
+        custom_ratio=None,
+        custom_boxes=None,
+        captured_ratio=None,
+        resolved_boxes=None,
+        mosaic_size=20,
+    ):
         """
         执行图像打码
         custom_boxes: 优先使用人工在界面上手动画出的框坐标 [[x1, y1, x2, y2], ...]
+        captured_ratio: 存下 custom_boxes 时的锚定拉杆比例
+        resolved_boxes: 若调用方已通过统一入口预先计算出最终生效框，则直接使用
         """
         style = style or self.default_style
         mode = mode or self.default_mode
@@ -181,20 +224,26 @@ class CensorEngine:
             raise FileNotFoundError(f"无法读取图片: {image_path}")
 
         h, w = img_bgr.shape[:2]
-        
-        # 如果用户手动指定了框，则直接使用用户指定的框；否则调用 AI 检测
-        if custom_boxes and len(custom_boxes) > 0:
-            boxes = custom_boxes
-        else:
-            boxes = self.detect_sensitive_regions(image_path, img_bgr)
 
         censored = img_bgr.copy()
-        # 用户手调框已是最终形态：仅钳制越界，禁止重复应用覆盖模式换算
-        # (否则每次预览刷新都会把框再收缩/移位一次，越调越小)
-        processed_boxes = self.resolve_final_boxes(
-            boxes, w, h, mode=mode, custom_ratio=custom_ratio,
-            user_customized=bool(custom_boxes)
-        )
+        if resolved_boxes is not None:
+            processed_boxes = [list(b) for b in resolved_boxes]
+        else:
+            # 如果用户手动指定了框，则直接使用用户指定的框；否则调用 AI 检测
+            if custom_boxes and len(custom_boxes) > 0:
+                boxes = custom_boxes
+            else:
+                boxes = self.detect_sensitive_regions(image_path, img_bgr)
+
+            processed_boxes = self.resolve_final_boxes(
+                boxes,
+                w,
+                h,
+                mode=mode,
+                custom_ratio=custom_ratio,
+                user_customized=bool(custom_boxes),
+                captured_ratio=captured_ratio,
+            )
 
         for x1, y1, x2, y2 in processed_boxes:
             roi = censored[y1:y2, x1:x2]
@@ -221,7 +270,7 @@ class CensorEngine:
 
         return censored, processed_boxes
 
-    def apply_censor_gif(self, gif_path, output_path=None, style=None, mode=None, custom_ratio=None, custom_boxes=None, mosaic_size=20):
+    def apply_censor_gif(self, gif_path, output_path=None, style=None, mode=None, custom_ratio=None, custom_boxes=None, captured_ratio=None, mosaic_size=20):
         """
         为多帧动态 GIF 图片执行敏感部位打码，并保持动态帧率
         """
@@ -247,10 +296,11 @@ class CensorEngine:
             h, w = frame_bgr.shape[:2]
             censored = frame_bgr.copy()
 
-            # 用户手调框已是最终形态：仅钳制越界，禁止重复应用覆盖模式换算
+            # 用户手调框按锚定比例绕中心缩放并钳制越界，禁止回写源列表
             frame_boxes = self.resolve_final_boxes(
                 boxes, w, h, mode=mode, custom_ratio=custom_ratio,
-                user_customized=user_customized
+                user_customized=user_customized,
+                captured_ratio=captured_ratio,
             )
             if not processed_boxes:
                 processed_boxes.extend(frame_boxes)
