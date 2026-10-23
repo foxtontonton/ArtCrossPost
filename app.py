@@ -908,7 +908,8 @@ class UnifiedPreviewCanvas(QLabel):
                 if text:
                     font_family = self._watermark_info.get("font_family") or self._watermark_info.get("font_name", "Microsoft YaHei")
                     is_bold = self._watermark_info.get("is_bold", True)
-                    base_font_size = self._watermark_info.get("font_size", 36)
+                    font_size_pct = float(self._watermark_info.get("font_size_pct", 3.0))
+                    base_font_size = WatermarkEngine.compute_font_px(orig_w, font_size_pct)
                     opacity = max(0.05, min(1.0, self._watermark_info.get("opacity", 0.65)))
                     pos = self._watermark_info.get("position", "bottom_right")
                     color_hex = self._watermark_info.get("color_hex", "#ffffff")
@@ -3566,7 +3567,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "watermark_font_combo"):
                 self.config["watermark"]["font_family"] = self.watermark_font_combo.currentText()
             if hasattr(self, "watermark_size_slider"):
-                self.config["watermark"]["font_size"] = self.watermark_size_slider.value()
+                self.config["watermark"]["size_pct"] = self._get_watermark_size_pct()
+                self.config["watermark"].pop("font_size", None)
             if hasattr(self, "watermark_opacity_slider"):
                 self.config["watermark"]["opacity"] = round(self.watermark_opacity_slider.value() / 100.0, 2)
             if hasattr(self, "watermark_pos_combo"):
@@ -4099,13 +4101,15 @@ class MainWindow(QMainWindow):
         w_row4.setSpacing(4)
         w_row4.addWidget(QLabel("字号:"))
         self.watermark_size_slider = QSlider(Qt.Horizontal)
-        self.watermark_size_slider.setRange(1, 120)
-        self.watermark_size_slider.setValue(wm_config.get("font_size", 38))
+        self.watermark_size_slider.setRange(10, 80)
+        self.watermark_size_slider.setSingleStep(1)
+        init_wm_pct = float(wm_config.get("size_pct", 3.0))
+        self.watermark_size_slider.setValue(max(10, min(80, int(round(init_wm_pct * 10)))))
         self.watermark_size_slider.valueChanged.connect(self._on_watermark_size_changed)
         self.watermark_size_slider.valueChanged.connect(lambda: self._schedule_config_save())
         w_row4.addWidget(self.watermark_size_slider, 1)
 
-        self.watermark_size_lbl = QLabel(f"{self.watermark_size_slider.value()}px")
+        self.watermark_size_lbl = QLabel(f"{self.watermark_size_slider.value() / 10.0:.1f}%")
         self.watermark_size_lbl.setMinimumWidth(34)
         self.watermark_size_lbl.setStyleSheet("color: #06b6d4; font-weight: bold;")
         w_row4.addWidget(self.watermark_size_lbl)
@@ -5152,8 +5156,12 @@ class MainWindow(QMainWindow):
         self._schedule_preview_refresh()
         self._schedule_config_save()
 
+    def _get_watermark_size_pct(self) -> float:
+        """获取当前水印字号占图宽百分比 (1.0% ~ 8.0%，步进 0.1%)"""
+        return round(self.watermark_size_slider.value() / 10.0, 1)
+
     def _on_watermark_size_changed(self, val):
-        self.watermark_size_lbl.setText(f"{val}px")
+        self.watermark_size_lbl.setText(f"{val / 10.0:.1f}%")
         self._schedule_preview_refresh()
         self._schedule_config_save()
 
@@ -5259,7 +5267,7 @@ class MainWindow(QMainWindow):
                     text = self.watermark_text_input.text().strip()
                     font_name = self.watermark_font_combo.currentText()
                     family, is_bold = self.watermark_engine.get_font_family(font_name)
-                    font_size = self.watermark_size_slider.value()
+                    font_size_pct = self._get_watermark_size_pct()
                     opacity = self.watermark_opacity_slider.value() / 100.0
                     pos = self.watermark_pos_combo.currentData() or "bottom_right"
                     color_hex = self.watermark_color_combo.currentData() or "#ffffff"
@@ -5271,7 +5279,7 @@ class MainWindow(QMainWindow):
                         "font_name": font_name,
                         "font_family": family,
                         "is_bold": is_bold,
-                        "font_size": font_size,
+                        "font_size_pct": font_size_pct,
                         "opacity": opacity,
                         "position": pos,
                         "color_hex": color_hex,
@@ -5329,7 +5337,7 @@ class MainWindow(QMainWindow):
             if wm_active:
                 text = self.watermark_text_input.text().strip()
                 font_name = self.watermark_font_combo.currentText()
-                font_size = self.watermark_size_slider.value()
+                font_size_pct = self._get_watermark_size_pct()
                 opacity = self.watermark_opacity_slider.value() / 100.0
                 pos = self.watermark_pos_combo.currentData() or "bottom_right"
                 color_hex = self.watermark_color_combo.currentData() or "#ffffff"
@@ -5339,7 +5347,7 @@ class MainWindow(QMainWindow):
                     img_step,
                     text=text,
                     font_name=font_name,
-                    font_size=font_size,
+                    font_size_pct=font_size_pct,
                     opacity=opacity,
                     position=pos,
                     color_hex=color_hex,
@@ -5414,7 +5422,7 @@ class MainWindow(QMainWindow):
 
         wm_enabled = wm_params and wm_params.get("enabled") and bool(wm_params.get("text"))
         if wm_enabled:
-            logger.info(f"[GIF 渲染] 正在向动图各帧压制水印: 文本='{wm_params.get('text')}', 字号={wm_params.get('font_size')}px, 字体='{wm_params.get('font_name')}'")
+            logger.info(f"[GIF 渲染] 正在向动图各帧压制水印: 文本='{wm_params.get('text')}', 字号比例={wm_params.get('font_size_pct', 3.0):.1f}%, 字体='{wm_params.get('font_name')}'")
 
         out_frames = []
         for f_idx, frame in enumerate(ImageSequence.Iterator(im)):
@@ -5450,7 +5458,7 @@ class MainWindow(QMainWindow):
                     fr_pil,
                     text=wm_params.get("text", ""),
                     font_name=wm_params.get("font_name", "微软雅黑 (Microsoft YaHei)"),
-                    font_size=wm_params.get("font_size", 36),
+                    font_size_pct=wm_params.get("font_size_pct", 3.0),
                     opacity=wm_params.get("opacity", 0.65),
                     position=wm_params.get("position", "bottom_right"),
                     color_hex=wm_params.get("color_hex", "#ffffff"),
@@ -5527,7 +5535,7 @@ class MainWindow(QMainWindow):
                             "enabled": True,
                             "text": self.watermark_text_input.text().strip(),
                             "font_name": self.watermark_font_combo.currentText(),
-                            "font_size": self.watermark_size_slider.value(),
+                            "font_size_pct": self._get_watermark_size_pct(),
                             "opacity": self.watermark_opacity_slider.value() / 100.0,
                             "position": self.watermark_pos_combo.currentData() or "bottom_right",
                             "color_hex": self.watermark_color_combo.currentData() or "#ffffff",
@@ -5986,14 +5994,13 @@ class MainWindow(QMainWindow):
         style, mode, ratio = self._get_current_censor_params()
         wm_text = self.watermark_text_input.text().strip()
         wm_font = self.watermark_font_combo.currentText()
-        wm_size = self.watermark_size_slider.value()
+        wm_size_pct = self._get_watermark_size_pct()
         wm_opacity = self.watermark_opacity_slider.value() / 100.0
         wm_pos = self.watermark_pos_combo.currentData() or "bottom_right"
         wm_color = self.watermark_color_combo.currentData() or "#ffffff"
         wm_stroke = self.watermark_stroke_cb.isChecked()
 
         # 生成安全文件名 (避免 DeviantArt 等平台直接以文件名覆盖标题为 public_send_0)
-        import re
         title_str = self.title_input.text().strip()
         safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
         safe_title = safe_title[:40]
@@ -6001,7 +6008,7 @@ class MainWindow(QMainWindow):
         self.notify("正在准备全平台素材 (按各平台打码及体积配置分别渲染处理)...", level="info")
 
         if wm_enabled and apply_wm_publish and wm_text:
-            logger.info(f"[发布准备] 文字水印已就绪 (连接至输出端): 文本='{wm_text}', 字体='{wm_font}', 字号={wm_size}px, 位置={wm_pos}, 透明度={int(wm_opacity*100)}%")
+            logger.info(f"[发布准备] 文字水印已就绪 (连接至输出端): 文本='{wm_text}', 字体='{wm_font}', 字号比例={wm_size_pct:.1f}%, 位置={wm_pos}, 透明度={int(wm_opacity*100)}%")
         else:
             logger.info(f"[发布准备] 文字水印未启用或未勾选同步发布: enabled={wm_enabled}, apply_publish={apply_wm_publish}, has_text={bool(wm_text)}")
 
@@ -6015,7 +6022,7 @@ class MainWindow(QMainWindow):
                 "enabled": True,
                 "text": wm_text,
                 "font_name": wm_font,
-                "font_size": wm_size,
+                "font_size_pct": wm_size_pct,
                 "opacity": wm_opacity,
                 "position": wm_pos,
                 "color_hex": wm_color,
@@ -6176,7 +6183,7 @@ class MainWindow(QMainWindow):
                             censored_bgr,
                             text=wm_text,
                             font_name=wm_font,
-                            font_size=wm_size,
+                            font_size_pct=wm_size_pct,
                             opacity=wm_opacity,
                             position=wm_pos,
                             color_hex=wm_color,
@@ -6196,7 +6203,7 @@ class MainWindow(QMainWindow):
                         p,
                         text=wm_text,
                         font_name=wm_font,
-                        font_size=wm_size,
+                        font_size_pct=wm_size_pct,
                         opacity=wm_opacity,
                         position=wm_pos,
                         color_hex=wm_color,

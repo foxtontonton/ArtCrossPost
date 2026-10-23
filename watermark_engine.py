@@ -178,12 +178,17 @@ class WatermarkEngine:
         self._font_cache[cache_key] = font_obj
         return font_obj
 
+    @staticmethod
+    def compute_font_px(w: int, font_size_pct: float = 3.0) -> int:
+        """单一换算点：按图像自身宽度 w 计算水印像素字号 (最小保底 10px)"""
+        return max(10, round(w * float(font_size_pct) / 100))
+
     def apply_watermark(
         self,
         image_input: Union[str, Path, np.ndarray, Image.Image],
         text: str = "@FOXTONTONTON",
         font_name: str = "微软雅黑 (Microsoft YaHei)",
-        font_size: int = 36,
+        font_size_pct: float = 3.0,
         opacity: float = 0.65,
         position: str = "bottom_right",
         color_hex: str = "#ffffff",
@@ -197,7 +202,7 @@ class WatermarkEngine:
         - image_input: 图像路径、OpenCV BGR numpy 数组或 PIL Image
         - text: 水印文本
         - font_name: 字体族或注册表名称
-        - font_size: 字体像素大小
+        - font_size_pct: 字体占图宽百分比 (默认 3.0%)
         - opacity: 不透明度 0.05 ~ 1.0
         - position: "bottom_right" | "bottom_left" | "top_right" | "top_left" | "center" | "bottom_center" | "tiled"
         - color_hex: 十六进制颜色代码 (默认纯白 "#ffffff")
@@ -249,11 +254,12 @@ class WatermarkEngine:
             stroke_color = (0, 0, 0, stroke_alpha)
         else:
             stroke_color = (255, 255, 255, stroke_alpha)
-            
-        stroke_width = max(1, font_size // 18) if enable_stroke else 0
+
+        font_px = self.compute_font_px(w, font_size_pct)
+        stroke_width = max(1, font_px // 18) if enable_stroke else 0
 
         # 加载字体
-        font = self.resolve_font(font_name, font_size)
+        font = self.resolve_font(font_name, font_px)
 
         # 3. 创建半透明水印图层
         watermark_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -343,7 +349,7 @@ class WatermarkEngine:
         gif_path: Union[str, Path],
         text: str = "@FOXTONTONTON",
         font_name: str = "微软雅黑 (Microsoft YaHei)",
-        font_size: int = 36,
+        font_size_pct: float = 3.0,
         opacity: float = 0.65,
         position: str = "bottom_right",
         color_hex: str = "#ffffff",
@@ -363,7 +369,7 @@ class WatermarkEngine:
                 fr_rgb,
                 text=text,
                 font_name=font_name,
-                font_size=font_size,
+                font_size_pct=font_size_pct,
                 opacity=opacity,
                 position=position,
                 color_hex=color_hex,
