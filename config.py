@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
         "apply_to_publish": True,
         "text": "@FOXTONTONTON",
         "font_family": "微软雅黑 (Microsoft YaHei)",
-        "font_size": 38,
+        "size_pct": 3.0,
         "opacity": 0.65,
         "position": "bottom_right",
         "color": "#ffffff",
@@ -103,6 +103,8 @@ def load_config():
                         merged[k] = {**merged[k], **v}
                     else:
                         merged[k] = v
+                if isinstance(merged.get("watermark"), dict):
+                    merged["watermark"].pop("font_size", None)
                 return merged
         except Exception:
             return copy.deepcopy(DEFAULT_CONFIG)
