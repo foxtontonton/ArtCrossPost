@@ -22,6 +22,7 @@ except Exception as e:
 
 import sys
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 import json
@@ -2113,7 +2114,13 @@ class PublishThread(QThread):
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_disp = {executor.submit(_publish_worker, d): d for d in valid_dispatchers}
             for future in as_completed(future_to_disp):
-                disp_name, disp_title, success, msg, compliance = future.result()
+                disp_obj = future_to_disp[future]
+                try:
+                    disp_name, disp_title, success, msg, compliance = future.result()
+                except Exception as exc:
+                    logger.error(f"[{disp_obj.display_name}] 发布工作线程未捕获异常: {exc}")
+                    disp_name, disp_title = disp_obj.name, disp_obj.display_name
+                    success, msg, compliance = False, f"发布工作线程异常: {exc}", []
                 results[disp_name] = (success, msg, compliance)
                 completed_count += 1
                 progress_val = 5 + int((completed_count / valid_total) * 90)

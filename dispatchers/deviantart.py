@@ -498,13 +498,13 @@ class DeviantArtDispatcher(BaseDispatcher):
             t_inp = page.query_selector(title_sel)
             if t_inp:
                 try:
-                    t_inp.click()
-                    t_inp.fill(t_val)
+                    t_inp.click(timeout=2000)
+                    t_inp.fill(t_val, timeout=3000)
                 except Exception:
                     pass
                 try:
                     page.evaluate("""(val) => {
-                        const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("input[name='title'], input[placeholder*='Add your title']");
+                        const el = document.querySelector(".ReactModal__Content input[name='title']") || document.querySelector("dialog[open] input[name='title']") || document.querySelector("input[name='title'], input[placeholder*='Add your title']");
                         if (el) {
                             try {
                                 const proto = window.HTMLInputElement.prototype;
@@ -531,13 +531,31 @@ class DeviantArtDispatcher(BaseDispatcher):
             self._cleanup_orphan_draft(page, title, first_img)
             return False, f"DeviantArt 标题断言失败: {f_msg}"
 
-        # 6. 填写描述
+        # 6. 填写描述 (优先在当前打开的 dialog / ReactModal 容器内定位，并防止 <dialog open> 指针遮挡导致 30s 超时)
         desc_area = page.query_selector(
+            "dialog[open] div.tiptap[contenteditable='true'], dialog[open] div[role='textbox'], dialog[open] textarea[name='description'], dialog[open] div[contenteditable='true'], "
+            ".ReactModal__Content div.tiptap[contenteditable='true'], .ReactModal__Content div[role='textbox'], .ReactModal__Content textarea[name='description'], .ReactModal__Content div[contenteditable='true'], "
             "div.tiptap[contenteditable='true'], div[role='textbox'], textarea[name='description'], div[contenteditable='true']"
         )
         if desc_area and desc:
-            desc_area.click()
-            desc_area.fill(desc)
+            try:
+                desc_area.click(timeout=3000)
+                desc_area.fill(desc, timeout=5000)
+            except Exception as e_desc:
+                logger.debug(f"[DeviantArt] 描述框常规点击被拦截，切换 JS 安全注入: {e_desc}")
+                try:
+                    desc_area.evaluate("""(el, val) => {
+                        el.focus();
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            el.value = val;
+                        } else {
+                            el.innerText = val;
+                        }
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""", desc)
+                except Exception as e_js:
+                    logger.warning(f"[DeviantArt] 描述框 JS 注入提示: {e_js}")
             page.wait_for_timeout(300)
 
         # 7. 勾选官方专用 AI 创作标识: "Created using AI tools"
@@ -587,7 +605,7 @@ class DeviantArtDispatcher(BaseDispatcher):
             except Exception:
                 pass
             try:
-                el.click()
+                el.click(timeout=3000)
             except Exception:
                 el.evaluate("e => e.click()")
 

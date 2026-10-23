@@ -612,19 +612,32 @@ class XTwitterDispatcher(BaseDispatcher):
                     ]
 
                     while time.time() - wait_start < wait_button_timeout:
-                        for sel in candidate_selectors:
-                            found_btns = page.query_selector_all(sel)
-                            for b in reversed(found_btns):
-                                try:
-                                    if b.is_visible() and b.is_enabled():
-                                        aria_dis = b.get_attribute("aria-disabled")
-                                        if aria_dis != "true":
-                                            tweet_btn = b
-                                            break
-                                except Exception:
-                                    pass
-                            if tweet_btn:
-                                break
+                        # 若存在图片/GIF 附件且上传/转码进度条仍可见，等待上传进度完成再点发帖按钮
+                        media_uploading = False
+                        if abs_images:
+                            try:
+                                prog_el = page.query_selector(
+                                    "div[data-testid='attachments'] [role='progressbar'], div[data-testid='attachments'] svg[role='progressbar']"
+                                )
+                                if prog_el and (prog_el.is_visible() is True):
+                                    media_uploading = True
+                            except Exception:
+                                pass
+
+                        if not media_uploading:
+                            for sel in candidate_selectors:
+                                found_btns = page.query_selector_all(sel)
+                                for b in reversed(found_btns):
+                                    try:
+                                        if b.is_visible() and b.is_enabled():
+                                            aria_dis = b.get_attribute("aria-disabled")
+                                            if aria_dis != "true":
+                                                tweet_btn = b
+                                                break
+                                    except Exception:
+                                        pass
+                                if tweet_btn:
+                                    break
                         if tweet_btn:
                             break
 
@@ -670,15 +683,21 @@ class XTwitterDispatcher(BaseDispatcher):
                         time.sleep(1.0)
 
                     if tweet_btn and tweet_btn.is_enabled():
+                        if is_any_gif:
+                            time.sleep(2.0)  # 动态 GIF 给服务端媒体挂载留出缓冲，防止抢跑点击被忽略
                         logger.info("[X] 发帖按钮已激活，正在点击发推...")
                         try:
-                            tweet_btn.click()
+                            tweet_btn.click(timeout=3000)
                         except Exception as e:
                             logger.debug(f"[X] 普通点击失败，切换 evaluate 点击: {e}")
                             tweet_btn.evaluate("el => el.click()")
 
                         # 真正的成功判定条件 (严禁使用 not tweetButton 假阳性短路断言)
+                        submit_check_start = time.time()
+                        reclicked_once = False
+
                         def is_tweet_submitted(p):
+                            nonlocal reclicked_once
                             # 判定 1: 弹出官方发送成功提示 toast (包含"发送"/"Sent")
                             toast = p.query_selector("div[data-testid='toast']")
                             if toast:
@@ -695,13 +714,27 @@ class XTwitterDispatcher(BaseDispatcher):
                                     ed_empty = False
                             if not has_attachments and ed_empty:
                                 return True
+
+                            # 自愈补点：若等待超过 8s 仍未提交且发帖按钮仍处于激活态（首次点击可能正值 GIF 转码尾声被忽略），补点一次
+                            if not reclicked_once and (time.time() - submit_check_start) > 8.0:
+                                try:
+                                    prog = p.query_selector("div[data-testid='attachments'] [role='progressbar']")
+                                    if not (prog and prog.is_visible()):
+                                        btn_again = p.query_selector("button[data-testid='tweetButtonInline'], button[data-testid='tweetButton']")
+                                        if btn_again and btn_again.is_visible() and btn_again.is_enabled() and btn_again.get_attribute("aria-disabled") != "true":
+                                            reclicked_once = True
+                                            logger.info("[X] 检测到首次点击后推文仍在编辑器且按钮已就绪，触发二次点击补发...")
+                                            btn_again.evaluate("el => el.click()")
+                                except Exception:
+                                    pass
                             return False
 
+                        submit_timeout_ms = 45000 if is_any_gif else 25000
                         logger.info("[X] 等待发推提交确认 (等待官方 Sent 提示或输入框与附件清空)...")
                         sub_ok, sub_msg = self.assert_submitted(
                             page,
                             is_tweet_submitted,
-                            timeout=25000,
+                            timeout=submit_timeout_ms,
                             error_msg="X (Twitter) 发推提交未确认 (附件或正文仍未出海)，可能网络超时或已存为草稿"
                         )
 

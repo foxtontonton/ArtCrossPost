@@ -491,8 +491,17 @@ class BaseDispatcher(ABC):
                 if attempt < max_retries:
                     fill_val = expected_str if is_contenteditable else expected_norm
                     logger.warning(f"[填表断言] 字段回读不一致 (实际: {actual[:30]!r}, 期望: {expected_str[:30]!r})，正在重试填充...")
-                    el.click()
-                    el.fill(fill_val)
+                    try:
+                        el.click(timeout=2000)
+                        el.fill(fill_val, timeout=3000)
+                    except Exception:
+                        el.evaluate("""(node, val) => {
+                            node.focus();
+                            if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') node.value = val;
+                            else node.innerText = val;
+                            node.dispatchEvent(new Event('input', { bubbles: true }));
+                            node.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""", fill_val)
                     time.sleep(0.4)
             except Exception as e:
                 if attempt == max_retries:
