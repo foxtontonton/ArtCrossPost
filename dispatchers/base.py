@@ -450,7 +450,17 @@ class BaseDispatcher(ABC):
         回读 input_value 或 inner_text，与预期不一致时重试一次，仍不一致则中止
         返回: (success: bool, msg: str)
         """
+        import re as _re
+
+        def _norm_ws(s: str) -> str:
+            return _re.sub(r"\s+", " ", (s or "").replace("\xa0", " ")).strip()
+
+        def _strip_nl(s: str) -> str:
+            return _re.sub(r"[\r\n]+", "", (s or "").replace("\xa0", " ")).strip()
+
         expected_str = (expected_value or "").strip()
+        expected_norm = _norm_ws(expected_str)
+        expected_no_nl = _strip_nl(expected_str)
         actual = ""
         for attempt in range(max_retries + 1):
             try:
@@ -466,13 +476,23 @@ class BaseDispatcher(ABC):
                 else:
                     actual = (el.input_value() or "").strip()
 
-                if not expected_str or expected_str in actual or actual in expected_str:
-                    return True, f"字段回读一致 ({actual[:30]})"
+                actual_norm = _norm_ws(actual)
+                actual_no_nl = _strip_nl(actual)
+
+                if (
+                    not expected_str
+                    or expected_str in actual
+                    or (actual and actual in expected_str)
+                    or (expected_norm and (expected_norm in actual_norm or (actual_norm and actual_norm in expected_norm)))
+                    or (expected_no_nl and (expected_no_nl in actual_no_nl or (actual_no_nl and actual_no_nl in expected_no_nl)))
+                ):
+                    return True, f"字段回读一致 ({actual_norm[:30]})"
 
                 if attempt < max_retries:
-                    logger.warning(f"[填表断言] 字段回读不一致 (实际: '{actual[:30]}', 期望: '{expected_str[:30]}')，正在重试填充...")
+                    fill_val = expected_str if is_contenteditable else expected_norm
+                    logger.warning(f"[填表断言] 字段回读不一致 (实际: {actual[:30]!r}, 期望: {expected_str[:30]!r})，正在重试填充...")
                     el.click()
-                    el.fill(expected_str)
+                    el.fill(fill_val)
                     time.sleep(0.4)
             except Exception as e:
                 if attempt == max_retries:

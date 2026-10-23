@@ -219,3 +219,25 @@ def test_da_cleanup_orphan_draft(tmp_path, monkeypatch):
     assert mock_del_btn.evaluate.called
     assert mock_conf_btn.evaluate.called
 
+
+def test_assert_field_value_multiline_title_whitespace_normalization():
+    """测试【标题填表断言】：当标题含换行符被浏览器单行输入框折叠为空格时，回读断言应判定一致"""
+    from dispatchers.base import BaseDispatcher
+
+    mock_page = MagicMock()
+    mock_el = MagicMock()
+    # 浏览器单行 input 会将换行折成空格
+    mock_el.input_value = MagicMock(return_value="Under His Rubber - Seated. Sealed. Served.")
+    mock_page.query_selector = MagicMock(return_value=mock_el)
+
+    ok, msg = BaseDispatcher.assert_field_value(
+        mock_page,
+        "input[name='title']",
+        expected_value="Under His Rubber\n- Seated. Sealed. Served.\n",
+        is_contenteditable=False,
+        max_retries=1
+    )
+    assert ok is True
+    assert "字段回读一致" in msg
+
+

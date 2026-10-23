@@ -3268,7 +3268,7 @@ class MainWindow(QMainWindow):
         draft_file = self.data_dir / "draft.json"
         if not hasattr(self, "title_input") or not hasattr(self, "tags_input") or not hasattr(self, "desc_input"):
             return
-        title = self.title_input.text().strip()
+        title = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
         tags = (self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text()).strip()
         desc = self.desc_input.toPlainText().strip()
         if not title and not tags and not desc:
@@ -3280,7 +3280,7 @@ class MainWindow(QMainWindow):
             return
         selected_plats = [name for name, ctrl in self.platform_controls.items() if ctrl["checkbox"].isChecked()] if hasattr(self, "platform_controls") else []
         data = {
-            "title": self.title_input.text(),
+            "title": title,
             "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
             "description": self.desc_input.toPlainText(),
             "selected_platforms": selected_plats,
@@ -3301,7 +3301,7 @@ class MainWindow(QMainWindow):
         try:
             with open(draft_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            t = data.get("title", "")
+            t = re.sub(r"[\r\n\t]+", " ", data.get("title", "")).strip()
             tags = data.get("tags", "")
             desc = data.get("description", "")
             if t and hasattr(self, "title_input"):
@@ -5876,7 +5876,7 @@ class MainWindow(QMainWindow):
     def _start_publishing(self, scheduled_snapshot=None):
         if scheduled_snapshot:
             images_to_use = [Path(p) for p in scheduled_snapshot.get("image_paths", [])]
-            title_val = scheduled_snapshot.get("title", "")
+            title_val = re.sub(r"[\r\n\t]+", " ", scheduled_snapshot.get("title", "")).strip()
             desc_val = scheduled_snapshot.get("description", "")
             tags_val = scheduled_snapshot.get("tags", [])
             selected_names = scheduled_snapshot.get("selected_platforms", [])
@@ -5887,7 +5887,7 @@ class MainWindow(QMainWindow):
             custom_boxes_source = scheduled_snapshot.get("custom_censor_boxes", {})
         else:
             images_to_use = self.image_paths
-            title_val = self.title_input.text().strip()
+            title_val = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
             desc_val = self.desc_input.toPlainText().strip()
             tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
             selected = []

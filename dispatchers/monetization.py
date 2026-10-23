@@ -428,7 +428,8 @@ class PatreonDispatcher(BaseDispatcher):
         if not images:
             return False, "Patreon 发布失败: 未选择图片", []
 
-        title = payload.get("title", "") or "New Creation"
+        import re as _re
+        title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
         desc = payload.get("description", "")
         tags = payload.get("tags", [])
         is_adult = payload.get("is_nsfw", False)

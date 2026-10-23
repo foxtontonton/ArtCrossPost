@@ -24,10 +24,13 @@ def mock_main_window(tmp_path, qapp, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     from app import MainWindow
+    from history_manager import PublishHistoryManager
 
     with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
         win = MainWindow()
 
+    win.data_dir = tmp_path
+    win.history_manager = PublishHistoryManager(tmp_path)
     win.notify = MagicMock()
     win._clear_draft = MagicMock()
 

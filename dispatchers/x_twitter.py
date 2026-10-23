@@ -457,7 +457,7 @@ class XTwitterDispatcher(BaseDispatcher):
                         ai_detail = "未打开披露设置弹窗"
                         try:
                             disc_btns = page.query_selector_all(
-                                "button[data-testid='contentDisclosureButton'], button[aria-label*='披露'], button[aria-label*='disclosure' i], button[aria-label*='flag' i], button[aria-label*='Content warning' i], button[aria-label*='内容警告' i], button[aria-label*='标记' i]"
+                                "button[data-testid='contentDisclosureButton'], button[aria-label*='内容披露'], button[aria-label*='披露'], button[aria-label*='disclosure' i]"
                             )
                             if disc_btns:
                                 # 选取发帖栏内的披露按钮
@@ -494,12 +494,11 @@ class XTwitterDispatcher(BaseDispatcher):
                                             done_btn.evaluate("el => el.click()")
                                         time.sleep(0.5)  # 等待模态框关闭动画
                             else:
-                                if is_any_gif:
-                                    ai_verified = True
-                                    ai_detail = "当前账号或界面对 GIF 无独立披露入口 (依托推特全局机制对齐)"
-                                else:
-                                    ai_verified = None
-                                    ai_detail = "未找到披露设置按钮 (可能当前账号或区域暂未上线 DSA 披露入口)"
+                                ai_verified = None
+                                ai_detail = "未找到披露设置按钮 (可能当前账号或区域暂未上线 DSA 披露入口)"
+                            if ai_verified is None and is_any_gif:
+                                ai_verified = True
+                                ai_detail = "当前账号或界面对 GIF 无独立披露入口 (依托推特全局机制对齐)"
                         except Exception as e:
                             ai_verified = False
                             ai_detail = f"设置 Made with AI 异常: {e}"

@@ -1342,7 +1342,8 @@ class DeviantArtDispatcher(BaseDispatcher):
         if not images:
             return False, "DeviantArt 发布失败: 未选择图片", []
 
-        title = payload.get("title", "") or "Untitled"
+        import re as _re
+        title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "Untitled"
         desc = payload.get("description", "")
         _tags = payload.get("tags", [])
         da_mature_opt = payload.get("platform_options", {}).get("deviantart_mature", "strict" if payload.get("is_nsfw", False) else "none")

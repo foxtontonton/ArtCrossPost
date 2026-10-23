@@ -220,11 +220,13 @@ class TestMainWindowScheduleIntegration:
         im = Image.new("RGB", (200, 200), color=(100, 150, 200))
         im.save(img_p, "JPEG")
 
+        from history_manager import PublishHistoryManager
         with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
             win = MainWindow()
             win.notify = MagicMock()
             win.image_paths = [str(img_p)]
             win.data_dir = tmp_path
+            win.history_manager = PublishHistoryManager(tmp_path)
             win.schedule_manager = ScheduleManager(storage_path=tmp_path / "scheduled_posts.json")
             if hasattr(win, "_schedule_poll_timer"):
                 win._schedule_poll_timer.stop()
