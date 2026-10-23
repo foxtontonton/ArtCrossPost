@@ -6873,6 +6873,14 @@ class MainWindow(QMainWindow):
         self._start_publishing(scheduled_snapshot=task.snapshot)
 
 
+def setup_dark_palette(app):
+    """根据 presets.json 中的外观配置初始化调色板与全局暗色样式"""
+    initial_cfg = load_config()
+    theme_name = initial_cfg.get("ui_theme", "pure_dark")
+    font_size = initial_cfg.get("ui_font_size", 13)
+    apply_app_appearance(app, theme_name=theme_name, font_size=font_size)
+
+
 def main():
     app = QApplication(sys.argv)
     setup_dark_palette(app)
@@ -6881,14 +6889,7 @@ def main():
         window.show()
     sys.exit(app.exec_())
 
+
 if __name__ == "__main__":
     main()
-
-
-def setup_dark_palette(app):
-    """根据 presets.json 中的外观配置初始化调色板与全局暗色样式"""
-    initial_cfg = load_config()
-    theme_name = initial_cfg.get("ui_theme", "pure_dark")
-    font_size = initial_cfg.get("ui_font_size", 13)
-    apply_app_appearance(app, theme_name=theme_name, font_size=font_size)
 
