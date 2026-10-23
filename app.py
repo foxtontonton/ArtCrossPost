@@ -918,7 +918,7 @@ class UnifiedPreviewCanvas(QLabel):
                     font_family = self._watermark_info.get("font_family") or self._watermark_info.get("font_name", "Microsoft YaHei")
                     is_bold = self._watermark_info.get("is_bold", True)
                     font_size_pct = float(self._watermark_info.get("font_size_pct", 3.0))
-                    base_font_size = WatermarkEngine.compute_font_px(orig_w, font_size_pct)
+                    base_font_size = WatermarkEngine.compute_font_px(orig_w, orig_h, font_size_pct)
                     opacity = max(0.05, min(1.0, self._watermark_info.get("opacity", 0.65)))
                     pos = self._watermark_info.get("position", "bottom_right")
                     color_hex = self._watermark_info.get("color_hex", "#ffffff")
@@ -2094,6 +2094,8 @@ class PublishThread(QThread):
                 disp_images = self.payload.get("x_images") or images
             elif disp.name == "deviantart":
                 disp_images = self.payload.get("da_images") or images
+            elif disp.name == "civitai":
+                disp_images = self.payload.get("civitai_images") or raw_images
             else:
                 disp_images = images
 
@@ -2183,6 +2185,16 @@ class PublishThread(QThread):
                     elif disp.name == "deviantart":
                         if p_obj.suffix.lower() == ".gif" and f_size > 200 * 1024 * 1024:
                             asset_err = f"DeviantArt 限制 GIF ≤ 200MB (当前 {f_size / 1024 / 1024:.2f}MB)"
+                            break
+                    elif disp.name == "civitai":
+                        c_max = self.payload.get("civitai_max_images_per_post") or self.payload.get("platform_options", {}).get("civitai_max_images_per_post", 20)
+                        c_max = min(20, max(1, int(c_max)))
+                        from dispatchers.civitai import prepare_civitai_media
+                        try:
+                            c_xvids = self.payload.get("x_video_paths") or self.payload.get("platform_options", {}).get("x_video_paths") or {}
+                            prepare_civitai_media(disp_images, x_video_paths=c_xvids, max_limit=c_max)
+                        except ValueError as c_err:
+                            asset_err = str(c_err)
                             break
 
             if asset_err:
@@ -3141,6 +3153,27 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(da_vbox)
 
+        # 3.4.1 Civitai 单帖最大图片数 (平台硬顶 20，配置只许调小)
+        civitai_vbox = QVBoxLayout()
+        civitai_vbox.setSpacing(4)
+        cmax_title = QLabel("Civitai 单帖最大图片数 (平台硬顶 20，配置只许调小):")
+        cmax_title.setStyleSheet("font-weight: bold; color: #e0e0e0;")
+        civitai_vbox.addWidget(cmax_title)
+
+        cmax_desc = QLabel("单帖一次允许上传的最大素材数（平台上限 20 项，配置只许调小）。超出此上限时将阻断投稿并提示手动删减。")
+        cmax_desc.setStyleSheet("color: #888888; font-size: 11px; margin-bottom: 4px;")
+        cmax_desc.setWordWrap(True)
+        civitai_vbox.addWidget(cmax_desc)
+
+        self.def_civitai_max_spin = QSpinBox()
+        self.def_civitai_max_spin.setRange(1, 20)
+        cur_cmax = self.config.get("defaults", {}).get("civitai_max_images_per_post", self.config.get("civitai_max_images_per_post", 20))
+        self.def_civitai_max_spin.setValue(int(cur_cmax))
+        self.def_civitai_max_spin.valueChanged.connect(self._on_def_civitai_max_changed)
+        civitai_vbox.addWidget(self.def_civitai_max_spin)
+
+        layout.addLayout(civitai_vbox)
+
         # 3.5 ComfyUI output 目录 (X 视频版自动配对 - Rule 1)
         layout.addWidget(self._create_separator())
         comfy_header = self._create_section_header(
@@ -3348,6 +3381,19 @@ class SettingsDialog(QDialog):
             self.config["defaults"] = {}
         self.config["defaults"]["deviantart_max_images_per_deviation"] = val
         self.config["deviantart_max_images_per_deviation"] = val
+        self._notify_saved()
+
+    def _on_def_civitai_max_changed(self, val):
+        val = min(20, max(1, int(val)))
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        self.config["defaults"]["civitai_max_images_per_post"] = val
+        self.config["civitai_max_images_per_post"] = val
+        if self.main_window:
+            if "defaults" not in self.main_window.config:
+                self.main_window.config["defaults"] = {}
+            self.main_window.config["defaults"]["civitai_max_images_per_post"] = val
+            self.main_window.config["civitai_max_images_per_post"] = val
         self._notify_saved()
 
     def _on_close_clicked(self):
@@ -6774,6 +6820,14 @@ class MainWindow(QMainWindow):
             )
             platform_options["deviantart_max_images_per_deviation"] = da_limit_val
 
+        civitai_limit_val = self.config.get("defaults", {}).get(
+            "civitai_max_images_per_post",
+            self.config.get("civitai_max_images_per_post", 20)
+        )
+        civitai_limit_val = min(20, max(1, int(civitai_limit_val)))
+        platform_options["civitai_max_images_per_post"] = civitai_limit_val
+        platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
+
         if "patreon" in self.platform_controls:
             opts = self.platform_controls["patreon"]["options"]
             if "visibility" in opts:
@@ -6842,6 +6896,9 @@ class MainWindow(QMainWindow):
             "x_source_video_path": paired_video_for_x if is_single_gif_post else None,
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
+            "civitai_images": [str(p) for p in images_to_use],
+            "civitai_max_images_per_post": civitai_limit_val,
+            "x_video_paths": {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v},
             "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),

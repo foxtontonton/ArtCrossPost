@@ -179,9 +179,37 @@ class WatermarkEngine:
         return font_obj
 
     @staticmethod
-    def compute_font_px(w: int, font_size_pct: float = 3.0) -> int:
-        """单一换算点：按图像自身宽度 w 计算水印像素字号 (最小保底 10px)"""
-        return max(10, round(w * float(font_size_pct) / 100))
+    def compute_font_px(
+        w: int,
+        h: Optional[Union[int, float]] = None,
+        font_size_pct: Optional[float] = None,
+        **kwargs
+    ) -> int:
+        """
+        单一换算点：长边制。按 max(w, h) * font_size_pct 计算水印像素字号，严格钳制在 [14, 120] 像素区间内。
+
+        支持调用模式：
+        1. compute_font_px(w, h, font_size_pct) -> 传入宽、高与百分比 (标准形式)
+        2. compute_font_px(w, font_size_pct) -> 兼容单尺寸传入 (将 w 作为长边)
+        3. compute_font_px(w=..., h=..., font_size_pct=...) -> 关键字传参
+        """
+        if font_size_pct is not None:
+            pct = float(font_size_pct)
+            actual_h = int(h) if h is not None else 0
+        elif h is not None:
+            if isinstance(h, float) or (isinstance(h, (int, float)) and h < 20):
+                pct = float(h)
+                actual_h = 0
+            else:
+                actual_h = int(h)
+                pct = float(kwargs.get("font_size_pct", 3.0))
+        else:
+            pct = float(kwargs.get("font_size_pct", 3.0))
+            actual_h = 0
+
+        long_edge = max(int(w), actual_h)
+        calc_px = round(long_edge * pct / 100.0)
+        return max(14, min(120, calc_px))
 
     def apply_watermark(
         self,
@@ -202,7 +230,7 @@ class WatermarkEngine:
         - image_input: 图像路径、OpenCV BGR numpy 数组或 PIL Image
         - text: 水印文本
         - font_name: 字体族或注册表名称
-        - font_size_pct: 字体占图宽百分比 (默认 3.0%)
+        - font_size_pct: 字体占图长边百分比 (默认 3.0%)
         - opacity: 不透明度 0.05 ~ 1.0
         - position: "bottom_right" | "bottom_left" | "top_right" | "top_left" | "center" | "bottom_center" | "tiled"
         - color_hex: 十六进制颜色代码 (默认纯白 "#ffffff")
@@ -255,7 +283,7 @@ class WatermarkEngine:
         else:
             stroke_color = (255, 255, 255, stroke_alpha)
 
-        font_px = self.compute_font_px(w, font_size_pct)
+        font_px = self.compute_font_px(w, h, font_size_pct)
         stroke_width = max(1, font_px // 18) if enable_stroke else 0
 
         # 加载字体

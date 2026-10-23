@@ -281,7 +281,7 @@ class XTwitterDispatcher(BaseDispatcher):
         title = payload.get("title", "")
         desc = payload.get("description", "")
         tags = payload.get("tags", [])
-        is_sensitive = payload.get("platform_options", {}).get("x_sensitive", payload.get("is_nsfw", False))
+        is_sensitive = payload.get("platform_options", {}).get("x_sensitive", payload.get("is_nsfw", payload.get("is_sensitive", False)))
         is_ai = payload.get("platform_options", {}).get("x_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
         is_premium = payload.get("platform_options", {}).get("x_premium", False)
         char_limit = 25000 if is_premium else payload.get("platform_options", {}).get("x_char_limit", 280)
@@ -479,18 +479,31 @@ class XTwitterDispatcher(BaseDispatcher):
                                     pass
 
                                 actively_processing = prog_visible or any(
-                                    kw in att_text for kw in ["正在处理", "Processing", "正在上传", "Uploading"]
+                                    kw in att_text for kw in [
+                                        "正在处理", "Processing", "正在上传", "Uploading",
+                                        "上传 (", "上传(", "处理中", "Preparing"
+                                    ]
                                 )
                                 explicitly_completed = any(
                                     kw in att_text for kw in ["处理完成", "已上传 (100%)", "Uploaded (100%)", "Processing complete"]
                                 )
                                 has_video_dom = page.query_selector(
-                                    "div[data-testid='attachments'] video, div[data-testid='videoPlayer'], div[data-testid='attachments']"
+                                    "div[data-testid='attachments'] video, div[data-testid='videoPlayer']"
                                 ) is not None
+                                has_attachment_box = att_box is not None
 
-                                if (explicitly_completed and not prog_visible) or (has_video_dom and not actively_processing):
+                                elapsed_t = time.time() - transcode_start
+                                is_done_by_status = explicitly_completed and not prog_visible
+                                is_done_by_dom = (
+                                    (has_video_dom or has_attachment_box)
+                                    and not actively_processing
+                                    and elapsed_t >= 2.0
+                                    and ("上传" not in att_text and "处理" not in att_text and "upload" not in att_text.lower() and "process" not in att_text.lower())
+                                )
+
+                                if is_done_by_status or is_done_by_dom:
                                     transcode_done = True
-                                    logger.info(f"[X] 视频转码已完成（处理完成态，耗时 {time.time() - transcode_start:.1f}s）")
+                                    logger.info(f"[X] 视频转码已完成（处理完成态，耗时 {elapsed_t:.1f}s）")
                                     break
 
                                 now_t = time.time()
@@ -555,6 +568,7 @@ class XTwitterDispatcher(BaseDispatcher):
                     # 3. 勾选官方 "Made with AI" 系统设置 (首条推文)
                     # 注: is_any_gif 必须在此处提前定义，供下方披露弹窗缺失分支与第 4 步复用
                     is_any_gif = any(str(x).lower().endswith(".gif") for x in abs_images)
+                    ai_compliance_entry = None
                     if is_ai:
                         ai_verified = None
                         ai_detail = "未打开披露设置弹窗"
@@ -563,15 +577,37 @@ class XTwitterDispatcher(BaseDispatcher):
                                 "button[data-testid='contentDisclosureButton'], button[aria-label*='内容披露'], button[aria-label*='披露'], button[aria-label*='disclosure' i]"
                             )
                             if disc_btns:
-                                # 选取发帖栏内的披露按钮
+                                target_btn = disc_btns[-1]
                                 try:
-                                    disc_btns[-1].click(timeout=2000, force=True)
+                                    target_btn.scroll_into_view_if_needed(timeout=2000)
                                 except Exception:
-                                    disc_btns[-1].evaluate("el => el.click()")
-                                time.sleep(0.5)  # 等待披露设置弹窗动画
-                                dlgs = page.query_selector_all("div[role='dialog']")
-                                if dlgs:
-                                    dlg = dlgs[-1]
+                                    pass
+                                try:
+                                    target_btn.click(timeout=2500, force=True)
+                                except Exception:
+                                    target_btn.evaluate("el => el.click()")
+
+                                # 3 秒轮询 + 补点机制
+                                poll_start = time.time()
+                                last_reclick = poll_start
+                                dlg = None
+                                while time.time() - poll_start < 3.0:
+                                    dlgs = page.query_selector_all("div[role='dialog']")
+                                    if dlgs:
+                                        dlg = dlgs[-1]
+                                        break
+                                    if time.time() - last_reclick >= 1.0:
+                                        last_reclick = time.time()
+                                        try:
+                                            target_btn.click(timeout=1000, force=True)
+                                        except Exception:
+                                            try:
+                                                target_btn.evaluate("el => el.click()")
+                                            except Exception:
+                                                pass
+                                    time.sleep(0.3)
+
+                                if dlg:
                                     # 精准定位 "由 AI 生成" (不误触付费合作开关)
                                     ai_label = dlg.query_selector("label:has-text('AI'), label:has-text('由 AI 生成'), label:has-text('Made with AI')")
                                     if ai_label:
@@ -606,12 +642,15 @@ class XTwitterDispatcher(BaseDispatcher):
                             ai_verified = False
                             ai_detail = f"设置 Made with AI 异常: {e}"
                             logger.warning(f"[X] 设置 Made with AI 时遇到异常: {e}")
-                        compliance.append(self.verify_compliance_item("x_twitter", "ai_disclosure", True, ai_verified, ai_detail))
+                        ai_compliance_entry = self.verify_compliance_item("x_twitter", "ai_disclosure", True, ai_verified, ai_detail)
+                        compliance.append(ai_compliance_entry)
                     else:
-                        compliance.append(self.verify_compliance_item("x_twitter", "ai_disclosure", False, True, "未要求开启 AI 披露"))
+                        ai_compliance_entry = self.verify_compliance_item("x_twitter", "ai_disclosure", False, True, "未要求开启 AI 披露")
+                        compliance.append(ai_compliance_entry)
 
                     # 4. 媒体级敏感警告 (Nudity) 与 官方 AI 生成标识 (首条推文)
                     # (is_any_gif 已在第 3 步前定义，此处直接复用)
+                    ai_media_verified = False
                     if abs_images and (is_sensitive or is_ai):
                         if is_any_gif:
                             # 推特官方针对动态 GIF 原生不提供局部切图与媒体弹窗，敏感度依托全局/账户披露管控
@@ -627,52 +666,83 @@ class XTwitterDispatcher(BaseDispatcher):
                                 )
                                 if edit_btn:
                                     try:
-                                        edit_btn.click(timeout=2000, force=True)
+                                        edit_btn.scroll_into_view_if_needed(timeout=2000)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        edit_btn.click(timeout=2500, force=True)
                                     except Exception:
                                         edit_btn.evaluate("el => el.click()")
-                                    time.sleep(0.6)  # 等待媒体编辑弹窗展开
-                                    edit_dialog = page.query_selector_all("div[role='dialog']")[-1]
 
-                                    # 切换到编辑弹窗内部的第3个标签页: 内容警告
-                                    tabs = edit_dialog.query_selector_all("[role='tab']")
-                                    if len(tabs) >= 3:
-                                        try:
-                                            tabs[2].click(timeout=2000, force=True)
-                                        except Exception:
-                                            tabs[2].evaluate("el => el.click()")
-                                        time.sleep(0.4)  # 等待标签页切换完成
+                                    edit_dialog = None
+                                    for _ in range(5):
+                                        time.sleep(0.4)
+                                        dlgs = page.query_selector_all("div[role='dialog']")
+                                        if dlgs:
+                                            edit_dialog = dlgs[-1]
+                                            break
 
-                                        # 4.1 勾选裸露复选框 (Nudity)
-                                        if is_sensitive:
-                                            nudity_cb = edit_dialog.query_selector("label:has-text('裸体') input, label:has-text('裸露') input, label:has-text('敏感内容') input, label:has-text('Nudity') input, input[name*='nudity']")
-                                            if nudity_cb and not nudity_cb.is_checked():
-                                                nudity_cb.click()
-                                                time.sleep(0.3)  # 等待复选框点击生效
-                                            if nudity_cb:
-                                                media_verified = nudity_cb.is_checked()
-                                                media_detail = f"媒体 Nudity 警告勾选状态: {media_verified}"
+                                    if edit_dialog:
+                                        # 智能定位「内容警告 / Content warning」标签页 (图片通常为 Tab 2，视频通常为 Tab 1)
+                                        tabs = edit_dialog.query_selector_all("[role='tab']")
+                                        target_tab = None
+                                        for t in tabs:
+                                            t_text = (t.inner_text() or "") + " " + (t.get_attribute("aria-label") or "")
+                                            if any(kw in t_text for kw in ["警告", "Warning", "内容警告", "Content warning", "flag", "sensitive"]):
+                                                target_tab = t
+                                                break
+                                        if not target_tab and tabs:
+                                            if len(tabs) >= 3:
+                                                target_tab = tabs[2]
+                                            elif len(tabs) >= 2:
+                                                target_tab = tabs[1]
                                             else:
-                                                media_verified = None
-                                                media_detail = "未找到 Nudity 复选框"
-                                            logger.info(f"[X] 媒体编辑中勾选「裸体/敏感内容」完成: {media_verified}")
+                                                target_tab = tabs[-1]
 
-                                        # 4.2 勾选官方「AI 生成」复选框
-                                        if is_ai:
-                                            ai_media_cb = edit_dialog.query_selector("label:has-text('AI 生成') input, label:has-text('AI-generated') input, label:has-text('AI') input")
-                                            if ai_media_cb and not ai_media_cb.is_checked():
-                                                ai_media_cb.click()
-                                                time.sleep(0.3)  # 等待复选框点击生效
-                                                logger.info("[X] 媒体编辑中勾选官方「AI 生成」完成 (激活 UserDeclared 标识)")
+                                        if target_tab:
+                                            try:
+                                                target_tab.click(timeout=2000, force=True)
+                                            except Exception:
+                                                target_tab.evaluate("el => el.click()")
+                                            time.sleep(0.5)  # 等待标签页切换完成
 
-                                    # 点击保存 (endEditingButton) 确保关闭媒体弹窗
-                                    save_btn = edit_dialog.query_selector("div[role='dialog'] button:has-text('保存'), div[role='dialog'] button:has-text('Save'), button[data-testid='endEditingButton']")
-                                    if save_btn:
-                                        try:
-                                            save_btn.click(timeout=2000, force=True)
-                                        except Exception:
-                                            save_btn.evaluate("el => el.click()")
-                                        time.sleep(0.8)  # 等待媒体弹窗保存并退出
-                                    logger.info("[X] 媒体设置已保存并退出编辑框")
+                                            # 4.1 勾选裸露复选框 (Nudity)
+                                            if is_sensitive:
+                                                nudity_lbl = edit_dialog.query_selector("label:has-text('裸体'), label:has-text('裸露'), label:has-text('敏感内容'), label:has-text('Nudity')")
+                                                nudity_cb = (nudity_lbl.query_selector("input[type='checkbox']") if nudity_lbl else None) or edit_dialog.query_selector("input[name*='nudity']")
+                                                if nudity_cb and not nudity_cb.is_checked():
+                                                    nudity_cb.click()
+                                                    time.sleep(0.3)  # 等待复选框点击生效
+                                                if nudity_cb:
+                                                    media_verified = nudity_cb.is_checked()
+                                                    media_detail = f"媒体 Nudity 警告勾选状态: {media_verified}"
+                                                else:
+                                                    media_verified = None
+                                                    media_detail = "未找到 Nudity 复选框"
+                                                logger.info(f"[X] 媒体编辑中勾选「裸体/敏感内容」完成: {media_verified}")
+
+                                            # 4.2 勾选官方「AI 生成」复选框 (若存在)
+                                            if is_ai:
+                                                ai_media_lbl = edit_dialog.query_selector("label:has-text('AI 生成'), label:has-text('AI-generated'), label:has-text('AI')")
+                                                ai_media_cb = (ai_media_lbl.query_selector("input[type='checkbox']") if ai_media_lbl else None)
+                                                if ai_media_cb and not ai_media_cb.is_checked():
+                                                    ai_media_cb.click()
+                                                    time.sleep(0.3)  # 等待复选框点击生效
+                                                if ai_media_cb:
+                                                    ai_media_verified = ai_media_cb.is_checked()
+                                                    logger.info(f"[X] 媒体编辑中勾选官方「AI 生成」完成 (激活 UserDeclared 标识, 状态: {ai_media_verified})")
+
+                                        # 点击保存 (endEditingButton / 保存 / Save / 完成) 确保关闭媒体弹窗
+                                        save_btn = edit_dialog.query_selector(
+                                            "div[role='dialog'] button:has-text('保存'), div[role='dialog'] button:has-text('Save'), div[role='dialog'] button:has-text('完成'), div[role='dialog'] button:has-text('Done'), button[data-testid='endEditingButton']"
+                                        )
+                                        if save_btn:
+                                            try:
+                                                save_btn.click(timeout=2000, force=True)
+                                            except Exception:
+                                                save_btn.evaluate("el => el.click()")
+                                            time.sleep(0.8)  # 等待媒体弹窗保存并退出
+                                        logger.info("[X] 媒体设置已保存并退出编辑框")
                             except Exception as e:
                                 media_verified = False
                                 media_detail = f"设置媒体警告异常: {e}"
@@ -680,6 +750,12 @@ class XTwitterDispatcher(BaseDispatcher):
 
                             if is_sensitive:
                                 compliance.append(self.verify_compliance_item("x_twitter", "media_sensitive", True, media_verified, media_detail))
+
+                            # 级联兜底: 若披露设置弹窗未成功开启或未确认，但媒体级已成功勾选 AI 声明，则判定通过（媒体级声明兜底）
+                            if is_ai and ai_compliance_entry and (ai_compliance_entry.get("verified") is not True) and ai_media_verified:
+                                ai_compliance_entry["verified"] = True
+                                ai_compliance_entry["detail"] = "通过（媒体级声明兜底）"
+                                logger.info("[X] 全局披露弹窗未确认，但媒体级 AI 声明已生效，合规判定为: 通过（媒体级声明兜底）")
                     elif is_sensitive:
                         compliance.append(self.verify_compliance_item("x_twitter", "media_sensitive", True, None, "无图片附件可设置媒体警告"))
                     else:

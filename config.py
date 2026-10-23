@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
     "log_drawer_expanded": True,                          # 底部日志栏默认展开状态
     "settings_dialog_size": [760, 680],                   # 系统设置窗口记忆尺寸 (宽, 高)
     "settings_dialog_tab": 0,                             # 系统设置窗口记忆激活选项卡
+    "civitai_max_images_per_post": 20,                   # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
     "deviantart_known_galleries": [
         "Featured",
         "NSFW - Ai Training Clip",
@@ -82,6 +83,7 @@ DEFAULT_CONFIG = {
         "deviantart_default_gallery": "", # 默认发布相册 (留空使用默认)
         "deviantart_censor": True,        # DeviantArt 专属打码保护开关
         "deviantart_max_images_per_deviation": 10, # 单作品图片上限 (默认10张，Core会员可调至100)
+        "civitai_max_images_per_post": 20, # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
@@ -106,6 +108,11 @@ def load_config():
                         merged[k] = v
                 if isinstance(merged.get("watermark"), dict):
                     merged["watermark"].pop("font_size", None)
+                # 平台硬顶约束：civitai_max_images_per_post 强制限制在 [1, 20]
+                if "civitai_max_images_per_post" in merged:
+                    merged["civitai_max_images_per_post"] = min(20, max(1, int(merged["civitai_max_images_per_post"])))
+                if isinstance(merged.get("defaults"), dict) and "civitai_max_images_per_post" in merged["defaults"]:
+                    merged["defaults"]["civitai_max_images_per_post"] = min(20, max(1, int(merged["defaults"]["civitai_max_images_per_post"])))
                 return merged
         except Exception:
             return copy.deepcopy(DEFAULT_CONFIG)

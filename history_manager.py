@@ -13,7 +13,8 @@ PLATFORM_DISPLAY_SHORT = {
     "x_twitter": "X",
     "patreon": "Patreon",
     "kofi": "Ko-fi",
-    "reddit": "Reddit"
+    "reddit": "Reddit",
+    "civitai": "Civitai"
 }
 
 
