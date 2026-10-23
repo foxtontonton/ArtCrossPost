@@ -918,7 +918,7 @@ class UnifiedPreviewCanvas(QLabel):
                     font_family = self._watermark_info.get("font_family") or self._watermark_info.get("font_name", "Microsoft YaHei")
                     is_bold = self._watermark_info.get("is_bold", True)
                     font_size_pct = float(self._watermark_info.get("font_size_pct", 3.0))
-                    base_font_size = WatermarkEngine.compute_font_px(orig_w, font_size_pct)
+                    base_font_size = WatermarkEngine.compute_font_px(orig_w, orig_h, font_size_pct)
                     opacity = max(0.05, min(1.0, self._watermark_info.get("opacity", 0.65)))
                     pos = self._watermark_info.get("position", "bottom_right")
                     color_hex = self._watermark_info.get("color_hex", "#ffffff")

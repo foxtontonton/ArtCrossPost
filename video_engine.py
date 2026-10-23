@@ -488,7 +488,7 @@ class VideoEngine:
         output_png_path: Union[str, Path],
     ) -> Path:
         """
-        使用 PIL 按当前水印配置（size_pct 占视频宽、位置、透明度、颜色、描边）
+        使用 PIL 按当前水印配置（size_pct 占视频长边、位置、透明度、颜色、描边）
         在 (width, height) 透明画布上渲染 RGBA PNG 供 ffmpeg overlay 合成。
         """
         w, h = max(2, int(width)), max(2, int(height))
@@ -520,7 +520,7 @@ class VideoEngine:
         luminance = 0.299 * r + 0.587 * g + 0.114 * b
         stroke_color = (0, 0, 0, stroke_alpha) if luminance > 128 else (255, 255, 255, stroke_alpha)
 
-        font_px = self.watermark_engine.compute_font_px(w, font_size_pct)
+        font_px = self.watermark_engine.compute_font_px(w, h, font_size_pct)
         stroke_width = max(1, font_px // 18) if enable_stroke else 0
         font = self.watermark_engine.resolve_font(font_name, font_px)
 
