@@ -38,12 +38,20 @@ from PyQt5.QtWidgets import (
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
     QTextBrowser, QDialog, QTabWidget, QSpinBox, QPlainTextEdit
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData, QEventLoop
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
 
 from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
 from censor_engine import CensorEngine
 from watermark_engine import WatermarkEngine
+from video_engine import (
+    VideoEngine,
+    get_ffmpeg_path,
+    is_ffmpeg_available,
+    find_matching_video_for_gif,
+    pair_gifs_with_videos,
+    validate_x_video_constraints,
+)
 from dispatchers import get_all_dispatchers
 from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_teaser_post
 from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
@@ -1077,6 +1085,16 @@ class ThumbnailCardWidget(QFrame):
         self.idx = idx
         self.img_path = str(img_path)
         self.drag_start_pos = None
+        self.x_video_path = (
+            main_window.get_x_video_path(self.img_path)
+            if hasattr(main_window, "get_x_video_path")
+            else getattr(main_window, "x_video_paths", {}).get(self.img_path)
+        )
+        self.x_video_source = (
+            main_window.get_x_video_source(self.img_path)
+            if hasattr(main_window, "get_x_video_source")
+            else getattr(main_window, "x_video_sources", {}).get(self.img_path)
+        )
 
         self.setFixedWidth(118)
         self.setFixedHeight(136)
@@ -1172,7 +1190,7 @@ class ThumbnailCardWidget(QFrame):
 
         layout.addWidget(self.img_lbl)
 
-        # 3. 底部 "X 选用" 复选框
+        # 3. 底部 "X 选用" 复选框 + GIF 视频配对徽标 (区分自动配对 / 手动指定)
         bot_row = QHBoxLayout()
         bot_row.setContentsMargins(0, 0, 0, 0)
         bot_row.setSpacing(2)
@@ -1197,7 +1215,87 @@ class ThumbnailCardWidget(QFrame):
         bot_row.addWidget(self.x_cb)
         bot_row.addStretch()
 
+        self.video_badge_lbl = QLabel()
+        self.video_badge_lbl.setVisible(False)
+        bot_row.addWidget(self.video_badge_lbl)
+        self._refresh_video_badge()
+
         layout.addLayout(bot_row)
+
+    def _refresh_video_badge(self):
+        """刷新缩略图上的 X 视频配对徽标（区分自动配对 vs 手动指定）"""
+        if not self.img_path.lower().endswith(".gif"):
+            self.video_badge_lbl.setVisible(False)
+            return
+
+        if self.x_video_path:
+            v_name = Path(self.x_video_path).name
+            if self.x_video_source == "manual":
+                self.video_badge_lbl.setText("🎬 手动指定")
+                self.video_badge_lbl.setStyleSheet(
+                    "background-color: #78350f; color: #fde68a; border: 1px solid #d97706; "
+                    "border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0px 3px;"
+                )
+                self.video_badge_lbl.setToolTip(
+                    f"已手动绑定 X 视频: {v_name}\n路径: {self.x_video_path}\n(右键可改绑或解绑)"
+                )
+            else:
+                self.video_badge_lbl.setText("🎬 自动配对")
+                self.video_badge_lbl.setStyleSheet(
+                    "background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; "
+                    "border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0px 3px;"
+                )
+                self.video_badge_lbl.setToolTip(
+                    f"已自动配对 X 视频: {v_name}\n路径: {self.x_video_path}\n(右键可改绑或解绑)"
+                )
+            self.video_badge_lbl.setVisible(True)
+        else:
+            self.video_badge_lbl.setVisible(False)
+            self.setToolTip("右键可为此 GIF 手动指定配对的 X 视频 (.mp4/.mov/.webm)")
+
+    def prompt_bind_video(self, chosen_path: str = None):
+        """手动指定或改绑当前 GIF 的 X 配对视频"""
+        if not self.img_path.lower().endswith(".gif"):
+            return
+        if not is_ffmpeg_available():
+            self.main_window.notify("⚠️ 未检测到 imageio-ffmpeg 组件，X 视频处理功能不可用", level="warning")
+            return
+        if not chosen_path:
+            start_dir = self.main_window.config.get("comfyui_output_dir", "") or str(Path(self.img_path).parent)
+            chosen_path, _ = QFileDialog.getOpenFileName(
+                self,
+                f"为 [{Path(self.img_path).name}] 选择 X 配对视频",
+                start_dir,
+                "视频文件 (*.mp4 *.mov *.webm)"
+            )
+        if chosen_path and Path(chosen_path).exists():
+            self.main_window.bind_x_video(self.img_path, chosen_path, source="manual")
+
+    def unbind_video(self):
+        """解绑当前 GIF 的 X 配对视频"""
+        if self.x_video_path:
+            self.main_window.unbind_x_video(self.img_path)
+
+    def contextMenuEvent(self, event):
+        if self.img_path.lower().endswith(".gif"):
+            menu = QMenu(self)
+            if self.x_video_path:
+                v_name = Path(self.x_video_path).name
+                act_rebind = menu.addAction("🔄 改绑 X 配对视频...")
+                act_unbind = menu.addAction(f"🔗 解绑 X 视频 ({v_name})")
+                chosen = menu.exec_(event.globalPos())
+                if chosen == act_rebind:
+                    self.prompt_bind_video()
+                elif chosen == act_unbind:
+                    self.unbind_video()
+            else:
+                act_bind = menu.addAction("🎬 手动指定 X 配对视频...")
+                chosen = menu.exec_(event.globalPos())
+                if chosen == act_bind:
+                    self.prompt_bind_video()
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def update_active_state(self, is_active: bool):
         """轻量级更新选中态高亮，无需重建整个卡片控件"""
@@ -1928,6 +2026,34 @@ class LoginThread(QThread):
             self.finished_signal.emit(False, str(e), {})
 
 
+class VideoProcessThread(QThread):
+    """
+    X 配对视频异步打码 + 水印压制工作线程 (Rules 7–10):
+    在发布准备阶段异步执行 ffmpeg 编码，实时解析 stderr 的 time= 向 UI 进度条汇报进度。
+    """
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, str, bool)
+
+    def __init__(self, video_engine: VideoEngine, input_video: str, censor_params=None, wm_params=None):
+        super().__init__()
+        self.video_engine = video_engine
+        self.input_video = input_video
+        self.censor_params = censor_params
+        self.wm_params = wm_params
+
+    def run(self):
+        try:
+            out_path = self.video_engine.process_video(
+                self.input_video,
+                censor_params=self.censor_params,
+                wm_params=self.wm_params,
+                progress_callback=lambda pct, msg: self.progress_signal.emit(pct, msg),
+            )
+            self.finished_signal.emit(True, str(out_path), False)
+        except Exception as e:
+            self.finished_signal.emit(False, str(e), False)
+
+
 class PublishThread(QThread):
     progress_signal = pyqtSignal(int, str)
     completed_signal = pyqtSignal(dict)
@@ -2017,9 +2143,14 @@ class PublishThread(QThread):
 
             # 1.2 素材合规检查 (validate_assets)
             asset_err = None
-            if not disp_images:
+            if disp.name == "x_twitter":
+                src_vid = self.payload.get("x_source_video_path")
+                if src_vid and not Path(src_vid).exists():
+                    asset_err = f"X (Twitter) 配对视频不存在: {Path(src_vid).name}"
+
+            if not asset_err and not disp_images:
                 asset_err = "未选择任何作品图片素材"
-            else:
+            elif not asset_err:
                 for img_p in disp_images:
                     p_obj = Path(img_p)
                     if not p_obj.exists():
@@ -2030,9 +2161,16 @@ class PublishThread(QThread):
                         asset_err = f"素材文件大小为 0: {p_obj.name}"
                         break
 
-                    # 平台专属大小限制
+                    # 平台专属大小与时长限制
                     if disp.name == "x_twitter":
-                        if p_obj.suffix.lower() == ".gif" and f_size > 15 * 1024 * 1024:
+                        if p_obj.suffix.lower() in (".mp4", ".mov", ".webm"):
+                            v_ok, v_err = validate_x_video_constraints(
+                                p_obj, max_size_mb=512.0, max_duration_sec=140.0
+                            )
+                            if not v_ok:
+                                asset_err = v_err
+                                break
+                        elif p_obj.suffix.lower() == ".gif" and f_size > 15 * 1024 * 1024:
                             asset_err = f"X (Twitter) 限制 GIF ≤ 15MB (当前 {f_size / 1024 / 1024:.2f}MB)"
                             break
                         elif p_obj.suffix.lower() in [".png", ".jpg", ".jpeg"] and f_size > 5 * 1024 * 1024:
@@ -3003,6 +3141,42 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(da_vbox)
 
+        # 3.5 ComfyUI output 目录 (X 视频版自动配对 - Rule 1)
+        layout.addWidget(self._create_separator())
+        comfy_header = self._create_section_header(
+            "ComfyUI output 目录 (X 视频版自动配对)",
+            "导入 GIF 时自动递归检索该目录（及 GIF 所在目录）下的同名或近似序号视频 (.mp4/.mov/.webm)，供 X 平台打码+水印后以高清视频发布。"
+        )
+        layout.addLayout(comfy_header)
+
+        comfy_box = QVBoxLayout()
+        comfy_box.setSpacing(6)
+        comfy_row = QHBoxLayout()
+        comfy_row.setSpacing(8)
+        self.comfyui_dir_edit = QLineEdit()
+        self.comfyui_dir_edit.setPlaceholderText("例如: D:/ComfyUI/output (留空则仅在导入 GIF 所在目录及子目录内查找)")
+        self.comfyui_dir_edit.setText(self.config.get("comfyui_output_dir", ""))
+        self.comfyui_dir_edit.textChanged.connect(self._on_comfyui_dir_changed)
+        comfy_row.addWidget(self.comfyui_dir_edit, 1)
+
+        self.browse_comfy_btn = QPushButton("📂 选择目录...")
+        self.browse_comfy_btn.setObjectName("secondaryBtn")
+        self.browse_comfy_btn.clicked.connect(self._browse_comfyui_dir)
+        comfy_row.addWidget(self.browse_comfy_btn)
+        comfy_box.addLayout(comfy_row)
+
+        ffmpeg_ok = is_ffmpeg_available()
+        if ffmpeg_ok:
+            ff_lbl = QLabel(f"● FFmpeg 引擎就绪 ({Path(get_ffmpeg_path()).name})")
+            ff_lbl.setStyleSheet("color: #10b981; font-size: 11px;")
+        else:
+            ff_lbl = QLabel("⚠️ 未检测到 imageio-ffmpeg 二进制组件，X 视频自动配对与转码功能已禁用（请执行 pip install imageio-ffmpeg）")
+            ff_lbl.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold;")
+            self.comfyui_dir_edit.setEnabled(False)
+            self.browse_comfy_btn.setEnabled(False)
+        comfy_box.addWidget(ff_lbl)
+        layout.addLayout(comfy_box)
+
         # 4. Ko-fi 平台发布开关 (P0-2)
         layout.addWidget(self._create_separator())
         kofi_box = QVBoxLayout()
@@ -3067,6 +3241,19 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return self._wrap_in_scroll(content)
+
+    def _on_comfyui_dir_changed(self, text):
+        val = (text or "").strip()
+        self.config["comfyui_output_dir"] = val
+        if self.main_window and hasattr(self.main_window, "config"):
+            self.main_window.config["comfyui_output_dir"] = val
+        self._notify_saved()
+
+    def _browse_comfyui_dir(self):
+        cur = self.comfyui_dir_edit.text().strip()
+        chosen = QFileDialog.getExistingDirectory(self, "选择 ComfyUI output 目录", cur or "")
+        if chosen:
+            self.comfyui_dir_edit.setText(chosen)
 
     def _on_kofi_enabled_changed(self, state):
         self.config["platform_kofi_enabled"] = bool(state)
@@ -3205,10 +3392,13 @@ class MainWindow(QMainWindow):
             padding_ratio=self.config["censor"]["padding_ratio"]
         )
         self.watermark_engine = WatermarkEngine()
+        self.video_engine = VideoEngine(cache_dir=CACHE_DIR, watermark_engine=self.watermark_engine)
         self.dispatchers = get_all_dispatchers(COOKIES_DIR)
         
         self.image_paths = []
         self.x_selected_paths = set()  # 记录用户在图集中为 X (Twitter) 单独勾选的素材路径 (最多 4 张)
+        self.x_video_paths = {}  # {img_path: paired_video_path} (Rule 3)
+        self.x_video_sources = {}  # {img_path: "auto" | "manual"} (Rule 3)
         self._thumbnail_cache = {}  # {image_path: QPixmap} 缩略图缓存
         self.custom_censor_boxes = {}  # {image_path: [[x1, y1, x2, y2], ...]}
         self.custom_censor_captured_ratios = {}  # {image_path: float} 存框时的锚定拉杆比例
@@ -5735,12 +5925,123 @@ class MainWindow(QMainWindow):
         """图集顺序调整别名/兼容接口，代理至 reorder_images"""
         self.reorder_images(src_idx, target_idx)
 
+    def get_x_video_path(self, img_path: str):
+        """获取某张 GIF 配对的 X 视频路径"""
+        key = str(img_path)
+        return self.x_video_paths.get(key)
+
+    def get_x_video_source(self, img_path: str):
+        """获取某张 GIF 的配对视频来源 ('auto' | 'manual')"""
+        key = str(img_path)
+        return self.x_video_sources.get(key)
+
+    def bind_x_video(self, img_path: str, video_path: str, source: str = "manual"):
+        """手动指定、改绑或自动绑定某张 GIF 的 X 配对视频 (Rule 3)"""
+        if not is_ffmpeg_available():
+            self.notify("⚠️ 未检测到 imageio-ffmpeg 组件，X 视频处理功能已禁用", level="warning")
+            return False
+        key = str(img_path)
+        v_abs = str(Path(video_path).resolve())
+        self.x_video_paths[key] = v_abs
+        self.x_video_sources[key] = source
+        self._refresh_thumbnail_gallery()
+        label = "手动指定" if source == "manual" else "自动配对"
+        self.notify(f"🎬 已为 [{Path(key).name}] {label} X 视频: {Path(v_abs).name}", level="success")
+        return True
+
+    def unbind_x_video(self, img_path: str):
+        """解绑某张 GIF 的 X 配对视频 (Rule 3)"""
+        key = str(img_path)
+        old_v = self.x_video_paths.pop(key, None)
+        self.x_video_sources.pop(key, None)
+        self._refresh_thumbnail_gallery()
+        if old_v:
+            self.notify(f"🔗 已解绑 [{Path(key).name}] 的 X 配对视频 ({Path(old_v).name})", level="info")
+
+    def auto_pair_imported_gifs(self, new_paths: list) -> dict:
+        """
+        导入 GIF 时自动在 ComfyUI output 目录及 GIF 所在目录内递归查找候选视频配对 (Rules 2–4):
+        - 先到先得，已被配对的视频不再参与其他 GIF 的自动配对
+        - 找不到 GIF 的孤儿视频直接忽略，不单独成帖
+        """
+        gif_candidates = [str(p) for p in new_paths if str(p).lower().endswith(".gif")]
+        if not gif_candidates:
+            return {}
+
+        if not is_ffmpeg_available():
+            self.notify("⚠️ 未检测到 imageio-ffmpeg 组件，X 视频版自动配对已禁用", level="warning")
+            return {}
+
+        used_videos = {
+            str(Path(v).resolve())
+            for v in self.x_video_paths.values()
+            if v
+        }
+        comfy_dir = self.config.get("comfyui_output_dir", "")
+        unpaired_gifs = [
+            g for g in gif_candidates
+            if not (g in self.x_video_paths and self.x_video_paths[g])
+        ]
+        newly_paired = {}
+        if unpaired_gifs:
+            paired_map = pair_gifs_with_videos(
+                unpaired_gifs,
+                output_dir=comfy_dir or None,
+                already_used_videos=used_videos,
+            )
+            for g_path, matched in paired_map.items():
+                if matched:
+                    self.x_video_paths[g_path] = matched
+                    self.x_video_sources[g_path] = "auto"
+                    newly_paired[g_path] = matched
+
+        if newly_paired:
+            first_gif = next(iter(newly_paired))
+            first_vid = newly_paired[first_gif]
+            if len(newly_paired) == 1:
+                self.notify(
+                    f"🎬 已为 GIF [{Path(first_gif).name}] 自动配对 X 视频: {Path(first_vid).name}",
+                    level="success"
+                )
+            else:
+                self.notify(
+                    f"🎬 已为 {len(newly_paired)} 张 GIF 自动配对同名/近似序号 X 视频",
+                    level="success"
+                )
+        return newly_paired
+
+    def import_folder_images(self, folder_dir: str) -> int:
+        """直接从文件夹导入图片与 GIF 素材（仅导入图片/GIF，孤儿视频自动忽略并触发 GIF 视频配对）"""
+        p_dir = Path(folder_dir)
+        if not p_dir.exists() or not p_dir.is_dir():
+            return 0
+        img_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        found = sorted(
+            [str(f.resolve()) for f in p_dir.iterdir() if f.is_file() and f.suffix.lower() in img_exts],
+            key=lambda x: Path(x).name.lower()
+        )
+        added_list = []
+        for f in found:
+            if f not in self.image_paths:
+                self.image_paths.append(f)
+                added_list.append(f)
+        if added_list:
+            self.auto_pair_imported_gifs(added_list)
+            self.current_preview_index = 0
+            self._sync_img_list_widget()
+            self._refresh_thumbnail_gallery()
+            self._schedule_preview_refresh(instant=True)
+            self._check_image_duplicate_history()
+        return len(added_list)
+
     def remove_image(self, idx: int):
         """图集单张删除"""
         if not (0 <= idx < len(self.image_paths)):
             return
         removed_p = self.image_paths.pop(idx)
         self.x_selected_paths.discard(removed_p)
+        self.x_video_paths.pop(removed_p, None)
+        self.x_video_sources.pop(removed_p, None)
         self.custom_censor_boxes.pop(removed_p, None)
         self.custom_censor_captured_ratios.pop(removed_p, None)
         self._thumbnail_cache.pop(removed_p, None)
@@ -5848,24 +6149,27 @@ class MainWindow(QMainWindow):
             self, "选择作品图片", "", "图片与动图文件 (*.png *.jpg *.jpeg *.webp *.gif)"
         )
         if files:
-            added = 0
+            added_list = []
             for f in files:
                 if f not in self.image_paths:
                     self.image_paths.append(f)
                     self.img_list_widget.addItem(Path(f).name)
-                    added += 1
-            if added > 0:
+                    added_list.append(f)
+            if added_list:
+                self.auto_pair_imported_gifs(added_list)
                 self.current_preview_index = 0
                 self._sync_img_list_widget()
                 self._refresh_thumbnail_gallery()
                 self._schedule_preview_refresh(instant=True)
                 self._check_image_duplicate_history()
-                self.notify(f"已成功导入 {added} 张素材，效果已在中央预览框中实时合成！", level="success")
+                self.notify(f"已成功导入 {len(added_list)} 张素材，效果已在中央预览框中实时合成！", level="success")
 
     def _clear_images(self):
         count = len(self.image_paths)
         self.image_paths.clear()
         self.x_selected_paths.clear()
+        self.x_video_paths.clear()
+        self.x_video_sources.clear()
         self._thumbnail_cache.clear()
         self.custom_censor_boxes.clear()
         self.custom_censor_captured_ratios.clear()
@@ -5935,6 +6239,18 @@ class MainWindow(QMainWindow):
             total_images = sum(len(imgs) for imgs in dlg.confirmed_groups.values())
             self.notify(f"🎉 成功识别并载入 {total_groups} 套作品（共 {total_images} 张素材）到草稿箱！", level="success")
 
+            if getattr(dlg, "confirmed_video_pairs", None):
+                for gif_k, v_info in dlg.confirmed_video_pairs.items():
+                    if isinstance(v_info, dict):
+                        if v_info.get("video_path"):
+                            self.x_video_paths[gif_k] = v_info["video_path"]
+                            self.x_video_sources[gif_k] = v_info.get("source", "auto")
+                    elif v_info:
+                        self.x_video_paths[gif_k] = str(v_info)
+                        self.x_video_sources[gif_k] = "auto"
+            if getattr(dlg, "confirmed_video_sources", None):
+                self.x_video_sources.update(dlg.confirmed_video_sources)
+
             first_title, first_imgs = next(iter(dlg.confirmed_groups.items()))
             if not self.title_input.text().strip():
                 self.title_input.setText(first_title)
@@ -5959,6 +6275,7 @@ class MainWindow(QMainWindow):
             is_ai = scheduled_snapshot.get("is_ai", False)
             custom_boxes_source = scheduled_snapshot.get("custom_censor_boxes", {})
             captured_ratios_source = scheduled_snapshot.get("custom_censor_captured_ratios", {})
+            x_video_paths_source = scheduled_snapshot.get("x_video_paths", getattr(self, "x_video_paths", {}))
         else:
             images_to_use = self.image_paths
             title_val = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
@@ -5973,6 +6290,7 @@ class MainWindow(QMainWindow):
             is_ai = self.ai_checkbox.isChecked()
             custom_boxes_source = getattr(self, "custom_censor_boxes", {})
             captured_ratios_source = getattr(self, "custom_censor_captured_ratios", {})
+            x_video_paths_source = getattr(self, "x_video_paths", {})
 
         if not images_to_use:
             self.notify("发布内容必须包含至少一张作品图片！", level="warning")
@@ -6079,6 +6397,26 @@ class MainWindow(QMainWindow):
         else:
             logger.info(f"[发布准备] 文字水印未启用或未勾选同步发布: enabled={wm_enabled}, apply_publish={apply_wm_publish}, has_text={bool(wm_text)}")
 
+        # Rule 6: 仅单 GIF 帖对 X 生效（X 一条推只能带 1 个视频）；多图帖忽略配对
+        is_single_gif_post = (
+            len(images_to_use) == 1
+            and str(images_to_use[0]).lower().endswith(".gif")
+        )
+        paired_video_for_x = None
+        if is_single_gif_post:
+            g0 = images_to_use[0]
+            paired_video_for_x = (
+                x_video_paths_source.get(g0)
+                if g0 in x_video_paths_source
+                else x_video_paths_source.get(str(g0))
+            )
+        elif len(images_to_use) > 1 and any(
+            (p in x_video_paths_source or str(p) in x_video_paths_source) for p in images_to_use
+        ):
+            logger.info("[发布准备] 检测到多图帖，按规范忽略 GIF 的 X 配对视频（X 单推仅支持 1 个视频）")
+
+        x_video_final_path = None
+
         for idx, p in enumerate(images_to_use):
             is_gif = p.lower().endswith(".gif")
             orig_sfx = Path(p).suffix.lstrip(".").lower()
@@ -6141,17 +6479,73 @@ class MainWindow(QMainWindow):
                     else:
                         da_images.append(str(p))
 
-                # 2. X (Twitter) 动图 (严格 ≤ 13.8MB)
+                # 2. X (Twitter) 动图/配对视频分支 (Rules 6–13)
                 if is_x_selected:
-                    x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
-                    x_c = c_params if is_x_censor else None
-                    try:
-                        self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
-                    except RuntimeError as e:
-                        self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
-                        logger.error(f"[发布准备] {e}")
-                        return
-                    x_images_map[p] = str(x_out_path)
+                    if is_single_gif_post and paired_video_for_x:
+                        if not is_ffmpeg_available():
+                            err_msg = "发布前门禁拦截: 未检测到 imageio-ffmpeg 组件，无法处理 X 配对视频"
+                            self.notify(f"⚠️ {err_msg}", level="error")
+                            logger.error(f"[Pre-publish Gate] {err_msg}")
+                            return
+
+                        # Rule 13: 发前自检增加：配对视频存在、时长 ≤ 140s（用 ffmpeg -i 解析），不合规提前阻断
+                        src_ok, src_err = validate_x_video_constraints(
+                            paired_video_for_x, check_size=False, max_duration_sec=140.0
+                        )
+                        if not src_ok:
+                            self.notify(f"⚠️ 发布前门禁拦截: {src_err}", level="error")
+                            logger.error(f"[Pre-publish Gate] {src_err}")
+                            return
+
+                        x_c = c_params if is_x_censor else None
+                        vid_res = {"ok": False, "out": "", "cached": False}
+                        loop_ev = QEventLoop(self)
+                        v_thread = VideoProcessThread(
+                            self.video_engine,
+                            paired_video_for_x,
+                            censor_params=x_c,
+                            wm_params=wm_info,
+                        )
+                        v_thread.progress_signal.connect(self._on_progress)
+
+                        def _on_v_done(ok_flag, out_or_err, cached_flag):
+                            vid_res["ok"] = ok_flag
+                            vid_res["out"] = out_or_err
+                            vid_res["cached"] = cached_flag
+                            loop_ev.quit()
+
+                        v_thread.finished_signal.connect(_on_v_done)
+                        v_thread.start()
+                        loop_ev.exec_()
+
+                        if not vid_res["ok"]:
+                            self.notify(f"X (Twitter) 配对视频处理失败: {vid_res['out']}", level="error")
+                            logger.error(f"[发布准备] X 配对视频处理失败: {vid_res['out']}")
+                            return
+
+                        out_mp4 = vid_res["out"]
+                        # Rule 13: 处理后产物 ≤ 512MB、时长 ≤ 140s（用 ffmpeg -i 解析），不合规提前阻断
+                        out_ok, out_err = validate_x_video_constraints(
+                            out_mp4, max_size_mb=512.0, max_duration_sec=140.0
+                        )
+                        if not out_ok:
+                            self.notify(f"⚠️ 发布前门禁拦截: {out_err}", level="error")
+                            logger.error(f"[Pre-publish Gate] {out_err}")
+                            return
+
+                        x_video_final_path = str(out_mp4)
+                        x_images_map[p] = x_video_final_path
+                    else:
+                        # Rule 12: 无配对视频（或多图帖）时保留现行 GIF 路径不变
+                        x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
+                        x_c = c_params if is_x_censor else None
+                        try:
+                            self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
+                        except RuntimeError as e:
+                            self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
+                            logger.error(f"[发布准备] {e}")
+                            return
+                        x_images_map[p] = str(x_out_path)
                 else:
                     x_images_map[p] = da_images[-1]
 
@@ -6443,7 +6837,9 @@ class MainWindow(QMainWindow):
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
             "deviantart_max_images_per_deviation": da_limit_val,
-            "x_images": x_images,               # X (Twitter) 专属图 (按 X 打码选项与体积限制)
+            "x_images": x_images,               # X (Twitter) 专属图/视频 (按 X 打码选项与体积限制)
+            "x_video": x_video_final_path,      # X (Twitter) 单 GIF 配对处理后的 mp4 路径 (若有)
+            "x_source_video_path": paired_video_for_x if is_single_gif_post else None,
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
             "raw_images": raw_images,           # 原始未处理原图列表备用
@@ -6914,6 +7310,8 @@ class MainWindow(QMainWindow):
             "is_ai": self.ai_checkbox.isChecked(),
             "custom_censor_boxes": {str(k): v for k, v in getattr(self, "custom_censor_boxes", {}).items()},
             "custom_censor_captured_ratios": {str(k): float(v) for k, v in getattr(self, "custom_censor_captured_ratios", {}).items()},
+            "x_video_paths": {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v},
+            "x_video_sources": {str(k): str(v) for k, v in getattr(self, "x_video_sources", {}).items() if v},
         }
 
     def _open_schedule_dialog(self):

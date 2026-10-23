@@ -264,10 +264,19 @@ class XTwitterDispatcher(BaseDispatcher):
         - 点击编辑媒体 -> 勾选官方 Nudity (裸露) 内容警告
         - 点击官方发帖按钮 (tweetButton) 提交
         """
+        raw_video = payload.get("x_video")
         raw_images = payload.get("x_images") or payload.get("images", [])
-        abs_images = [str(Path(x).resolve()) for x in raw_images if Path(x).exists()]
+        if raw_video and Path(raw_video).exists():
+            abs_images = [str(Path(raw_video).resolve())]
+        else:
+            abs_images = [str(Path(x).resolve()) for x in raw_images if Path(x).exists()]
         if not abs_images:
-            return False, "X 发布失败: 未找到可上传的图片文件", []
+            return False, "X 发布失败: 未找到可上传的图片或视频文件", []
+
+        is_video_mode = bool(
+            (raw_video and Path(raw_video).exists())
+            or (len(abs_images) == 1 and Path(abs_images[0]).suffix.lower() in (".mp4", ".mov", ".webm"))
+        )
 
         title = payload.get("title", "")
         desc = payload.get("description", "")
@@ -407,47 +416,141 @@ class XTwitterDispatcher(BaseDispatcher):
                         self.close_login_session(browser, context)
                         return False, val_msg, compliance
 
-                    # 3. 上传图片附件 (仅上传到首条推文，符合 X 平台 thread 规范)
-                    file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
-                    if not file_input and abs_images:
-                        try:
-                            page.wait_for_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']", timeout=5000)
-                            file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
-                        except Exception:
-                            pass
-                    if not file_input and abs_images:
-                        self.close_login_session(browser, context)
-                        return False, "X (Twitter) 未能定位到图片上传控件，已中止发布以防文字单独泄露", compliance
-
-                    upload_images = abs_images[:4]
-                    if file_input:
-                        file_input.set_input_files(upload_images)
-                        logger.info(f"[X] 正在上传 {len(upload_images)} 张图片并等待服务端渲染...")
-                        # 断言 2.1: 上传后断言附件必须就绪
-                        att_ok, att_msg = self.assert_attached(
-                            page,
-                            "div[data-testid='attachments'], div[aria-label*='媒体'], button[aria-label*='移除媒体'], button[aria-label*='编辑媒体'], button[aria-label*='Edit media']",
-                            timeout=25000,
-                            error_msg="X (Twitter) 图片未能附加到推文，已中止发送（未发出空内容）"
-                        )
-                        if not att_ok:
+                    # 3. 上传媒体附件：视频版独立分支 vs 图片/GIF 原有分支 (Rules 11–12)
+                    if is_video_mode:
+                        file_input = page.query_selector("input[data-testid='fileInput'], input[type='file']")
+                        if not file_input and abs_images:
+                            try:
+                                page.wait_for_selector("input[data-testid='fileInput'], input[type='file']", timeout=5000)
+                                file_input = page.query_selector("input[data-testid='fileInput'], input[type='file']")
+                            except Exception:
+                                pass
+                        if not file_input and abs_images:
                             self.close_login_session(browser, context)
-                            return False, att_msg, compliance
-                        time.sleep(1)  # 等待图片上传完成与服务端缩略图渲染
+                            return False, "X (Twitter) 未能定位到视频上传控件，已中止发布以防文字单独泄露", compliance
 
-                        # 检查是否被 X 平台错误弹窗拦截 (例如 GIF > 15MB 或格式不支持)
-                        err_alerts = page.query_selector_all("div[data-testid='toast'], div[role='alert']")
-                        for ea in err_alerts:
-                            ea_text = (ea.text_content() or "").strip()
-                            if any(kw in ea_text for kw in ["文件太大", "小于 15MB", "too large", "15MB", "无法上传", "出错了"]):
+                        upload_video = abs_images[0]
+                        upload_images = [upload_video]
+                        video_transcode_timeout = float(payload.get("x_video_transcode_timeout", 180))
+                        if file_input:
+                            file_input.set_input_files([upload_video])
+                            logger.info(f"[X] 正在上传处理后的视频 ({Path(upload_video).name}) 并等待服务端转码完成 (超时: {int(video_transcode_timeout)}s)...")
+                            att_ok, att_msg = self.assert_attached(
+                                page,
+                                "div[data-testid='attachments'], video, div[data-testid='videoPlayer'], div[aria-label*='媒体'], button[aria-label*='移除媒体'], button[aria-label*='编辑媒体'], button[aria-label*='Edit media']",
+                                timeout=30000,
+                                error_msg="X (Twitter) 视频未能附加到推文，已中止发送（未发出空内容）"
+                            )
+                            if not att_ok:
                                 self.close_login_session(browser, context)
-                                return False, f"X (Twitter) 附件上传被平台拦截: {ea_text}", compliance
+                                return False, att_msg, compliance
 
-                        # 严格校验媒体是否实际挂载至发帖输入框内，防止图片上传失败时误将纯文本单独发出
-                        has_media = page.query_selector("div[data-testid='attachments'], div[aria-label*='媒体'], button[aria-label*='移除媒体'], button[aria-label*='编辑媒体']") is not None
-                        if not has_media:
+                            # 独立等待 X 视频转码完成（「处理完成」态），超时 180s 报明确原因
+                            transcode_start = time.time()
+                            transcode_done = False
+                            last_transcode_log = 0.0
+                            poll_interval = float(payload.get("x_video_poll_interval", 1.0))
+
+                            while time.time() - transcode_start < video_transcode_timeout:
+                                # 检查是否被平台错误提示拦截
+                                err_alerts = page.query_selector_all("div[data-testid='toast'], div[role='alert']")
+                                for ea in err_alerts:
+                                    ea_text = (ea.text_content() or "").strip()
+                                    if any(kw in ea_text for kw in ["文件太大", "512MB", "140", "too large", "无法上传", "出错了", "failed", "cannot be uploaded"]):
+                                        self.close_login_session(browser, context)
+                                        return False, f"X (Twitter) 视频上传/转码被平台拦截: {ea_text}", compliance
+
+                                att_box = page.query_selector("div[data-testid='attachments']")
+                                att_text = ""
+                                if att_box:
+                                    try:
+                                        att_text = (att_box.inner_text() or att_box.text_content() or "").strip()
+                                    except Exception:
+                                        att_text = ""
+
+                                prog_visible = False
+                                try:
+                                    prog_el = page.query_selector(
+                                        "div[data-testid='attachments'] [role='progressbar'], div[data-testid='attachments'] svg[role='progressbar']"
+                                    )
+                                    if prog_el and (prog_el.is_visible() is True):
+                                        prog_visible = True
+                                except Exception:
+                                    pass
+
+                                actively_processing = prog_visible or any(
+                                    kw in att_text for kw in ["正在处理", "Processing", "正在上传", "Uploading"]
+                                )
+                                explicitly_completed = any(
+                                    kw in att_text for kw in ["处理完成", "已上传 (100%)", "Uploaded (100%)", "Processing complete"]
+                                )
+                                has_video_dom = page.query_selector(
+                                    "div[data-testid='attachments'] video, div[data-testid='videoPlayer'], div[data-testid='attachments']"
+                                ) is not None
+
+                                if (explicitly_completed and not prog_visible) or (has_video_dom and not actively_processing):
+                                    transcode_done = True
+                                    logger.info(f"[X] 视频转码已完成（处理完成态，耗时 {time.time() - transcode_start:.1f}s）")
+                                    break
+
+                                now_t = time.time()
+                                if now_t - last_transcode_log >= 10.0:
+                                    last_transcode_log = now_t
+                                    logger.info(
+                                        f"[X] 等待视频转码中 ({int(now_t - transcode_start)}s/{int(video_transcode_timeout)}s): "
+                                        f"progressbar={prog_visible}, 状态文本='{att_text[:60]}'"
+                                    )
+                                time.sleep(poll_interval)
+
+                            if not transcode_done:
+                                self.close_login_session(browser, context)
+                                return (
+                                    False,
+                                    f"X (Twitter) 视频转码超时 ({int(video_transcode_timeout)}s 内未进入「处理完成」态)，已中止发布",
+                                    compliance,
+                                )
+                    else:
+                        # 无配对视频时保留现行图片/GIF 路径不变 (Rule 12)
+                        file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
+                        if not file_input and abs_images:
+                            try:
+                                page.wait_for_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']", timeout=5000)
+                                file_input = page.query_selector("input[data-testid='fileInput'], input[type='file'][accept*='image']")
+                            except Exception:
+                                pass
+                        if not file_input and abs_images:
                             self.close_login_session(browser, context)
-                            return False, "X (Twitter) 媒体未能成功附加至推文，已中止发送以防文字单独泄露", compliance
+                            return False, "X (Twitter) 未能定位到图片上传控件，已中止发布以防文字单独泄露", compliance
+
+                        upload_images = abs_images[:4]
+                        if file_input:
+                            file_input.set_input_files(upload_images)
+                            logger.info(f"[X] 正在上传 {len(upload_images)} 张图片并等待服务端渲染...")
+                            # 断言 2.1: 上传后断言附件必须就绪
+                            att_ok, att_msg = self.assert_attached(
+                                page,
+                                "div[data-testid='attachments'], div[aria-label*='媒体'], button[aria-label*='移除媒体'], button[aria-label*='编辑媒体'], button[aria-label*='Edit media']",
+                                timeout=25000,
+                                error_msg="X (Twitter) 图片未能附加到推文，已中止发送（未发出空内容）"
+                            )
+                            if not att_ok:
+                                self.close_login_session(browser, context)
+                                return False, att_msg, compliance
+                            time.sleep(1)  # 等待图片上传完成与服务端缩略图渲染
+
+                            # 检查是否被 X 平台错误弹窗拦截 (例如 GIF > 15MB 或格式不支持)
+                            err_alerts = page.query_selector_all("div[data-testid='toast'], div[role='alert']")
+                            for ea in err_alerts:
+                                ea_text = (ea.text_content() or "").strip()
+                                if any(kw in ea_text for kw in ["文件太大", "小于 15MB", "too large", "15MB", "无法上传", "出错了"]):
+                                    self.close_login_session(browser, context)
+                                    return False, f"X (Twitter) 附件上传被平台拦截: {ea_text}", compliance
+
+                            # 严格校验媒体是否实际挂载至发帖输入框内，防止图片上传失败时误将纯文本单独发出
+                            has_media = page.query_selector("div[data-testid='attachments'], div[aria-label*='媒体'], button[aria-label*='移除媒体'], button[aria-label*='编辑媒体']") is not None
+                            if not has_media:
+                                self.close_login_session(browser, context)
+                                return False, "X (Twitter) 媒体未能成功附加至推文，已中止发送以防文字单独泄露", compliance
 
                     # 3. 勾选官方 "Made with AI" 系统设置 (首条推文)
                     # 注: is_any_gif 必须在此处提前定义，供下方披露弹窗缺失分支与第 4 步复用
