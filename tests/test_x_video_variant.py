@@ -463,6 +463,167 @@ def test_x_dispatcher_video_transcode_wait_and_timeout(tmp_path, monkeypatch):
     assert "视频转码超时" in msg_t
 
 
+def test_x_dispatcher_video_ai_and_sensitive_compliance(tmp_path, monkeypatch):
+    """
+    验证 X (Twitter) 在视频模式下的 AI 内容披露与敏感警告 (Nudity + AI) 自动化打标与合规审计通过
+    - 验证披露设置弹窗 (Made with AI switch) 正常开启
+    - 验证视频编辑弹窗内部动态匹配内容警告标签页 (Tab 1) 并勾选「裸体」与「AI 生成」后保存
+    """
+    from dispatchers.x_twitter import XTwitterDispatcher
+
+    vid_path = _generate_lavfi_test_video(tmp_path / "x_comp.mp4", duration=1.0, size="320x240", rate=10)
+    disp = XTwitterDispatcher(tmp_path / "cookies")
+    monkeypatch.setattr(disp, "get_cookies", lambda: [{"name": "auth_token", "value": "xxx", "domain": ".x.com", "path": "/"}])
+
+    class MockCheckbox:
+        def __init__(self, checked=False):
+            self._checked = checked
+
+        def is_checked(self):
+            return self._checked
+
+        def click(self, **kw):
+            self._checked = True
+
+        def evaluate(self, script):
+            self._checked = True
+
+    class MockDialog:
+        def __init__(self, is_disc=False):
+            self.is_disc = is_disc
+            self.disc_cb = MockCheckbox(checked=False)
+            self.nudity_cb = MockCheckbox(checked=False)
+            self.ai_media_cb = MockCheckbox(checked=False)
+            self.active_tab = 0
+
+        def query_selector(self, sel):
+            if "由 AI 生成" in sel or "Made with AI" in sel:
+                target_cb = self.disc_cb if self.is_disc else self.ai_media_cb
+                class FakeLabel:
+                    def __init__(lbl_self, cb):
+                        lbl_self._cb = cb
+                    def query_selector(lbl_self, sub_sel):
+                        return lbl_self._cb
+                return FakeLabel(target_cb)
+            if "裸体" in sel or "裸露" in sel or "Nudity" in sel:
+                nudity_cb_ref = self.nudity_cb
+                class FakeNudityLabel:
+                    def query_selector(lbl_self, sub_sel):
+                        return nudity_cb_ref
+                return FakeNudityLabel()
+            if "保存" in sel or "Save" in sel or "完成" in sel or "Done" in sel or "endEditingButton" in sel:
+                class FakeBtn:
+                    def click(self, **kw): pass
+                    def evaluate(self, script): pass
+                return FakeBtn()
+            return None
+
+        def query_selector_all(self, sel):
+            if "[role='tab']" in sel:
+                class FakeTab:
+                    def __init__(tab_self, idx, text, label):
+                        tab_self.idx = idx
+                        tab_self.text = text
+                        tab_self.label = label
+                    def inner_text(tab_self): return tab_self.text
+                    def get_attribute(tab_self, attr):
+                        if attr == "aria-label": return tab_self.label
+                        return None
+                    def click(tab_self, **kw):
+                        self.active_tab = tab_self.idx
+                    def evaluate(tab_self, script):
+                        self.active_tab = tab_self.idx
+                return [FakeTab(0, "字幕", "字幕"), FakeTab(1, "内容警告", "内容警告")]
+            return []
+
+    curr_dialog = [None]
+
+    class FakeCompliancePage:
+        def __init__(self):
+            self.url = "https://x.com/home"
+
+        def wait_for_timeout(self, ms): pass
+        def wait_for_selector(self, sel, timeout=5000):
+            class FakeEl:
+                def set_input_files(self, files): pass
+            return FakeEl()
+
+        def query_selector(self, sel):
+            if "tweetTextarea_0" in sel:
+                class FakeEditor:
+                    def fill(self, txt): pass
+                    def click(self): pass
+                return FakeEditor()
+            if "fileInput" in sel:
+                class FakeEl:
+                    def set_input_files(self, files): pass
+                return FakeEl()
+            if "编辑媒体" in sel or "Edit media" in sel or "编辑" in sel:
+                class FakeEditBtn:
+                    def click(self, **kw):
+                        curr_dialog[0] = MockDialog(is_disc=False)
+                    def evaluate(self, script):
+                        curr_dialog[0] = MockDialog(is_disc=False)
+                return FakeEditBtn()
+            if "attachments" in sel:
+                class FakeAtt:
+                    def inner_text(self): return "处理完成"
+                    def text_content(self): return "处理完成"
+                    def evaluate(self, script): pass
+                return FakeAtt()
+            if "video" in sel or "videoPlayer" in sel:
+                return MagicMock()
+            if "toast" in sel:
+                return MagicMock(text_content=lambda: "Your post was sent")
+            return None
+
+        def query_selector_all(self, sel):
+            if "contentDisclosureButton" in sel or "披露" in sel:
+                class FakeDiscBtn:
+                    def click(self, **kw):
+                        curr_dialog[0] = MockDialog(is_disc=True)
+                    def evaluate(self, script):
+                        curr_dialog[0] = MockDialog(is_disc=True)
+                return [FakeDiscBtn()]
+            if "role='dialog'" in sel:
+                return [curr_dialog[0]] if curr_dialog[0] else []
+            if "tweetButton" in sel or "Post" in sel:
+                class FakeTweetBtn:
+                    def is_visible(self): return True
+                    def is_enabled(self): return True
+                    def get_attribute(self, attr): return "false" if attr == "aria-disabled" else None
+                    def click(self, **kw): pass
+                return [FakeTweetBtn()]
+            return []
+
+    fake_page = FakeCompliancePage()
+    monkeypatch.setattr(disp, "create_persistent_stealth_context", lambda p, d, headless=True: MagicMock(pages=[fake_page], close=lambda: None))
+    monkeypatch.setattr(disp, "create_stealth_browser", lambda p, headless=True: MagicMock())
+    monkeypatch.setattr(disp, "apply_stealth", lambda page: None)
+    monkeypatch.setattr(disp, "safe_goto", lambda page, url, timeout=30000: None)
+    monkeypatch.setattr(disp, "assert_field_value", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "assert_attached", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "assert_submitted", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "close_login_session", lambda *a, **kw: None)
+
+    ok, msg, compliance = disp.publish({
+        "title": "Video AI Compliance Test",
+        "description": "Test desc",
+        "tags": ["ai", "art"],
+        "x_video": str(vid_path),
+        "x_images": [str(vid_path)],
+        "is_ai": True,
+        "is_sensitive": True,
+        "x_video_transcode_timeout": 5,
+        "x_video_poll_interval": 0.05,
+    })
+
+    assert ok is True
+    comp_map = {c["item"]: c for c in compliance}
+    assert comp_map["ai_disclosure"]["verified"] is True
+    assert comp_map["media_sensitive"]["verified"] is True
+
+
 def test_single_gif_vs_multi_image_and_ui_badge(tmp_path, qapp):
     """
     断言规则 1, 3, 5, 6：
