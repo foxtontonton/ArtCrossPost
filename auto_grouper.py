@@ -88,16 +88,23 @@ def scan_and_group_folder(folder_path: Path | str) -> dict[str, list[str]]:
     return group_images_by_naming(all_files)
 
 
-def save_groups_to_drafts_box(groups: dict[str, list[str]], data_dir: Path | str) -> list[Path]:
+def save_groups_to_drafts_box(
+    groups: dict[str, list[str]],
+    data_dir: Path | str,
+    video_pairs: dict[str, dict] | None = None,
+) -> list[Path]:
     """
     将分组结果持久化存储到草稿箱目录 (data/drafts/):
     每个作品组生成一份独立完整的 draft_{id}.json
+    若提供 video_pairs ({gif_path: {"video_path": str, "source": "auto"|"manual"}})，
+    同步将该组内 GIF 配对的视频路径与来源写入草稿。
     """
     drafts_dir = Path(data_dir) / "drafts"
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files = []
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    vp_map = video_pairs or {}
 
     for idx, (group_title, img_paths) in enumerate(groups.items()):
         if not img_paths:
@@ -106,12 +113,25 @@ def save_groups_to_drafts_box(groups: dict[str, list[str]], data_dir: Path | str
         draft_id = f"{now_str}_{idx:02d}_{safe_title}"
         draft_file = drafts_dir / f"draft_{draft_id}.json"
 
+        grp_video_paths = {}
+        grp_video_sources = {}
+        for p in img_paths:
+            info = vp_map.get(p) or vp_map.get(str(p))
+            if isinstance(info, dict) and info.get("video_path"):
+                grp_video_paths[str(p)] = str(info["video_path"])
+                grp_video_sources[str(p)] = str(info.get("source", "auto"))
+            elif isinstance(info, str) and info:
+                grp_video_paths[str(p)] = info
+                grp_video_sources[str(p)] = "auto"
+
         data = {
             "id": draft_id,
             "title": group_title,
             "tags": "",
             "description": "",
             "images": img_paths,
+            "x_video_paths": grp_video_paths,
+            "x_video_sources": grp_video_sources,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         }

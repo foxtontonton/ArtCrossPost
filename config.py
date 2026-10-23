@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     },
     "selected_platforms": ["x_twitter", "deviantart"],  # 记录上次选中的发布平台
     "platform_kofi_enabled": False,                      # 是否在平台发布列表中启用/显示 Ko-fi (默认 False)
+    "comfyui_output_dir": "",                            # ComfyUI output 目录 (用于 GIF 自动配对同名/计数视频变体)
     "log_drawer_expanded": True,                          # 底部日志栏默认展开状态
     "settings_dialog_size": [760, 680],                   # 系统设置窗口记忆尺寸 (宽, 高)
     "settings_dialog_tab": 0,                             # 系统设置窗口记忆激活选项卡
