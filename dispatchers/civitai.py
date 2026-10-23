@@ -9,7 +9,6 @@ ArtCrossPost - Civitai Dispatcher
 - 发布成功 URL 正则断言 (civitai.com/posts/<数字>) 与帖子链接回填
 - 失败时自动检测并走编辑页 Delete Post 清理孤儿草稿，防社区草稿堆积
 """
-import os
 import re
 import time
 from pathlib import Path
@@ -34,7 +33,9 @@ except ImportError:
         from ..video_engine import probe_video_info, get_ffmpeg_path
     except ImportError:
         probe_video_info = None
-        get_ffmpeg_path = lambda: None
+
+        def get_ffmpeg_path():
+            return None
 
 logger = get_logger("Civitai")
 
@@ -43,6 +44,7 @@ CIVITAI_MAX_MEDIA_LIMIT = 20
 CIVITAI_MAX_VIDEO_SIZE_MB = 750.0
 CIVITAI_MAX_VIDEO_DURATION_SEC = 245.0
 CIVITAI_MAX_VIDEO_DIMENSION = 4096
+CIVITAI_MAX_RESOURCES_PER_IMAGE = 10
 
 CIVITAI_SUPPORTED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 CIVITAI_SUPPORTED_VIDEO_EXTS = {".mp4", ".webm"}
@@ -50,6 +52,95 @@ CIVITAI_ALL_ACCEPTED_EXTS = CIVITAI_SUPPORTED_IMAGE_EXTS | CIVITAI_SUPPORTED_VID
 
 POST_URL_REGEX = re.compile(r"^https?://(?:www\.)?civitai\.com/posts/(\d+)(?:[/?#]|$)")
 DRAFT_EDIT_REGEX = re.compile(r"^https?://(?:www\.)?civitai\.com/posts/(\d+)/edit")
+CIVITAI_MODEL_URL_REGEX = re.compile(r"(?:https?://(?:www\.)?civitai\.com)?/models/(\d+)", re.IGNORECASE)
+
+
+def parse_civitai_resource_item(item: Any) -> Optional[Dict[str, Any]]:
+    """
+    解析单个 Civitai 资源配置元素:
+    支持三种形态:
+    1. int 或 纯数字字符串: 25760 / "25760"
+    2. Civitai 模型 URL: "https://civitai.com/models/25760" (支持附带 slug 或参数)
+    3. 字典: {"id": 25760, "version": "v1.0"} (id 支持数字或 URL)
+
+    严正拒绝: 纯名称字符串 (例如 "Goth Girl LoRA")、无 ID 或非法格式。
+    返回规范化字典: {"id": 25760, "version": "v1.0" | None}，解析失败返回 None。
+    """
+    if item is None or isinstance(item, bool):
+        return None
+
+    if isinstance(item, int):
+        if item > 0:
+            return {"id": item, "version": None}
+        return None
+
+    if isinstance(item, str):
+        s = item.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            val = int(s)
+            if val > 0:
+                return {"id": val, "version": None}
+            return None
+        m = CIVITAI_MODEL_URL_REGEX.search(s)
+        if m:
+            val = int(m.group(1))
+            if val > 0:
+                return {"id": val, "version": None}
+            return None
+        # 纯名称字符串或非 Civitai 模型 URL，直接拒绝
+        return None
+
+    if isinstance(item, dict):
+        raw_id = item.get("id")
+        if raw_id is None:
+            return None
+        sub_parsed = parse_civitai_resource_item(raw_id)
+        if sub_parsed is None:
+            return None
+        raw_ver = item.get("version")
+        ver_str = str(raw_ver).strip() if raw_ver is not None and str(raw_ver).strip() else None
+        return {"id": sub_parsed["id"], "version": ver_str}
+
+    return None
+
+
+def parse_civitai_resources(
+    raw_list: Any,
+    max_limit: int = CIVITAI_MAX_RESOURCES_PER_IMAGE
+) -> List[Dict[str, Any]]:
+    """
+    批量解析并校验 civitai_resources 列表:
+    - 遍历元素并规范化
+    - 剔除解析失败的元素并记录 warning 日志 (拒绝纯模型名称)
+    - 单图资源数上限 10，配置超限时数据层截断并警告
+    """
+    if not raw_list:
+        return []
+    if not isinstance(raw_list, (list, tuple)):
+        logger.warning(f"[Civitai] civitai_resources 配置类型非列表 ({type(raw_list).__name__})，已忽略")
+        return []
+
+    parsed_items: List[Dict[str, Any]] = []
+    for elem in raw_list:
+        parsed = parse_civitai_resource_item(elem)
+        if parsed is not None:
+            parsed_items.append(parsed)
+        else:
+            logger.warning(
+                f"[Civitai] 资源配置元素非法或解析失败: {elem!r}，已剔除。"
+                f"注: 纯名称字符串不可靠已被拒绝，请使用模型 ID、Civitai 链接或 {{'id': ..., 'version': ...}}"
+            )
+
+    if len(parsed_items) > max_limit:
+        logger.warning(
+            f"[Civitai] 单图资源数上限为 {max_limit}，配置中有效资源数 ({len(parsed_items)}) 超限，"
+            f"已自动截断保留前 {max_limit} 个资源"
+        )
+        parsed_items = parsed_items[:max_limit]
+
+    return parsed_items
 
 
 def validate_civitai_video_constraints(
@@ -273,6 +364,8 @@ class CivitaiDispatcher(BaseDispatcher):
             "title_input": "textarea[placeholder*='title' i], textarea[name='title']",
             "description_editor": "div.ProseMirror",
             "tag_button": "[data-tour='post:tag'], div[class*='Alert-root']:has-text('Tag')",
+            "resource_button": "button:has-text('RESOURCE')",
+            "tool_button": "button:has-text('TOOL')",
             "publish_button": "button:has-text('Publish')",
             "delete_post_button": "button:has-text('Delete Post')"
         }
@@ -401,6 +494,259 @@ class CivitaiDispatcher(BaseDispatcher):
                 f"https://civitai.com/posts/{draft_id or ''}/edit，请创作者手动前往清理。异常: {e}"
             )
             return False
+
+    @staticmethod
+    def _safe_inner_text(elem) -> str:
+        try:
+            t = elem.inner_text()
+            return str(t) if t is not None else ""
+        except Exception:
+            return ""
+
+    def _attach_single_card_resources(self, page, card_idx: int, resources: List[Dict[str, Any]]) -> bool:
+        """为单张卡片执行资源关联"""
+        try:
+            raw_btns = page.query_selector_all("button:has-text('RESOURCE')")
+            all_btns = [b for b in raw_btns if "RESOURCE" in (self._safe_inner_text(b) or "RESOURCE")]
+            if card_idx >= len(all_btns):
+                logger.warning(f"[Civitai] 图片 #{card_idx + 1} 未找到对应的 '+ RESOURCE' 按钮 (当前卡片按钮数: {len(all_btns)})")
+                return False
+
+            res_btn = all_btns[card_idx]
+            res_btn.click()
+            time.sleep(1.5)
+
+            # 等待弹窗出现
+            modal = page.query_selector("div[role='dialog'], .mantine-Modal-content")
+            if not modal:
+                logger.warning(f"[Civitai] 图片 #{card_idx + 1} 点击 '+ RESOURCE' 后未检测到选择弹窗")
+                return False
+
+            has_error = False
+            for res_item in resources:
+                model_id = res_item["id"]
+                version_req = res_item.get("version")
+
+                search_input = page.query_selector(
+                    ".mantine-Modal-content input[placeholder*='search' i], "
+                    "div[role='dialog'] input[placeholder*='search' i], "
+                    ".mantine-Modal-content input[type='text'], "
+                    "input[placeholder='Search models']"
+                )
+                if not search_input:
+                    logger.warning(f"[Civitai] 资源弹窗内未找到搜索输入框，跳过模型 {model_id}")
+                    has_error = True
+                    continue
+
+                search_input.fill("")
+                time.sleep(0.3)
+                search_input.fill(str(model_id))
+                time.sleep(2.0)
+
+                # 查找搜索结果卡片
+                target_card = page.query_selector(f".mantine-Modal-content a[href*='/models/{model_id}']")
+                card_container = None
+                if target_card:
+                    try:
+                        card_container = target_card.evaluate_handle("el => el.closest('div.flex-col') || el.closest('[class*=\"Card\"]') || el.parentElement")
+                    except Exception:
+                        card_container = target_card
+                else:
+                    card_container = page.query_selector(
+                        f"div[role='dialog'] a[href*='/models/{model_id}'], "
+                        ".mantine-Modal-content div[class*='Card' i], "
+                        ".mantine-Modal-content [class*='Paper']"
+                    )
+
+                if not card_container:
+                    logger.warning(f"[Civitai] 图片 #{card_idx + 1} 搜索模型 ID {model_id} 未匹配到结果卡片，跳过")
+                    has_error = True
+                    continue
+
+                # 若指定了特定版本要求，先切换版本
+                if version_req:
+                    try:
+                        ver_input = (
+                            card_container.query_selector("input.mantine-Select-input, input[placeholder*='version' i]")
+                            if hasattr(card_container, "query_selector") else None
+                        )
+                        if not ver_input:
+                            ver_input = page.query_selector(".mantine-Modal-content input.mantine-Select-input")
+                        if ver_input:
+                            ver_input.click()
+                            time.sleep(0.6)
+                            opt = page.query_selector(f".mantine-Select-option:has-text('{version_req}'), div[role='option']:has-text('{version_req}')")
+                            if opt:
+                                opt.click()
+                                time.sleep(0.5)
+                            else:
+                                logger.warning(f"[Civitai] 模型 {model_id} 未找到指定版本 '{version_req}'，保持默认版本")
+                    except Exception as ve:
+                        logger.warning(f"[Civitai] 模型 {model_id} 选择版本 '{version_req}' 异常: {ve}，保持默认版本")
+
+                # 点击 Select 按钮
+                select_btn = (
+                    card_container.query_selector("button:has-text('Select')")
+                    if hasattr(card_container, "query_selector") else None
+                )
+                if not select_btn:
+                    select_btn = page.query_selector(".mantine-Modal-content button:has-text('Select'), div[role='dialog'] button:has-text('Select')")
+
+                if select_btn:
+                    select_btn.click()
+                    time.sleep(1.0)
+                    logger.info(f"[Civitai] 图片 #{card_idx + 1} 成功添加模型资源 (ID: {model_id}{f', 版本: {version_req}' if version_req else ''})")
+                else:
+                    logger.warning(f"[Civitai] 未找到 Select 按钮，跳过模型 {model_id}")
+                    has_error = True
+
+            # 全部选完，关闭弹窗
+            close_btn = page.query_selector(".mantine-Modal-content button.mantine-CloseButton-root, div[role='dialog'] button[aria-label*='Close' i]")
+            if close_btn:
+                close_btn.click()
+            else:
+                page.keyboard.press("Escape")
+            time.sleep(1.0)
+
+            return not has_error
+        except Exception as e:
+            logger.warning(f"[Civitai] 图片 #{card_idx + 1} 关联资源异常: {e}，跳过该图继续后续流程")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
+    def _attach_single_card_tool(self, page, card_idx: int, tool_name: str) -> bool:
+        """为单张卡片执行工具标注 (如 ComfyUI)"""
+        try:
+            raw_tool_btns = page.query_selector_all("button:has-text('TOOL')")
+            tool_btns = [b for b in raw_tool_btns if "TOOL" in (self._safe_inner_text(b) or "TOOL")]
+            if card_idx >= len(tool_btns):
+                logger.warning(f"[Civitai] 图片 #{card_idx + 1} 未找到 '+ TOOL' 按钮，跳过工具标注")
+                return False
+
+            tool_btn = tool_btns[card_idx]
+            tool_btn.click()
+            time.sleep(1.0)
+
+            # 寻找弹出层中的输入框或直接选项
+            tool_input = page.query_selector(
+                "div[role='dialog'] input, div[id*='popover'] input, div[class*='Popover'] input, "
+                "input[placeholder*='tool' i], input[placeholder*='search' i]"
+            )
+            if tool_input:
+                tool_input.fill(tool_name)
+                time.sleep(0.4)
+                opt = page.query_selector(f"div[role='option']:has-text('{tool_name}'), button:has-text('{tool_name}'), div:has-text('{tool_name}')")
+                if opt:
+                    opt.click()
+                else:
+                    tool_input.press("Enter")
+                time.sleep(0.5)
+            else:
+                opt = page.query_selector(f"button:has-text('{tool_name}'), div[role='option']:has-text('{tool_name}'), div[role='menuitem']:has-text('{tool_name}')")
+                if opt:
+                    opt.click()
+                    time.sleep(0.5)
+                else:
+                    page.keyboard.press("Escape")
+
+            logger.info(f"[Civitai] 图片 #{card_idx + 1} 成功关联工具: '{tool_name}'")
+            return True
+        except Exception as e:
+            logger.warning(f"[Civitai] 图片 #{card_idx + 1} 关联工具 '{tool_name}' 异常: {e}，跳过不中断")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return False
+
+    def attach_resources_and_tools(
+        self,
+        page,
+        payload: dict,
+        media_count: int = 1
+    ) -> Tuple[int, int, int, int]:
+        """
+        在 /posts/create 编辑器中执行单图/多图的资源关联与工具标注:
+        1. scope 路由: "all" 遍历所有卡片，"cover" 仅第 1 张
+        2. 资源关联: 点击 + RESOURCE，按 ID 搜索，（若指定版本则选版本），点击 Select，关闭弹窗
+        3. 工具关联: 点击 TOOL 按钮，输入/选择 civitai_tool (默认 ComfyUI)
+        4. 容错: 单张卡片失败记 warning 继续下一张，不中断主发布流程
+        返回: (resource_success_cards, resource_failed_cards, tool_success_cards, tool_failed_cards)
+        """
+        raw_resources = payload.get("civitai_resources")
+        if raw_resources is None:
+            raw_resources = payload.get("platform_options", {}).get("civitai_resources")
+        if raw_resources is None:
+            raw_resources = load_config().get("civitai_resources", [])
+
+        resources = parse_civitai_resources(raw_resources, max_limit=CIVITAI_MAX_RESOURCES_PER_IMAGE)
+
+        scope = (
+            payload.get("civitai_resources_scope")
+            or payload.get("platform_options", {}).get("civitai_resources_scope")
+            or load_config().get("civitai_resources_scope", "all")
+        )
+        scope = "cover" if str(scope).lower().strip() == "cover" else "all"
+
+        tool_name = (
+            payload.get("civitai_tool")
+            if "civitai_tool" in payload
+            else payload.get("platform_options", {}).get("civitai_tool")
+        )
+        if tool_name is None:
+            tool_name = load_config().get("civitai_tool", "ComfyUI")
+        tool_name = str(tool_name).strip() if tool_name else ""
+
+        # 若无资源且无工具配置，直接跳过
+        if not resources and not tool_name:
+            return 0, 0, 0, 0
+
+        raw_res_btns = page.query_selector_all("button:has-text('RESOURCE')")
+        res_buttons = [b for b in raw_res_btns if "RESOURCE" in (self._safe_inner_text(b) or "RESOURCE")]
+        raw_tool_btns = page.query_selector_all("button:has-text('TOOL')")
+        tool_buttons = [b for b in raw_tool_btns if "TOOL" in (self._safe_inner_text(b) or "TOOL")]
+
+        total_cards = max(len(res_buttons), len(tool_buttons), media_count)
+        if total_cards == 0:
+            total_cards = 1
+
+        target_indices = [0] if scope == "cover" else list(range(total_cards))
+
+        res_success = 0
+        res_failed = 0
+        tool_success = 0
+        tool_failed = 0
+
+        logger.info(
+            f"[Civitai] 开始执行模型资源与工具关联: 范围={scope} (共目标卡片 {len(target_indices)} 张), "
+            f"待关联资源={len(resources)} 个, 标注工具='{tool_name or '无'}'"
+        )
+
+        for idx in target_indices:
+            # 1. 资源关联
+            if resources:
+                card_res_ok = self._attach_single_card_resources(page, idx, resources)
+                if card_res_ok:
+                    res_success += 1
+                else:
+                    res_failed += 1
+
+            # 2. 工具关联
+            if tool_name:
+                card_tool_ok = self._attach_single_card_tool(page, idx, tool_name)
+                if card_tool_ok:
+                    tool_success += 1
+                else:
+                    tool_failed += 1
+
+        logger.info(
+            f"[Civitai] 资源与工具关联完成: 资源关联成功 {res_success} 张 / 失败 {res_failed} 张；"
+            f"工具关联成功 {tool_success} 张 / 失败 {tool_failed} 张"
+        )
+        return res_success, res_failed, tool_success, tool_failed
 
     def publish(self, payload: dict) -> Tuple[bool, str, List[dict]]:
         """
@@ -557,6 +903,13 @@ class CivitaiDispatcher(BaseDispatcher):
 
                 time.sleep(1)
 
+                # Step 9.4: 模型资源关联与工具标注 (Civitai Resources & Tools)
+                res_ok_cnt, res_fail_cnt, tool_ok_cnt, tool_fail_cnt = self.attach_resources_and_tools(
+                    page, payload, media_count=len(accepted_media)
+                )
+
+                time.sleep(1)
+
                 # Step 10: 点击 Publish，断言成功 URL
                 pub_btn = page.query_selector("button:has-text('Publish'):not([disabled])")
                 if not pub_btn:
@@ -592,12 +945,28 @@ class CivitaiDispatcher(BaseDispatcher):
                 context.close()
 
                 success_msg = f"发布成功 ({published_url})"
+                if res_ok_cnt > 0 or res_fail_cnt > 0:
+                    success_msg += f"；资源关联: 成功 {res_ok_cnt} 张 / 失败 {res_fail_cnt} 张"
                 if skipped_notes:
                     success_msg += f"；注: {'；'.join(skipped_notes)}"
 
                 compliance = [
                     {"item": "post_url", "verified": True, "detail": published_url, "expected": True}
                 ]
+                if res_ok_cnt > 0 or res_fail_cnt > 0:
+                    compliance.append({
+                        "item": "resources_attached",
+                        "verified": (res_fail_cnt == 0),
+                        "detail": f"成功 {res_ok_cnt} 张 / 失败 {res_fail_cnt} 张",
+                        "expected": True
+                    })
+                if tool_ok_cnt > 0 or tool_fail_cnt > 0:
+                    compliance.append({
+                        "item": "tool_attached",
+                        "verified": (tool_fail_cnt == 0),
+                        "detail": f"成功 {tool_ok_cnt} 张 / 失败 {tool_fail_cnt} 张",
+                        "expected": True
+                    })
                 return True, success_msg, compliance
 
         except Exception as e:
