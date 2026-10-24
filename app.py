@@ -3172,6 +3172,33 @@ class SettingsDialog(QDialog):
         self.def_civitai_max_spin.valueChanged.connect(self._on_def_civitai_max_changed)
         civitai_vbox.addWidget(self.def_civitai_max_spin)
 
+        # 3.4.2 Civitai 资源关联范围 (all / cover) 与标注工具
+        cscope_label = QLabel("Civitai 资源关联范围 (Scope):")
+        cscope_label.setStyleSheet("color: #cccccc; font-size: 12px; margin-top: 4px;")
+        civitai_vbox.addWidget(cscope_label)
+
+        self.def_civitai_scope_combo = QComboBox()
+        self.def_civitai_scope_combo.addItem("每张图片均关联 (all)", "all")
+        self.def_civitai_scope_combo.addItem("仅第 1 张封面图关联 (cover)", "cover")
+        cur_scope = self.config.get("defaults", {}).get("civitai_resources_scope", self.config.get("civitai_resources_scope", "all"))
+        if str(cur_scope).lower() == "cover":
+            self.def_civitai_scope_combo.setCurrentIndex(1)
+        else:
+            self.def_civitai_scope_combo.setCurrentIndex(0)
+        self.def_civitai_scope_combo.currentIndexChanged.connect(self._on_def_civitai_scope_changed)
+        civitai_vbox.addWidget(self.def_civitai_scope_combo)
+
+        ctool_label = QLabel("Civitai 图片默认标注工具 (Tool):")
+        ctool_label.setStyleSheet("color: #cccccc; font-size: 12px; margin-top: 4px;")
+        civitai_vbox.addWidget(ctool_label)
+
+        self.def_civitai_tool_edit = QLineEdit()
+        self.def_civitai_tool_edit.setPlaceholderText("例如: ComfyUI")
+        cur_tool = self.config.get("defaults", {}).get("civitai_tool", self.config.get("civitai_tool", "ComfyUI"))
+        self.def_civitai_tool_edit.setText(str(cur_tool or "ComfyUI"))
+        self.def_civitai_tool_edit.textChanged.connect(self._on_def_civitai_tool_changed)
+        civitai_vbox.addWidget(self.def_civitai_tool_edit)
+
         layout.addLayout(civitai_vbox)
 
         # 3.5 ComfyUI output 目录 (X 视频版自动配对 - Rule 1)
@@ -3394,6 +3421,32 @@ class SettingsDialog(QDialog):
                 self.main_window.config["defaults"] = {}
             self.main_window.config["defaults"]["civitai_max_images_per_post"] = val
             self.main_window.config["civitai_max_images_per_post"] = val
+        self._notify_saved()
+
+    def _on_def_civitai_scope_changed(self, idx):
+        val = self.def_civitai_scope_combo.currentData() or ("cover" if idx == 1 else "all")
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        self.config["defaults"]["civitai_resources_scope"] = val
+        self.config["civitai_resources_scope"] = val
+        if self.main_window:
+            if "defaults" not in self.main_window.config:
+                self.main_window.config["defaults"] = {}
+            self.main_window.config["defaults"]["civitai_resources_scope"] = val
+            self.main_window.config["civitai_resources_scope"] = val
+        self._notify_saved()
+
+    def _on_def_civitai_tool_changed(self, text):
+        val = text.strip()
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        self.config["defaults"]["civitai_tool"] = val
+        self.config["civitai_tool"] = val
+        if self.main_window:
+            if "defaults" not in self.main_window.config:
+                self.main_window.config["defaults"] = {}
+            self.main_window.config["defaults"]["civitai_tool"] = val
+            self.main_window.config["civitai_tool"] = val
         self._notify_saved()
 
     def _on_close_clicked(self):
@@ -6825,7 +6878,22 @@ class MainWindow(QMainWindow):
             self.config.get("civitai_max_images_per_post", 20)
         )
         civitai_limit_val = min(20, max(1, int(civitai_limit_val)))
+        civitai_res_val = self.config.get("defaults", {}).get(
+            "civitai_resources",
+            self.config.get("civitai_resources", [])
+        )
+        civitai_scope_val = self.config.get("defaults", {}).get(
+            "civitai_resources_scope",
+            self.config.get("civitai_resources_scope", "all")
+        )
+        civitai_tool_val = self.config.get("defaults", {}).get(
+            "civitai_tool",
+            self.config.get("civitai_tool", "ComfyUI")
+        )
         platform_options["civitai_max_images_per_post"] = civitai_limit_val
+        platform_options["civitai_resources"] = civitai_res_val
+        platform_options["civitai_resources_scope"] = civitai_scope_val
+        platform_options["civitai_tool"] = civitai_tool_val
         platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
 
         if "patreon" in self.platform_controls:
@@ -6898,6 +6966,9 @@ class MainWindow(QMainWindow):
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
             "civitai_images": [str(p) for p in images_to_use],
             "civitai_max_images_per_post": civitai_limit_val,
+            "civitai_resources": civitai_res_val,
+            "civitai_resources_scope": civitai_scope_val,
+            "civitai_tool": civitai_tool_val,
             "x_video_paths": {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v},
             "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),

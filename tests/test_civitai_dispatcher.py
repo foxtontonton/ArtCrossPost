@@ -13,8 +13,8 @@ ArtCrossPost - Civitai Dispatcher Unit Tests
     - 标签部分失败不中断主流程
     - 失败时孤儿草稿清理 (Delete Post) 逻辑与残留警示
 """
+import time
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from dispatchers.civitai import (
@@ -23,9 +23,10 @@ from dispatchers.civitai import (
     validate_civitai_video_constraints,
     POST_URL_REGEX,
     DRAFT_EDIT_REGEX,
-    CIVITAI_MAX_MEDIA_LIMIT,
+    parse_civitai_resource_item,
+    parse_civitai_resources,
 )
-from config import load_config, DEFAULT_CONFIG
+from config import load_config
 
 
 @pytest.fixture
@@ -369,3 +370,405 @@ def test_civitai_config_ceiling_and_clamp():
         # 强制钳制在 20 以内
         assert merged["civitai_max_images_per_post"] == 20
         assert merged["defaults"]["civitai_max_images_per_post"] == 20
+
+
+# =========================================================================
+# 需求 1 & 6: Civitai 资源配置解析与非法元素剔除测试
+# =========================================================================
+
+def test_civitai_resource_parsing_three_valid_forms():
+    """6.1 配置三种合法形态解析 (数字 ID、模型 URL、字典含版本)"""
+    # 形态 1: int 或纯数字字符串
+    res1 = parse_civitai_resource_item(25760)
+    assert res1 == {"id": 25760, "version": None}
+
+    res2 = parse_civitai_resource_item("25760")
+    assert res2 == {"id": 25760, "version": None}
+
+    # 形态 2: Civitai 模型 URL (含不同 path 与 query)
+    res3 = parse_civitai_resource_item("https://civitai.com/models/25760")
+    assert res3 == {"id": 25760, "version": None}
+
+    res4 = parse_civitai_resource_item("https://civitai.com/models/25760/latex-catsuit?modelVersionId=1889632")
+    assert res4 == {"id": 25760, "version": None}
+
+    # 形态 3: 字典 (含 id 与 version)
+    res5 = parse_civitai_resource_item({"id": 25760, "version": "v1.0"})
+    assert res5 == {"id": 25760, "version": "v1.0"}
+
+    # 字典中 id 为 URL 且含版本
+    res6 = parse_civitai_resource_item({"id": "https://civitai.com/models/25760", "version": "v2.0"})
+    assert res6 == {"id": 25760, "version": "v2.0"}
+
+    # 字典未指定版本或版本为空串
+    res7 = parse_civitai_resource_item({"id": 25760, "version": "  "})
+    assert res7 == {"id": 25760, "version": None}
+
+
+def test_civitai_resource_parsing_invalid_and_pure_names_rejected():
+    """6.2 纯名称字符串与非法元素直接拒绝（不可靠）并剔除"""
+    # 纯名称字符串 (例如 "Goth Girl LoRA"、"Latex") 必须直接拒绝
+    rejected_names = [
+        "Goth Girl LoRA",
+        "Latex",
+        "Cyberpunk Style",
+        "Pony Diffusion XL",
+        "Flux Dev Inpainting",
+        "anime_character_v2",
+    ]
+    for name in rejected_names:
+        assert parse_civitai_resource_item(name) is None, f"纯名称应当被拒绝: {name}"
+
+    # 其他非法类型
+    invalid_items = [
+        None,
+        True,
+        False,
+        {},
+        {"version": "v1.0"},      # 缺失 id
+        {"id": "invalid_string"}, # id 无法解析
+        {"id": -100},             # 负数 id
+        0,                        # 0 id
+        -25760,                   # 负数 id
+        [],
+        123.456,
+    ]
+    for item in invalid_items:
+        assert parse_civitai_resource_item(item) is None, f"非法元素应当被拒绝: {item}"
+
+
+def test_parse_civitai_resources_batch_filtering_and_cap_at_10():
+    """6.3 列表批量解析、非法元素剔除与单图 10 个资源上限截断"""
+    raw_mixed = [
+        25760,
+        "Goth Girl LoRA",  # 纯名称 -> 剔除
+        "https://civitai.com/models/12345",
+        {"version": "v1.0"}, # 缺失 id -> 剔除
+        {"id": 88888, "version": "v2.0"},
+        "Latex",           # 纯名称 -> 剔除
+        "99999",
+        None,              # 剔除
+    ]
+    cleaned = parse_civitai_resources(raw_mixed)
+    assert len(cleaned) == 4
+    assert cleaned == [
+        {"id": 25760, "version": None},
+        {"id": 12345, "version": None},
+        {"id": 88888, "version": "v2.0"},
+        {"id": 99999, "version": None},
+    ]
+
+    # 单图上限 10: 传入 15 个有效资源，截断为前 10 个
+    raw_many = [1000 + i for i in range(15)]
+    capped = parse_civitai_resources(raw_many, max_limit=10)
+    assert len(capped) == 10
+    assert [item["id"] for item in capped] == [1000 + i for i in range(10)]
+
+
+# =========================================================================
+# 需求 2 & 6: Scope 路由测试 (all vs cover)
+# =========================================================================
+
+def test_civitai_resources_scope_routing(tmp_path):
+    """6.4 scope 路由: scope=all 对每张卡片执行关联；scope=cover 仅第 1 张"""
+    disp = CivitaiDispatcher(tmp_path)
+
+    mock_page = MagicMock()
+    mock_btn0 = MagicMock()
+    mock_btn0.inner_text.return_value = "+ RESOURCE"
+    mock_btn1 = MagicMock()
+    mock_btn1.inner_text.return_value = "+ RESOURCE"
+    mock_btn2 = MagicMock()
+    mock_btn2.inner_text.return_value = "+ RESOURCE"
+
+    mock_page.query_selector_all.return_value = [mock_btn0, mock_btn1, mock_btn2]
+
+    # 1. scope=all: 应该关联 3 张图
+    payload_all = {
+        "civitai_resources": [25760],
+        "civitai_resources_scope": "all",
+        "civitai_tool": "",
+    }
+    with patch.object(disp, "_attach_single_card_resources", return_value=True) as mock_single:
+        s_ok, s_fail, _, _ = disp.attach_resources_and_tools(mock_page, payload_all, media_count=3)
+        assert s_ok == 3
+        assert s_fail == 0
+        assert mock_single.call_count == 3
+        calls = [c[0][1] for c in mock_single.call_args_list]
+        assert calls == [0, 1, 2]
+
+    # 2. scope=cover: 仅第 1 张封面图关联
+    payload_cover = {
+        "civitai_resources": [25760],
+        "civitai_resources_scope": "cover",
+        "civitai_tool": "",
+    }
+    with patch.object(disp, "_attach_single_card_resources", return_value=True) as mock_single:
+        s_ok, s_fail, _, _ = disp.attach_resources_and_tools(mock_page, payload_cover, media_count=3)
+        assert s_ok == 1
+        assert s_fail == 0
+        assert mock_single.call_count == 1
+        assert mock_single.call_args[0][1] == 0
+
+
+# =========================================================================
+# 需求 4 & 6: 单图失败不中断发布流程编排测试
+# =========================================================================
+
+def test_civitai_resource_single_card_failure_does_not_break_publish(tmp_path):
+    """6.5 单图关联失败记 warning 继续下一张，不中断主发布；汇总成功/失败张数"""
+    disp = CivitaiDispatcher(tmp_path)
+    dummy_img1 = tmp_path / "img1.png"
+    dummy_img1.write_bytes(b"data1")
+    dummy_img2 = tmp_path / "img2.png"
+    dummy_img2.write_bytes(b"data2")
+
+    payload = {
+        "title": "Test Multi Card Resource",
+        "description": "Test Desc",
+        "tags": ["art"],
+        "civitai_images": [str(dummy_img1), str(dummy_img2)],
+        "civitai_resources": [25760],
+        "civitai_resources_scope": "all",
+        "civitai_tool": "",
+        "civitai_max_images_per_post": 20
+    }
+
+    mock_page = MagicMock()
+    mock_file_input = MagicMock()
+    mock_pub_btn = MagicMock()
+    mock_pub_btn.is_disabled.return_value = False
+    mock_saved_el = MagicMock()
+
+    mock_page.url = "https://civitai.com/posts/31856190"
+
+    def fake_query_selector(selector):
+        if "input[type='file']" in selector:
+            return mock_file_input
+        if "button:has-text('Publish')" in selector:
+            return mock_pub_btn
+        if "SAVED" in selector:
+            return mock_saved_el
+        return MagicMock()
+
+    mock_page.query_selector.side_effect = fake_query_selector
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+
+    # 模拟第 0 张卡片失败，第 1 张卡片成功
+    card_results = [False, True]
+    def fake_attach_single(page, idx, resources):
+        return card_results[idx]
+
+    with patch.object(disp, "create_persistent_stealth_context", return_value=mock_context), \
+         patch.object(disp, "safe_goto"), \
+         patch.object(disp, "_attach_single_card_resources", side_effect=fake_attach_single):
+        success, msg, compliance = disp.publish(payload)
+
+    # 验证主流程成功发布，且汇总了 "资源关联: 成功 1 张 / 失败 1 张"
+    assert success is True
+    assert "31856190" in msg
+    assert "资源关联: 成功 1 张 / 失败 1 张" in msg
+    res_comp = [c for c in compliance if c.get("item") == "resources_attached"]
+    assert len(res_comp) == 1
+    assert "成功 1 张 / 失败 1 张" in res_comp[0]["detail"]
+
+
+# =========================================================================
+# 需求 5: civitai_tool 标注与容错测试
+# =========================================================================
+
+def test_civitai_tool_attachment_and_tolerance(tmp_path):
+    """6.6 工具标注: 挂 TOOL 正常成功与异常容错不中断"""
+    disp = CivitaiDispatcher(tmp_path)
+
+    mock_page = MagicMock()
+    mock_tool_btn = MagicMock()
+    mock_tool_btn.inner_text.return_value = "+ TOOL"
+    mock_tool_input = MagicMock()
+    mock_tool_opt = MagicMock()
+
+    def fake_qs(selector):
+        if "input" in selector:
+            return mock_tool_input
+        if "ComfyUI" in selector:
+            return mock_tool_opt
+        return None
+
+    mock_page.query_selector.side_effect = fake_qs
+    mock_page.query_selector_all.return_value = [mock_tool_btn]
+
+    # 1. 正常成功
+    ok = disp._attach_single_card_tool(mock_page, 0, "ComfyUI")
+    assert ok is True
+    mock_tool_btn.click.assert_called_once()
+    mock_tool_input.fill.assert_called_with("ComfyUI")
+    mock_tool_opt.click.assert_called_once()
+
+    # 2. 异常容错 (抛出异常时不阻断)
+    mock_page.query_selector.side_effect = RuntimeError("DOM detached")
+    fail_ok = disp._attach_single_card_tool(mock_page, 0, "ComfyUI")
+    assert fail_ok is False
+
+
+# =========================================================================
+# 配置项扩展测试: civitai_resources, scope 与 civitai_tool 校验
+# =========================================================================
+
+def test_load_config_civitai_resources_and_scope():
+    """测试 load_config 对 civitai_resources 规范化与 scope/tool 的默认值与提取"""
+    raw_user_conf = {
+        "civitai_resources": [
+            25760,
+            "Latex", # 应当剔除
+            "https://civitai.com/models/9999",
+            {"id": 8888, "version": "v1.0"}
+        ],
+        "civitai_resources_scope": "COVER",
+        "civitai_tool": " Automatic1111 ",
+        "defaults": {
+            "civitai_resources_scope": "all",
+            "civitai_tool": "ComfyUI"
+        }
+    }
+    with patch("json.load", return_value=raw_user_conf), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("builtins.open"):
+        cfg = load_config()
+
+    # civitai_resources 中的 "Latex" 已被剔除，保留 3 项规范化字典
+    assert len(cfg["civitai_resources"]) == 3
+    assert cfg["civitai_resources"][0] == {"id": 25760, "version": None}
+    assert cfg["civitai_resources"][1] == {"id": 9999, "version": None}
+    assert cfg["civitai_resources"][2] == {"id": 8888, "version": "v1.0"}
+
+    # scope 规范化为 "cover"
+    assert cfg["civitai_resources_scope"] == "cover"
+
+    # tool 去除空格
+    assert cfg["civitai_tool"] == "Automatic1111"
+
+
+# =========================================================================
+# Bug 修复 fix/civitai-tag-flow 专用单测:
+# 1. "+ Tag" 点击前置与徽章断言
+# 2. 首败即停收敛机制 (29 个标签瞬间收敛放弃，绝不逐个烧 30s)
+# 3. 徽章缺失断言判定
+# =========================================================================
+
+def test_civitai_tag_flow_click_precondition_and_badge_assertion(tmp_path):
+    """验证 '+ Tag' 点击前置唤起、输入、候选下拉/回车及徽章断言流程"""
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    call_order = []
+
+    mock_tag_btn = MagicMock()
+    mock_tag_input = MagicMock()
+    mock_tag_input.is_visible.return_value = True
+
+    def fake_input_fill(val, **kwargs):
+        call_order.append(f"fill_{val}")
+    mock_tag_input.fill.side_effect = fake_input_fill
+
+    mock_opt = MagicMock()
+    mock_opt.is_visible.return_value = True
+    def fake_opt_click(**kwargs):
+        call_order.append("click_option")
+    mock_opt.click.side_effect = fake_opt_click
+
+    mock_badge = MagicMock()
+
+    is_input_open = False
+
+    def fake_query_selector(selector):
+        nonlocal is_input_open
+        if "option" in selector:
+            return mock_opt
+        if "input" in selector or "Autocomplete" in selector or ":focus" in selector:
+            if is_input_open:
+                return mock_tag_input
+            return None
+        # 徽章查询匹配具体标签名 (如 anime / illustration)
+        if "anime" in selector or "illustration" in selector:
+            call_order.append(f"query_badge_{selector[:20]}")
+            return mock_badge
+        # '+ Tag' 入口按钮查询
+        if "post:tag" in selector or "+ Tag" in selector or "Tag" in selector:
+            return mock_tag_btn
+        return None
+
+    mock_page.query_selector.side_effect = fake_query_selector
+
+    # 点击 tag_btn 后让 is_input_open 变为 True
+    def fake_tag_btn_click_and_open(**kwargs):
+        nonlocal is_input_open
+        call_order.append("click_tag_btn")
+        is_input_open = True
+    mock_tag_btn.click.side_effect = fake_tag_btn_click_and_open
+
+    # 注入两个标签
+    ok_cnt, fail_cnt = disp.inject_tags(mock_page, ["anime", "illustration"], per_tag_timeout_sec=1.0)
+
+    assert ok_cnt == 2
+    assert fail_cnt == 0
+
+    # 断言 "+ Tag" 点击严格发生于输入 fill 之前
+    assert "click_tag_btn" in call_order
+    assert "fill_anime" in call_order
+    first_btn_idx = call_order.index("click_tag_btn")
+    first_fill_idx = call_order.index("fill_anime")
+    assert first_btn_idx < first_fill_idx, "必须先点 '+ Tag' 唤起输入框，再执行输入 fill"
+
+    # 断言徽章出现并经过断言查询
+    assert any("query_badge" in c for c in call_order)
+
+
+def test_civitai_tag_flow_first_failure_stops_all_tags(tmp_path, caplog):
+    """验证首败即停: 第一个标签入口未找到时，立即放弃全部剩余标签 (如 29 个)，绝不逐个烧满超时"""
+    import logging
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    # 模拟页面上找不到 '+ Tag' 按钮，且输入框不存在
+    mock_page.query_selector.return_value = None
+
+    tags_29 = [f"tag_{i}" for i in range(1, 30)]  # 29 个标签
+
+    start_time = time.time()
+    with caplog.at_level(logging.WARNING):
+        ok_cnt, fail_cnt = disp.inject_tags(mock_page, tags_29, per_tag_timeout_sec=0.5)
+    elapsed = time.time() - start_time
+
+    assert ok_cnt == 0
+    assert fail_cnt == 29
+    # 验证瞬间收敛退出，29 个标签耗时远低于 5 秒 (绝无可能每个烧 30 秒)
+    assert elapsed < 3.0, f"29 个标签未快速收敛，耗时 {elapsed:.2f}s"
+
+    # 验证大声告警文案
+    assert any("标签入口未找到，已跳过全部标签" in record.message for record in caplog.records)
+
+
+def test_civitai_tag_flow_badge_assertion_failure(tmp_path):
+    """验证徽章断言失败分支: 标签正常输入提交，但页面未生成徽章时判失败"""
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    mock_input = MagicMock()
+    mock_input.is_visible.return_value = True
+
+    def fake_qs(selector):
+        if "input" in selector or "Autocomplete" in selector:
+            return mock_input
+        # 徽章查询返回 None，模拟未生成
+        if "Badge" in selector or "badge" in selector:
+            return None
+        return None
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    ok_cnt, fail_cnt = disp.inject_tags(mock_page, ["lost_badge_tag"], per_tag_timeout_sec=0.5)
+
+    assert ok_cnt == 0
+    assert fail_cnt == 1
+    assert mock_input.fill.call_args[0][0] == "lost_badge_tag"
