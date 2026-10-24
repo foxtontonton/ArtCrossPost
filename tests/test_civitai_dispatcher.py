@@ -13,6 +13,7 @@ ArtCrossPost - Civitai Dispatcher Unit Tests
     - 标签部分失败不中断主流程
     - 失败时孤儿草稿清理 (Delete Post) 逻辑与残留警示
 """
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -646,3 +647,128 @@ def test_load_config_civitai_resources_and_scope():
 
     # tool 去除空格
     assert cfg["civitai_tool"] == "Automatic1111"
+
+
+# =========================================================================
+# Bug 修复 fix/civitai-tag-flow 专用单测:
+# 1. "+ Tag" 点击前置与徽章断言
+# 2. 首败即停收敛机制 (29 个标签瞬间收敛放弃，绝不逐个烧 30s)
+# 3. 徽章缺失断言判定
+# =========================================================================
+
+def test_civitai_tag_flow_click_precondition_and_badge_assertion(tmp_path):
+    """验证 '+ Tag' 点击前置唤起、输入、候选下拉/回车及徽章断言流程"""
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    call_order = []
+
+    mock_tag_btn = MagicMock()
+    mock_tag_input = MagicMock()
+    mock_tag_input.is_visible.return_value = True
+
+    def fake_input_fill(val, **kwargs):
+        call_order.append(f"fill_{val}")
+    mock_tag_input.fill.side_effect = fake_input_fill
+
+    mock_opt = MagicMock()
+    mock_opt.is_visible.return_value = True
+    def fake_opt_click(**kwargs):
+        call_order.append("click_option")
+    mock_opt.click.side_effect = fake_opt_click
+
+    mock_badge = MagicMock()
+
+    is_input_open = False
+
+    def fake_query_selector(selector):
+        nonlocal is_input_open
+        if "option" in selector:
+            return mock_opt
+        if "input" in selector or "Autocomplete" in selector or ":focus" in selector:
+            if is_input_open:
+                return mock_tag_input
+            return None
+        # 徽章查询匹配具体标签名 (如 anime / illustration)
+        if "anime" in selector or "illustration" in selector:
+            call_order.append(f"query_badge_{selector[:20]}")
+            return mock_badge
+        # '+ Tag' 入口按钮查询
+        if "post:tag" in selector or "+ Tag" in selector or "Tag" in selector:
+            return mock_tag_btn
+        return None
+
+    mock_page.query_selector.side_effect = fake_query_selector
+
+    # 点击 tag_btn 后让 is_input_open 变为 True
+    def fake_tag_btn_click_and_open(**kwargs):
+        nonlocal is_input_open
+        call_order.append("click_tag_btn")
+        is_input_open = True
+    mock_tag_btn.click.side_effect = fake_tag_btn_click_and_open
+
+    # 注入两个标签
+    ok_cnt, fail_cnt = disp.inject_tags(mock_page, ["anime", "illustration"], per_tag_timeout_sec=1.0)
+
+    assert ok_cnt == 2
+    assert fail_cnt == 0
+
+    # 断言 "+ Tag" 点击严格发生于输入 fill 之前
+    assert "click_tag_btn" in call_order
+    assert "fill_anime" in call_order
+    first_btn_idx = call_order.index("click_tag_btn")
+    first_fill_idx = call_order.index("fill_anime")
+    assert first_btn_idx < first_fill_idx, "必须先点 '+ Tag' 唤起输入框，再执行输入 fill"
+
+    # 断言徽章出现并经过断言查询
+    assert any("query_badge" in c for c in call_order)
+
+
+def test_civitai_tag_flow_first_failure_stops_all_tags(tmp_path, caplog):
+    """验证首败即停: 第一个标签入口未找到时，立即放弃全部剩余标签 (如 29 个)，绝不逐个烧满超时"""
+    import logging
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    # 模拟页面上找不到 '+ Tag' 按钮，且输入框不存在
+    mock_page.query_selector.return_value = None
+
+    tags_29 = [f"tag_{i}" for i in range(1, 30)]  # 29 个标签
+
+    start_time = time.time()
+    with caplog.at_level(logging.WARNING):
+        ok_cnt, fail_cnt = disp.inject_tags(mock_page, tags_29, per_tag_timeout_sec=0.5)
+    elapsed = time.time() - start_time
+
+    assert ok_cnt == 0
+    assert fail_cnt == 29
+    # 验证瞬间收敛退出，29 个标签耗时远低于 5 秒 (绝无可能每个烧 30 秒)
+    assert elapsed < 3.0, f"29 个标签未快速收敛，耗时 {elapsed:.2f}s"
+
+    # 验证大声告警文案
+    assert any("标签入口未找到，已跳过全部标签" in record.message for record in caplog.records)
+
+
+def test_civitai_tag_flow_badge_assertion_failure(tmp_path):
+    """验证徽章断言失败分支: 标签正常输入提交，但页面未生成徽章时判失败"""
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    mock_input = MagicMock()
+    mock_input.is_visible.return_value = True
+
+    def fake_qs(selector):
+        if "input" in selector or "Autocomplete" in selector:
+            return mock_input
+        # 徽章查询返回 None，模拟未生成
+        if "Badge" in selector or "badge" in selector:
+            return None
+        return None
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    ok_cnt, fail_cnt = disp.inject_tags(mock_page, ["lost_badge_tag"], per_tag_timeout_sec=0.5)
+
+    assert ok_cnt == 0
+    assert fail_cnt == 1
+    assert mock_input.fill.call_args[0][0] == "lost_badge_tag"

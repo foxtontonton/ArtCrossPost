@@ -748,6 +748,167 @@ class CivitaiDispatcher(BaseDispatcher):
         )
         return res_success, res_failed, tool_success, tool_failed
 
+    def inject_tags(
+        self,
+        page,
+        tags: List[Any],
+        per_tag_timeout_sec: float = 5.0
+    ) -> Tuple[int, int]:
+        """
+        在 /posts/create 编辑区注入标签 (Bug 修复 fix/civitai-tag-flow):
+        1. 正确流程: 点 "+ Tag" → 等可见的自动补全输入框出现 → 输入标签
+           → 等候选下拉 → 选完全匹配项 (或回车) → 断言标签徽章出现
+        2. 失败收敛: 单标签超时从 30s 降至 5s; 第一个标签入口打不开时，
+           立即放弃全部剩余标签并大声告警 "标签入口未找到，已跳过全部标签"，
+           不许逐个烧满超时。
+        返回: (success_count, failed_count)
+        """
+        clean_tags = [str(t).strip().lstrip("#") for t in tags if str(t).strip().lstrip("#")]
+        if not clean_tags:
+            return 0, 0
+
+        timeout_ms = int(per_tag_timeout_sec * 1000)
+        success_count = 0
+        failed_count = 0
+
+        for idx, tag_str in enumerate(clean_tags):
+            try:
+                # Step 1: 检查输入框是否已处于可见状态，若未出现则点击 "+ Tag" 唤起
+                tag_input = page.query_selector(
+                    "input.mantine-Autocomplete-input, "
+                    "input[placeholder*='tag' i], "
+                    "input[placeholder*='search' i], "
+                    "div[role='combobox'] input"
+                )
+                input_visible = tag_input is not None and getattr(tag_input, "is_visible", lambda: True)()
+
+                if not input_visible:
+                    tag_btn = page.query_selector(
+                        "[data-tour='post:tag'], "
+                        "div[class*='Alert-root']:has-text('Tag'), "
+                        "button:has-text('+ Tag'), "
+                        "div:has-text('+ Tag'), "
+                        "button:has-text('Tag'), "
+                        "div[class*='Badge']:has-text('Tag'), "
+                        "span:has-text('+ Tag')"
+                    )
+                    if not tag_btn:
+                        if idx == 0:
+                            logger.warning("[Civitai] [警告] 标签入口未找到，已跳过全部标签")
+                            return 0, len(clean_tags)
+                        else:
+                            logger.warning(f"[Civitai] 未找到 '+ Tag' 按钮，跳过标签 '{tag_str}'")
+                            failed_count += 1
+                            continue
+
+                    try:
+                        if hasattr(tag_btn, "scroll_into_view_if_needed"):
+                            tag_btn.scroll_into_view_if_needed(timeout=1000)
+                    except Exception:
+                        pass
+
+                    try:
+                        try:
+                            tag_btn.click(timeout=timeout_ms)
+                        except TypeError:
+                            tag_btn.click()
+                    except Exception as ce:
+                        if idx == 0:
+                            logger.warning(f"[Civitai] [警告] 点击 '+ Tag' 失败 ({ce})，标签入口未找到，已跳过全部标签")
+                            return 0, len(clean_tags)
+                        else:
+                            logger.warning(f"[Civitai] 点击 '+ Tag' 失败，跳过标签 '{tag_str}': {ce}")
+                            failed_count += 1
+                            continue
+
+                    # 轮询等待可见的自动补全输入框出现 (最多等待 per_tag_timeout_sec 秒)
+                    tag_input = None
+                    start_wait = time.time()
+                    while time.time() - start_wait < per_tag_timeout_sec:
+                        candidate = page.query_selector(
+                            "input.mantine-Autocomplete-input, "
+                            "input[placeholder*='tag' i], "
+                            "input[placeholder*='search' i], "
+                            "div[role='combobox'] input, "
+                            ":focus"
+                        )
+                        if candidate and getattr(candidate, "is_visible", lambda: True)():
+                            tag_input = candidate
+                            break
+                        time.sleep(0.2)
+
+                    if not tag_input:
+                        if idx == 0:
+                            logger.warning("[Civitai] [警告] 标签输入框未出现或不可见，标签入口未找到，已跳过全部标签")
+                            return 0, len(clean_tags)
+                        else:
+                            logger.warning(f"[Civitai] 等待标签输入框可见超时 ({per_tag_timeout_sec:.0f}s)，跳过标签 '{tag_str}'")
+                            failed_count += 1
+                            continue
+
+                # Step 2: 填充标签文本 (限定超时 5s，杜绝 30s 阻塞)
+                try:
+                    tag_input.fill(tag_str, timeout=timeout_ms)
+                except TypeError:
+                    tag_input.fill(tag_str)
+                time.sleep(0.3)
+
+                # Step 3: 等待候选下拉项，优先点击完全匹配项，否则回车提交
+                option_selected = False
+                start_opt_wait = time.time()
+                while time.time() - start_opt_wait < 2.0:
+                    exact_opt = page.query_selector(
+                        f".mantine-Autocomplete-option:has-text('{tag_str}'), "
+                        f"div[role='option']:has-text('{tag_str}')"
+                    )
+                    if exact_opt and getattr(exact_opt, "is_visible", lambda: True)():
+                        try:
+                            try:
+                                exact_opt.click(timeout=1500)
+                            except TypeError:
+                                exact_opt.click()
+                            option_selected = True
+                            break
+                        except Exception:
+                            pass
+                    time.sleep(0.2)
+
+                if not option_selected:
+                    tag_input.press("Enter")
+
+                time.sleep(0.4)
+
+                # Step 4: 断言标签徽章出现 (最多等待 2.5s)
+                badge_appeared = False
+                start_badge_wait = time.time()
+                while time.time() - start_badge_wait < 2.5:
+                    badge = page.query_selector(
+                        f"div[class*='Badge']:has-text('{tag_str}'), "
+                        f"span[class*='Badge']:has-text('{tag_str}'), "
+                        f"[class*='badge' i]:has-text('{tag_str}'), "
+                        f"div[data-tour='post:tag']:has-text('{tag_str}')"
+                    )
+                    if badge:
+                        badge_appeared = True
+                        break
+                    time.sleep(0.2)
+
+                if badge_appeared:
+                    success_count += 1
+                    logger.info(f"[Civitai] 成功注入标签: '{tag_str}' (徽章已确认)")
+                else:
+                    logger.warning(f"[Civitai] 标签 '{tag_str}' 输入后未检测到徽章出现")
+                    failed_count += 1
+
+            except Exception as tag_err:
+                if idx == 0 and ("入口" in str(tag_err) or "not found" in str(tag_err).lower()):
+                    logger.warning(f"[Civitai] [警告] 标签入口未找到，已跳过全部标签: {tag_err}")
+                    return 0, len(clean_tags)
+                logger.warning(f"[Civitai] 注入标签 '{tag_str}' 失败，跳过并不中断主流程: {tag_err}")
+                failed_count += 1
+
+        return success_count, failed_count
+
     def publish(self, payload: dict) -> Tuple[bool, str, List[dict]]:
         """
         通过 Edge 持久化上下文执行 Civitai 原生发帖流程 (需求 7-11):
@@ -873,33 +1034,11 @@ class CivitaiDispatcher(BaseDispatcher):
                         desc_box.fill(desc)
                         time.sleep(0.5)
 
-                # 9.3 标签逐个输入回车 (单个失败跳过并记日志，不中断)
+                # 9.3 标签注入 (Bug 修复 fix/civitai-tag-flow: 点击前置、输入、下拉候选/回车、徽章断言、首败即停)
                 if tags:
                     logger.info(f"[Civitai] 正在注入 {len(tags)} 个标签...")
-                    for t in tags:
-                        tag_str = str(t).strip().lstrip("#")
-                        if not tag_str:
-                            continue
-                        try:
-                            tag_btn = page.query_selector("[data-tour='post:tag'], div[class*='Alert-root']:has-text('Tag'), div:has-text('+ Tag')")
-                            if tag_btn:
-                                tag_btn.click()
-                                time.sleep(0.4)
-
-                            # 查找激活的 Mantine 补全输入框
-                            tag_input = page.query_selector("input[placeholder*='tag' i], input[placeholder*='search' i], .mantine-Autocomplete-input, div[role='combobox'] input")
-                            if not tag_input:
-                                tag_input = page.query_selector(":focus")
-
-                            if tag_input:
-                                tag_input.fill(tag_str)
-                                time.sleep(0.3)
-                                tag_input.press("Enter")
-                                time.sleep(0.4)
-                            else:
-                                logger.warning(f"[Civitai] 未找到标签输入框，跳过标签 '{tag_str}'")
-                        except Exception as tag_err:
-                            logger.warning(f"[Civitai] 输入标签 '{tag_str}' 失败，跳过并不中断主流程: {tag_err}")
+                    tag_ok_cnt, tag_fail_cnt = self.inject_tags(page, tags, per_tag_timeout_sec=5.0)
+                    logger.info(f"[Civitai] 标签注入完成: 成功 {tag_ok_cnt} 个 / 失败 {tag_fail_cnt} 个")
 
                 time.sleep(1)
 
