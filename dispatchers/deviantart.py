@@ -8,8 +8,10 @@ ArtCrossPost - DeviantArt Dispatcher (对齐 DA 投稿后台原生设置)
 3. 原生图片上传与标题/描述填充
 """
 import os
+import re
 import time
 from pathlib import Path
+from typing import Tuple, List
 from .base import BaseDispatcher
 try:
     from logger import get_logger
@@ -120,6 +122,114 @@ class DeviantArtDispatcher(BaseDispatcher):
         if probe.get("status") == "pass":
             return True, probe.get("detail")
         return False, probe.get("detail")
+
+    def fetch_galleries(self) -> Tuple[bool, List[str], str]:
+        """
+        从 DA 账号拉取真实相册列表 (需求 一.1):
+        优先尝试通过带 Cookie 的 HTTP 请求快速解析个人主页相册区 (https://www.deviantart.com/<username>/gallery);
+        若遇网络或反爬阻断，自动回退到 Playwright 持久化浏览器上下文渲染解析。
+        返回: (success: bool, galleries: List[str], error_message: str)
+        """
+        cookies = self.get_cookies()
+        if not cookies:
+            return False, [], "DeviantArt 本地无 Cookie 记录，请先在发布面板中登录 DeviantArt"
+
+        username = None
+        profile = self.get_profile()
+        if profile and profile.get("username"):
+            username = profile["username"]
+        if not username:
+            for c in cookies:
+                if c.get("name") == "userinfo":
+                    un, _ = self._extract_userinfo(c.get("value", ""))
+                    if un:
+                        username = un
+                        break
+        if not username:
+            return False, [], "未获取到 DeviantArt 用户名凭据，无法定位个人相册主页"
+
+        # 方式 1: HTTP 快速获取 (带 Cookies 会话)
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            s = requests.Session()
+            for c in cookies:
+                s.cookies.set(c["name"], c["value"], domain=c.get("domain", ".deviantart.com"))
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            }
+            url = f"https://www.deviantart.com/{username.lower()}/gallery"
+            resp = s.get(url, headers=headers, timeout=12)
+            if resp.status_code == 200 and resp.text:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                links = soup.find_all("a", href=re.compile(r"/gallery/\d+/"))
+                galleries = []
+                seen = set()
+                for a in links:
+                    raw_t = a.get_text("\n").strip()
+                    t = raw_t.split("\n")[0].strip() if raw_t else ""
+                    if t and t.lower() not in seen:
+                        seen.add(t.lower())
+                        galleries.append(t)
+                if galleries:
+                    if not any(g.lower() == "featured" for g in galleries):
+                        galleries.insert(0, "Featured")
+                    else:
+                        galleries = [g for g in galleries if g.lower() == "featured"] + [g for g in galleries if g.lower() != "featured"]
+                    logger.info(f"[DeviantArt] 通过 HTTP 成功获取到 {len(galleries)} 个真实相册: {galleries}")
+                    return True, galleries, ""
+        except Exception as e_http:
+            logger.debug(f"[DeviantArt] HTTP 获取相册列表失败，尝试浏览器回退: {e_http}")
+
+        # 方式 2: Playwright 持久化浏览器渲染降级
+        try:
+            from playwright.sync_api import sync_playwright
+            profile_dir = self.get_app_browser_profile_dir()
+            with sync_playwright() as p:
+                if os.path.isdir(profile_dir):
+                    context = self.create_persistent_stealth_context(p, profile_dir, headless=True)
+                else:
+                    browser = self.create_stealth_browser(p, headless=True)
+                    context = browser.new_context()
+                    context.add_cookies(cookies)
+                page = context.pages[0] if context.pages else context.new_page()
+                self.apply_stealth(page)
+                url = f"https://www.deviantart.com/{username.lower()}/gallery"
+                self.safe_goto(page, url, timeout=30000)
+                page.wait_for_timeout(2500)
+
+                raw_links = page.evaluate("""() => {
+                    const links = Array.from(document.querySelectorAll("a[href*='/gallery/']"));
+                    const res = [];
+                    for (const a of links) {
+                        const href = a.getAttribute("href") || "";
+                        if (/\\/gallery\\/\\d+\\//.test(href)) {
+                            const lines = (a.innerText || "").split('\\n').map(s => s.trim()).filter(Boolean);
+                            if (lines.length > 0) res.push(lines[0]);
+                        }
+                    }
+                    return res;
+                }""")
+                context.close()
+
+                galleries = []
+                seen = set()
+                for t in raw_links:
+                    if t and t.lower() not in seen:
+                        seen.add(t.lower())
+                        galleries.append(t)
+                if galleries:
+                    if not any(g.lower() == "featured" for g in galleries):
+                        galleries.insert(0, "Featured")
+                    else:
+                        galleries = [g for g in galleries if g.lower() == "featured"] + [g for g in galleries if g.lower() != "featured"]
+                    logger.info(f"[DeviantArt] 通过 Playwright 成功获取到 {len(galleries)} 个真实相册: {galleries}")
+                    return True, galleries, ""
+                return False, [], "页面已加载但未能识别到相册列表，请检查账号是否已创建公开相册"
+        except Exception as e_pw:
+            logger.error(f"[DeviantArt] 拉取相册列表异常: {e_pw}")
+            return False, [], f"无法连接 DeviantArt 账号拉取相册: {e_pw}"
 
     def get_selector_manifest(self) -> dict:
         return {
