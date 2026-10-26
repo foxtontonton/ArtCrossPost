@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QPushButton, QCheckBox, QComboBox,
     QFileDialog, QListWidget, QGroupBox, QSplitter,
     QProgressBar, QScrollArea, QFrame, QSlider, QSizePolicy, QMenu,
-    QTextBrowser, QDialog, QTabWidget, QSpinBox, QPlainTextEdit
+    QTextBrowser, QDialog, QTabWidget, QSpinBox, QPlainTextEdit, QMessageBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData, QEventLoop
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
@@ -2314,6 +2314,22 @@ class DiagnosticThread(QThread):
             self.finished_signal.emit(err_report, "")
 
 
+class DaGallerySyncWorker(QThread):
+    """DeviantArt 相册列表远程同步异步工作线程 (需求 一.1)"""
+    finished_signal = pyqtSignal(bool, list, str)
+
+    def __init__(self, dispatcher):
+        super().__init__()
+        self.dispatcher = dispatcher
+
+    def run(self):
+        try:
+            ok, gals, msg = self.dispatcher.fetch_galleries()
+            self.finished_signal.emit(ok, gals, msg)
+        except Exception as e:
+            self.finished_signal.emit(False, [], str(e))
+
+
 def make_responsive_combo(combo: QComboBox):
     """解除下拉框刚性宽度限制，避免分栏拖动时文字或图标撑爆并被裁切"""
     combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -2541,6 +2557,20 @@ class SmartTagEdit(QTextEdit):
                 new_cursor.setPosition(min(pos, len(normalized)))
                 self.setTextCursor(new_cursor)
                 self.textChanged.emit()
+
+
+
+def get_da_gallery_from_widget(widget):
+    """从相册控件中提取目标相册字符串 (若是默认相册则返回空字符串)"""
+    if isinstance(widget, QComboBox):
+        txt = widget.currentText().strip()
+        data = widget.currentData()
+        if data == "" or "默认相册" in txt:
+            return ""
+        return data if (data and data == txt) else txt
+    elif isinstance(widget, QLineEdit):
+        return widget.text().strip()
+    return ""
 
 
 class SettingsDialog(QDialog):
@@ -3105,36 +3135,24 @@ class SettingsDialog(QDialog):
         dg_desc.setStyleSheet("color: #9ca3af;")
         da_vbox.addWidget(dg_desc)
 
+        da_combo_row = QHBoxLayout()
+        da_combo_row.setSpacing(8)
+
         self.def_da_gallery_combo = QComboBox()
         make_responsive_combo(self.def_da_gallery_combo)
         self.def_da_gallery_combo.setEditable(True)
-        self.def_da_gallery_combo.addItem("默认相册 (Featured)", "")
-        known_galleries = self.config.get("deviantart_known_galleries", [
-            "Featured",
-            "NSFW - Ai Training Clip",
-            "Cast of Characters",
-            "Cage - A muscle growth story",
-            "Film set"
-        ])
-        for g in known_galleries:
-            if g.lower() != "featured":
-                self.def_da_gallery_combo.addItem(g, g)
-
-        cur_def = self.config.get("defaults", {}).get("deviantart_default_gallery", "")
-        f_idx = -1
-        for i in range(self.def_da_gallery_combo.count()):
-            if self.def_da_gallery_combo.itemData(i) == cur_def or self.def_da_gallery_combo.itemText(i) == cur_def:
-                f_idx = i
-                break
-        if f_idx >= 0:
-            self.def_da_gallery_combo.setCurrentIndex(f_idx)
-        elif cur_def:
-            self.def_da_gallery_combo.setEditText(cur_def)
-        else:
-            self.def_da_gallery_combo.setCurrentIndex(0)
-
+        self._populate_gallery_combo()
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
-        da_vbox.addWidget(self.def_da_gallery_combo)
+        da_combo_row.addWidget(self.def_da_gallery_combo, 1)
+
+        self.btn_refresh_da_galleries = QPushButton("🔄 刷新相册列表")
+        self.btn_refresh_da_galleries.setObjectName("secondaryBtn")
+        self.btn_refresh_da_galleries.setToolTip("从 DeviantArt 账号拉取最新真实相册列表")
+        self.btn_refresh_da_galleries.setStyleSheet("font-size: 11px; padding: 4px 10px;")
+        self.btn_refresh_da_galleries.clicked.connect(self._on_sync_da_galleries_clicked)
+        da_combo_row.addWidget(self.btn_refresh_da_galleries)
+
+        da_vbox.addLayout(da_combo_row)
 
         dmax_label = QLabel("DeviantArt 单作品图片上限 (Max images per deviation)")
         dmax_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
@@ -3403,6 +3421,60 @@ class SettingsDialog(QDialog):
                     w.setText(gal_val)
         self._notify_saved()
 
+    def _populate_gallery_combo(self, selected_val=None):
+        cur_val = selected_val if selected_val is not None else get_da_gallery_from_widget(self.def_da_gallery_combo)
+        if not cur_val:
+            cur_val = self.config.get("defaults", {}).get("deviantart_default_gallery", "")
+        self.def_da_gallery_combo.blockSignals(True)
+        self.def_da_gallery_combo.clear()
+        self.def_da_gallery_combo.addItem("默认相册 (Featured)", "")
+        known_galleries = self.config.get("deviantart_known_galleries", [
+            "Featured",
+            "NSFW - Ai Training Clip",
+            "Cast of Characters",
+            "Cage - A muscle growth story",
+            "Film set"
+        ])
+        for g in known_galleries:
+            if g.lower() != "featured":
+                self.def_da_gallery_combo.addItem(g, g)
+        f_idx = -1
+        for i in range(self.def_da_gallery_combo.count()):
+            if self.def_da_gallery_combo.itemData(i) == cur_val or self.def_da_gallery_combo.itemText(i) == cur_val:
+                f_idx = i
+                break
+        if f_idx >= 0:
+            self.def_da_gallery_combo.setCurrentIndex(f_idx)
+        elif cur_val:
+            self.def_da_gallery_combo.setEditText(cur_val)
+        else:
+            self.def_da_gallery_combo.setCurrentIndex(0)
+        self.def_da_gallery_combo.blockSignals(False)
+
+    def _on_sync_da_galleries_clicked(self):
+        if self.main_window and hasattr(self.main_window, "sync_da_galleries"):
+            self.main_window.sync_da_galleries(
+                sender_btn=self.btn_refresh_da_galleries,
+                on_success_cb=lambda gals: self._populate_gallery_combo()
+            )
+        else:
+            da_disp = next((d for d in self.dispatchers if d.name == "deviantart"), None)
+            if not da_disp:
+                QMessageBox.critical(self, "刷新相册失败", "未找到 DeviantArt 分发器组件")
+                return
+            self.btn_refresh_da_galleries.setEnabled(False)
+            self.btn_refresh_da_galleries.setText("⏳ 正在刷新...")
+            ok, gals, msg = da_disp.fetch_galleries()
+            self.btn_refresh_da_galleries.setEnabled(True)
+            self.btn_refresh_da_galleries.setText("🔄 刷新相册列表")
+            if ok:
+                self.config["deviantart_known_galleries"] = gals
+                save_config(self.config)
+                self._populate_gallery_combo()
+                QMessageBox.information(self, "刷新相册成功", f"成功拉取到 {len(gals)} 个相册！")
+            else:
+                QMessageBox.critical(self, "刷新相册失败", f"DeviantArt 相册列表刷新失败:\n{msg}")
+
     def _on_def_da_max_changed(self, val):
         if "defaults" not in self.config:
             self.config["defaults"] = {}
@@ -3458,18 +3530,6 @@ class SettingsDialog(QDialog):
         save_config(self.config)
         self.accept()
 
-
-def get_da_gallery_from_widget(widget):
-    """从相册控件中提取目标相册字符串 (若是默认相册则返回空字符串)"""
-    if isinstance(widget, QComboBox):
-        txt = widget.currentText().strip()
-        data = widget.currentData()
-        if data == "" or "默认相册" in txt:
-            return ""
-        return data if (data and data == txt) else txt
-    elif isinstance(widget, QLineEdit):
-        return widget.text().strip()
-    return ""
 
 
 class MainWindow(QMainWindow):
@@ -5085,35 +5145,25 @@ class MainWindow(QMainWindow):
             opts["mature"] = da_combo
 
             # 发布相册 (Gallery: 包含真实相册列表，支持下拉选择或直接输入)
-            opts_layout.addWidget(QLabel("相册 (Gallery):"))
+            gal_label_row = QHBoxLayout()
+            gal_label_row.setSpacing(8)
+            gal_label_row.addWidget(QLabel("相册 (Gallery):"))
+            gal_label_row.addStretch()
+
+            btn_refresh_da = QPushButton("🔄 刷新相册列表")
+            btn_refresh_da.setObjectName("secondaryBtn")
+            btn_refresh_da.setToolTip("从 DeviantArt 账号拉取最新真实相册列表")
+            btn_refresh_da.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+            gal_label_row.addWidget(btn_refresh_da)
+            opts_layout.addLayout(gal_label_row)
+
             da_gallery_combo = QComboBox()
             make_responsive_combo(da_gallery_combo)
             da_gallery_combo.setEditable(True)
-            da_gallery_combo.addItem("默认相册 (Featured)", "")
-            known_galleries = self.config.get("deviantart_known_galleries", [
-                "Featured",
-                "NSFW - Ai Training Clip",
-                "Cast of Characters",
-                "Cage - A muscle growth story",
-                "Film set"
-            ])
-            for g in known_galleries:
-                if g.lower() != "featured":
-                    da_gallery_combo.addItem(g, g)
+            self.da_gallery_combo = da_gallery_combo
+            self._populate_da_gallery_combo(da_gallery_combo)
 
-            def_gal = self.config["defaults"].get("deviantart_default_gallery", "")
-            f_idx = -1
-            for i in range(da_gallery_combo.count()):
-                if da_gallery_combo.itemData(i) == def_gal or da_gallery_combo.itemText(i) == def_gal:
-                    f_idx = i
-                    break
-            if f_idx >= 0:
-                da_gallery_combo.setCurrentIndex(f_idx)
-            elif def_gal:
-                da_gallery_combo.setEditText(def_gal)
-            else:
-                da_gallery_combo.setCurrentIndex(0)
-
+            btn_refresh_da.clicked.connect(lambda: self.sync_da_galleries(sender_btn=btn_refresh_da))
             da_gallery_combo.currentTextChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(da_gallery_combo)
             opts["gallery"] = da_gallery_combo
@@ -5320,6 +5370,78 @@ class MainWindow(QMainWindow):
         else:
             self.tags_input.setPlainText(", ".join(def_list))
         self.notify("已成功追加固定标签！", level="info")
+
+    def _populate_da_gallery_combo(self, combo=None, selected_val=None):
+        target_combo = combo if combo is not None else getattr(self, "da_gallery_combo", None)
+        if target_combo is None:
+            if hasattr(self, "platform_controls") and "deviantart" in self.platform_controls:
+                target_combo = self.platform_controls["deviantart"]["options"].get("gallery")
+        if target_combo is None:
+            return
+        cur_val = selected_val if selected_val is not None else get_da_gallery_from_widget(target_combo)
+        if not cur_val:
+            cur_val = self.config.get("defaults", {}).get("deviantart_default_gallery", "")
+        target_combo.blockSignals(True)
+        target_combo.clear()
+        target_combo.addItem("默认相册 (Featured)", "")
+        known_galleries = self.config.get("deviantart_known_galleries", [
+            "Featured",
+            "NSFW - Ai Training Clip",
+            "Cast of Characters",
+            "Cage - A muscle growth story",
+            "Film set"
+        ])
+        for g in known_galleries:
+            if g.lower() != "featured":
+                target_combo.addItem(g, g)
+        f_idx = -1
+        for i in range(target_combo.count()):
+            if target_combo.itemData(i) == cur_val or target_combo.itemText(i) == cur_val:
+                f_idx = i
+                break
+        if f_idx >= 0:
+            target_combo.setCurrentIndex(f_idx)
+        elif cur_val:
+            target_combo.setEditText(cur_val)
+        else:
+            target_combo.setCurrentIndex(0)
+        target_combo.blockSignals(False)
+
+    def sync_da_galleries(self, sender_btn=None, on_success_cb=None):
+        da_disp = next((d for d in self.dispatchers if d.name == "deviantart"), None)
+        if not da_disp:
+            QMessageBox.critical(self, "刷新相册失败", "未找到 DeviantArt 分发器组件")
+            return
+
+        if sender_btn:
+            sender_btn.setEnabled(False)
+            sender_btn.setText("⏳ 正在刷新...")
+
+        def _on_done(ok, gals, msg):
+            if sender_btn:
+                sender_btn.setEnabled(True)
+                sender_btn.setText("🔄 刷新相册列表")
+
+            if ok:
+                self.config["deviantart_known_galleries"] = gals
+                save_config(self.config)
+                self._populate_da_gallery_combo()
+                if getattr(self, "_active_settings_dialog", None):
+                    self._active_settings_dialog._populate_gallery_combo()
+                if on_success_cb:
+                    try:
+                        on_success_cb(gals)
+                    except Exception:
+                        pass
+                QMessageBox.information(self, "刷新相册成功", f"成功拉取到 {len(gals)} 个相册！")
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.showMessage(f"DeviantArt 相册列表已更新 ({len(gals)} 个)", 5000)
+            else:
+                QMessageBox.critical(self, "刷新相册失败", f"DeviantArt 相册列表刷新失败:\n{msg}")
+
+        self._da_sync_worker = DaGallerySyncWorker(da_disp)
+        self._da_sync_worker.finished_signal.connect(_on_done)
+        self._da_sync_worker.start()
 
     def _render_avatar(self, label, avatar_path):
         if avatar_path and Path(avatar_path).exists():
