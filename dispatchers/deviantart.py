@@ -599,7 +599,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                 error_msg=f"DeviantArt 素材上传超时或 Studio 模态框未渲染 (已等待 {upload_timeout} 秒)，已中止发布 (避免存为无图草稿)"
             )
             if not att_ok:
-                return False, att_msg
+                self._cleanup_orphan_draft(page, title, first_img)
+                return False, f"{att_msg} (已清理可能残留的破损草稿)"
 
         page.wait_for_timeout(1000)
 
@@ -638,8 +639,8 @@ class DeviantArtDispatcher(BaseDispatcher):
 
         f_ok, f_msg = self.assert_field_value(page, title_sel, expected_value=title, max_retries=1)
         if not f_ok:
-            self._cleanup_orphan_draft(page, title, first_img)
-            return False, f"DeviantArt 标题断言失败: {f_msg}"
+            logger.error(f"[DeviantArt] 标题断言失败: {f_msg}。草稿已完整保留在 DeviantArt Studio")
+            return False, f"DeviantArt 标题断言失败: {f_msg}。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
         # 6. 填写描述 (优先在当前打开的 dialog / ReactModal 容器内定位，并防止 <dialog open> 指针遮挡导致 30s 超时)
         desc_area = page.query_selector(
@@ -851,8 +852,7 @@ class DeviantArtDispatcher(BaseDispatcher):
 
                 if not gallery_matched:
                     logger.error(f"[DeviantArt] 相册选择器未能匹配或定位到指定相册 '{gallery}'，已阻断发布以防止发布到错误相册")
-                    self._cleanup_orphan_draft(page, title, first_img)
-                    return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册"
+                    return False, f"DeviantArt 指定相册 '{gallery}' 未能匹配或定位，已阻断发布以防止作品发布到错误相册。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
                 else:
                     # 2. 选择后回读确认选中项文本 (严格阻断式回读校验)
                     confirmed = False
@@ -877,12 +877,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                         logger.info(f"[DeviantArt] 回读确认相册选定成功: '{gallery}'")
                     else:
                         logger.error(f"[DeviantArt] 回读未能确认相册 '{gallery}' 文本，已阻断发布以防止错位")
-                        self._cleanup_orphan_draft(page, title, first_img)
-                        return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册"
+                        return False, f"DeviantArt 相册回读校验失败: 表单中未能确认选定相册 '{gallery}' 文本，已阻断发布以防止作品发布到错误相册。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
             except Exception as e_gallery:
                 logger.error(f"[DeviantArt] 设置相册 '{gallery}' 过程发生异常: {e_gallery}")
-                self._cleanup_orphan_draft(page, title, first_img)
-                return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册"
+                return False, f"DeviantArt 设置相册 '{gallery}' 异常: {e_gallery}，已阻断发布以防止作品发布到错误相册。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
         # 步骤 3 & 步骤 4: 当包含多图时，点击 "+" 追加剩余图片并等待缩略图就绪 (单图模式直接跳过)
         remaining_images = images[1:]
@@ -895,7 +893,15 @@ class DeviantArtDispatcher(BaseDispatcher):
             while time.time() - llama_wait_start < llama_max_wait:
                 is_llama = False
                 try:
-                    is_llama = page.evaluate("() => (document.body.innerText || '').includes('llama noms your file')")
+                    res_eval = page.evaluate("() => (document.body.innerText || '').includes('llama noms your file')")
+                    if isinstance(res_eval, bool):
+                        is_llama = res_eval
+                    elif isinstance(res_eval, dict):
+                        is_llama = bool(res_eval.get("llama", False))
+                    elif isinstance(res_eval, (int, float)):
+                        is_llama = False
+                    else:
+                        is_llama = bool(res_eval)
                 except Exception:
                     pass
                 if not is_llama:
@@ -1112,8 +1118,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                 break
 
         if not submit_btn:
-            self._cleanup_orphan_draft(page, title, first_img)
-            return False, "DeviantArt 未定位到发布提交按钮 (Submit)，已清理草稿中止发布"
+            logger.error("[DeviantArt] 未定位到发布提交按钮 (Submit)。草稿已完整保留在 DeviantArt Studio")
+            return False, "DeviantArt 未定位到发布提交按钮 (Submit)。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
         # 必须轮询等待按钮解禁 (放宽至 60 秒等待大文件在 DA 端完全转码就绪)
         btn_ready = False
@@ -1133,8 +1139,8 @@ class DeviantArtDispatcher(BaseDispatcher):
             err_elem = page.query_selector("div[role='alert'], span.error, p[class*='error'], div[class*='error-message'], span[data-error]")
             if err_elem:
                 err_hint = f" (页面提示: {err_elem.inner_text().strip()})"
-            self._cleanup_orphan_draft(page, title, first_img)
-            return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}，已中止并清理草稿"
+            logger.error(f"[DeviantArt] 发布按钮处于禁用状态无法提交{err_hint}。草稿已完整保留在 DeviantArt Studio")
+            return False, f"DeviantArt 发布按钮处于禁用状态无法提交{err_hint}。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
         # 保险二：时序后置确认与二次强行回填真实作品标题 (彻底覆盖 DA 转码完成时用文件名冲掉的标题)
         try:
@@ -1262,8 +1268,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                     err_detail = f" (页面错误拦截: {err_elem.inner_text().strip()})"
             except Exception:
                 pass
-            self._cleanup_orphan_draft(page, title, first_img)
-            return False, f"{sub_msg}{err_detail}"
+            logger.error(f"[DeviantArt] 提交确认超时{err_detail}。草稿已完整保留在 DeviantArt Studio")
+            return False, f"{sub_msg}{err_detail}。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
         # 提交成功！留足 10 秒缓冲时间给 DA 后端进行转码与草稿箱异步销毁
         logger.info("[DeviantArt] 投稿主页已确认跳转作品页！等待 10 秒供 DA 后台完成数据库索引与草稿销毁...")
