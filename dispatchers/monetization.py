@@ -430,7 +430,26 @@ class PatreonDispatcher(BaseDispatcher):
 
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
-        desc = payload.get("description", "")
+        desc = payload.get("patreon_description") or payload.get("description", "")
+        # DA 帖子 URL 透传替换 (需求三 9)
+        da_post_url = payload.get("da_post_url")
+        if da_post_url and desc:
+            from config import load_config
+            cfg = load_config()
+            home_link = (
+                payload.get("x_da_link_original")
+                or cfg.get("defaults", {}).get("x_da_link")
+                or "https://www.deviantart.com/foxtontonton"
+            )
+            if home_link and home_link in desc:
+                desc = desc.replace(home_link, da_post_url)
+            else:
+                desc = _re.sub(
+                    r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])",
+                    da_post_url,
+                    desc,
+                    flags=_re.IGNORECASE
+                )
         tags = payload.get("tags", [])
         is_adult = payload.get("is_nsfw", False)
         visibility = payload.get("platform_options", {}).get("patreon_visibility", "patrons")

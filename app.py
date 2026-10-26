@@ -2214,14 +2214,28 @@ class PublishThread(QThread):
             self.progress_signal.emit(5, f"门禁已拦截 {gate_skipped_count} 个未就绪平台，继续为剩余 {len(valid_dispatchers)} 个平台发布...")
             self.msleep(800)
 
-        # ---------------- 针对通过门禁的平台正式分发 (并发发布架构) ----------------
+        # ---------------- 针对通过门禁的平台正式分发 (并发/两阶段发布架构) ----------------
         valid_total = len(valid_dispatchers)
         cfg = load_config()
         concurrency = self.payload.get("publish_concurrency") or cfg.get("publish_concurrency", 2)
         concurrency = max(1, min(valid_total, int(concurrency)))
 
-        self.progress_signal.emit(5, f"开始并行分发至 {valid_total} 个平台 (并发数: {concurrency})...")
-        logger.info(f"[PublishThread] 启动并发分发: 平台总数={valid_total}, 并发数={concurrency}")
+        use_da_post_link = self.payload.get("use_da_post_link_for_traffic")
+        if use_da_post_link is None:
+            use_da_post_link = cfg.get("use_da_post_link_for_traffic", cfg.get("defaults", {}).get("use_da_post_link_for_traffic", True))
+
+        default_da_homepage = (
+            self.payload.get("x_da_link")
+            or self.payload.get("platform_options", {}).get("x_da_link")
+            or cfg.get("defaults", {}).get("x_da_link")
+            or "https://www.deviantart.com/foxtontonton"
+        )
+        actual_traffic_link = default_da_homepage
+        traffic_notice = ""
+
+        da_disp = next((d for d in valid_dispatchers if d.name == "deviantart"), None)
+        has_followers = any(d.name in ("x_twitter", "patreon") for d in valid_dispatchers)
+        should_two_phase = bool(use_da_post_link and da_disp and has_followers)
 
         def _publish_worker(disp):
             logger.info(f"[{disp.display_name}] 并发发布任务启动...")
@@ -2261,21 +2275,127 @@ class PublishThread(QThread):
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         completed_count = 0
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            future_to_disp = {executor.submit(_publish_worker, d): d for d in valid_dispatchers}
-            for future in as_completed(future_to_disp):
-                disp_obj = future_to_disp[future]
-                try:
-                    disp_name, disp_title, success, msg, compliance = future.result()
-                except Exception as exc:
-                    logger.error(f"[{disp_obj.display_name}] 发布工作线程未捕获异常: {exc}")
-                    disp_name, disp_title = disp_obj.name, disp_obj.display_name
-                    success, msg, compliance = False, f"发布工作线程异常: {exc}", []
-                results[disp_name] = (success, msg, compliance)
-                completed_count += 1
-                progress_val = 5 + int((completed_count / valid_total) * 90)
-                status_str = "成功" if success else "未完成"
-                self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
+
+        if should_two_phase:
+            logger.info(f"[PublishThread] 检测到 DeviantArt 与引流平台 (X/Patreon)，启动两阶段发布管线...")
+            self.progress_signal.emit(5, "[阶段 1/2] 正在优先发布 DeviantArt 以获取当帖引流链接...")
+
+            # 第一阶段: 只发 DA
+            disp_name, disp_title, da_success, da_msg, da_compliance = _publish_worker(da_disp)
+            results[disp_name] = (da_success, da_msg, da_compliance)
+            completed_count += 1
+            progress_val = 5 + int((completed_count / valid_total) * 90)
+            status_str = "成功" if da_success else "未完成"
+            self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
+
+            # 捕获 DA 帖子 URL (从已有成功结果捕获，不许再爬一次)
+            captured_url = None
+            if da_success:
+                if getattr(da_disp, "last_published_url", None):
+                    captured_url = da_disp.last_published_url
+                if not captured_url and da_compliance:
+                    for item in da_compliance:
+                        if isinstance(item, dict) and item.get("item") == "post_url" and item.get("detail"):
+                            captured_url = item["detail"]
+                            break
+                if not captured_url and da_msg:
+                    import re as _re
+                    m = _re.search(r"https?://(?:www\.)?deviantart\.com/[^/\s]+/art/[^/\s]+", str(da_msg))
+                    if m:
+                        captured_url = m.group(0)
+
+            if da_success and captured_url:
+                actual_traffic_link = captured_url
+                traffic_notice = ""
+                logger.info(f"[PublishThread] 阶段 1 成功！已捕获 DA 当帖引流链接: {actual_traffic_link}")
+            else:
+                actual_traffic_link = default_da_homepage
+                traffic_notice = "DA 未成功，引流链接已回退为主页"
+                logger.warning(f"[PublishThread] 阶段 1 未获取到有效 DA 当帖链接 ({da_msg})，引流链接已回退为主页: {actual_traffic_link}")
+
+            # 存入本次发布的共享上下文
+            self.payload["da_post_url"] = captured_url if (da_success and captured_url) else None
+            self.payload["actual_traffic_link"] = actual_traffic_link
+            self.payload["traffic_notice"] = traffic_notice
+            self.payload["x_da_link"] = actual_traffic_link
+            self.payload.setdefault("platform_options", {})["x_da_link"] = actual_traffic_link
+
+            # 透传至 Patreon 正文末尾引流签名里的 DA 链接
+            pat_desc = self.payload.get("patreon_description") or self.payload.get("description", "")
+            if pat_desc and actual_traffic_link:
+                import re as _re
+                if default_da_homepage in pat_desc:
+                    pat_desc = pat_desc.replace(default_da_homepage, actual_traffic_link)
+                else:
+                    pat_desc = _re.sub(
+                        r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])",
+                        actual_traffic_link,
+                        pat_desc,
+                        flags=_re.IGNORECASE
+                    )
+                self.payload["patreon_description"] = pat_desc
+
+            # 第二阶段: 剩余平台并发发布
+            phase2_dispatchers = [d for d in valid_dispatchers if d != da_disp]
+            phase2_total = len(phase2_dispatchers)
+            if phase2_total > 0:
+                p2_concurrency = max(1, min(phase2_total, int(concurrency)))
+                self.progress_signal.emit(
+                    progress_val,
+                    f"[阶段 2/2] 开始并发分发剩余 {phase2_total} 个平台 (并发数: {p2_concurrency})..."
+                )
+                logger.info(f"[PublishThread] 阶段 2 并发发布任务启动: {[d.name for d in phase2_dispatchers]}")
+                with ThreadPoolExecutor(max_workers=p2_concurrency) as executor:
+                    future_to_disp = {executor.submit(_publish_worker, d): d for d in phase2_dispatchers}
+                    for future in as_completed(future_to_disp):
+                        disp_obj = future_to_disp[future]
+                        try:
+                            disp_name, disp_title, success, msg, compliance = future.result()
+                        except Exception as exc:
+                            logger.error(f"[{disp_obj.display_name}] 发布工作线程未捕获异常: {exc}")
+                            disp_name, disp_title = disp_obj.name, disp_obj.display_name
+                            success, msg, compliance = False, f"发布工作线程异常: {exc}", []
+
+                        if disp_obj.name in ("x_twitter", "patreon") and traffic_notice:
+                            if traffic_notice not in msg:
+                                msg = f"{msg} ({traffic_notice})"
+
+                        results[disp_name] = (success, msg, compliance)
+                        completed_count += 1
+                        progress_val = 5 + int((completed_count / valid_total) * 90)
+                        status_str = "成功" if success else "未完成"
+                        self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
+
+            results["_traffic_info"] = {
+                "link": actual_traffic_link,
+                "notice": traffic_notice,
+                "is_post_link": bool(da_success and captured_url)
+            }
+        else:
+            self.progress_signal.emit(5, f"开始并行分发至 {valid_total} 个平台 (并发数: {concurrency})...")
+            logger.info(f"[PublishThread] 启动并发分发: 平台总数={valid_total}, 并发数={concurrency}")
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_to_disp = {executor.submit(_publish_worker, d): d for d in valid_dispatchers}
+                for future in as_completed(future_to_disp):
+                    disp_obj = future_to_disp[future]
+                    try:
+                        disp_name, disp_title, success, msg, compliance = future.result()
+                    except Exception as exc:
+                        logger.error(f"[{disp_obj.display_name}] 发布工作线程未捕获异常: {exc}")
+                        disp_name, disp_title = disp_obj.name, disp_obj.display_name
+                        success, msg, compliance = False, f"发布工作线程异常: {exc}", []
+                    results[disp_name] = (success, msg, compliance)
+                    completed_count += 1
+                    progress_val = 5 + int((completed_count / valid_total) * 90)
+                    status_str = "成功" if success else "未完成"
+                    self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
+
+            if has_followers:
+                results["_traffic_info"] = {
+                    "link": default_da_homepage,
+                    "notice": "",
+                    "is_post_link": False
+                }
 
         self.progress_signal.emit(100, "全平台分发已完成！")
         self.completed_signal.emit(results)
@@ -3169,6 +3289,13 @@ class SettingsDialog(QDialog):
         self.def_da_max_spin.valueChanged.connect(self._on_def_da_max_changed)
         da_vbox.addWidget(self.def_da_max_spin)
 
+        self.chk_use_da_post_link = QCheckBox("将当帖作品链接透传至 X / Patreon 引流 (失败时自动回退为主页)")
+        cur_use_da_post = self.config.get("defaults", {}).get("use_da_post_link_for_traffic", self.config.get("use_da_post_link_for_traffic", True))
+        self.chk_use_da_post_link.setChecked(bool(cur_use_da_post))
+        self.chk_use_da_post_link.toggled.connect(self._on_use_da_post_link_toggled)
+        self.chk_use_da_post_link.setStyleSheet("margin-top: 6px;")
+        da_vbox.addWidget(self.chk_use_da_post_link)
+
         layout.addLayout(da_vbox)
 
         # 3.4.1 Civitai 单帖最大图片数 (平台硬顶 20，配置只许调小)
@@ -3480,6 +3607,18 @@ class SettingsDialog(QDialog):
             self.config["defaults"] = {}
         self.config["defaults"]["deviantart_max_images_per_deviation"] = val
         self.config["deviantart_max_images_per_deviation"] = val
+        self._notify_saved()
+
+    def _on_use_da_post_link_toggled(self, checked):
+        if "defaults" not in self.config:
+            self.config["defaults"] = {}
+        self.config["defaults"]["use_da_post_link_for_traffic"] = checked
+        self.config["use_da_post_link_for_traffic"] = checked
+        if self.main_window:
+            if "defaults" not in self.main_window.config:
+                self.main_window.config["defaults"] = {}
+            self.main_window.config["defaults"]["use_da_post_link_for_traffic"] = checked
+            self.main_window.config["use_da_post_link_for_traffic"] = checked
         self._notify_saved()
 
     def _on_def_civitai_max_changed(self, val):
@@ -7095,6 +7234,11 @@ class MainWindow(QMainWindow):
             "raw_images": raw_images,           # 原始未处理原图列表备用
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
+            "use_da_post_link_for_traffic": self.config.get("defaults", {}).get(
+                "use_da_post_link_for_traffic",
+                self.config.get("use_da_post_link_for_traffic", True)
+            ),
+            "x_da_link": self.config.get("defaults", {}).get("x_da_link", "https://www.deviantart.com/foxtontonton"),
             "platform_options": platform_options
         }
 
@@ -7136,9 +7280,35 @@ class MainWindow(QMainWindow):
             self.publish_results_panel.hide()
             return
 
+        traffic_info = results.pop("_traffic_info", None) if isinstance(results, dict) and "_traffic_info" in results else None
+
         header_lbl = QLabel("<b>📊 分发结果面板</b>")
         header_lbl.setStyleSheet("color: #e2e8f0; font-size: 13px; margin-bottom: 4px;")
         self.publish_results_layout.addWidget(header_lbl)
+
+        if traffic_info and traffic_info.get("link"):
+            traffic_frame = QFrame()
+            traffic_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #1e1b4b;
+                    border: 1px solid #4338ca;
+                    border-radius: 6px;
+                    padding: 5px 10px;
+                    margin-bottom: 4px;
+                }
+            """)
+            t_layout = QHBoxLayout(traffic_frame)
+            t_layout.setContentsMargins(6, 4, 6, 4)
+            link_str = traffic_info.get("link", "")
+            notice_str = traffic_info.get("notice", "")
+            if notice_str:
+                t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <span style='color:#fca5a5;'>{link_str}</span> <span style='color:#f87171;'>({notice_str})</span>")
+            else:
+                t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <a href='{link_str}' style='color:#60a5fa;'>{link_str}</a>")
+            t_lbl.setOpenExternalLinks(True)
+            t_lbl.setWordWrap(True)
+            t_layout.addWidget(t_lbl)
+            self.publish_results_layout.addWidget(traffic_frame)
 
         for disp_name, v in results.items():
             success = v[0] if isinstance(v, (tuple, list)) else bool(v)
