@@ -28,6 +28,7 @@ class DeviantArtDispatcher(BaseDispatcher):
             login_url="https://www.deviantart.com/users/login",
             cookies_dir=cookies_dir
         )
+        self.last_published_url = None
 
     def _extract_userinfo(self, cookie_val):
         """从 userinfo cookie 中解析出 username 和 usericon"""
@@ -1554,6 +1555,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                     )
                     return False, f"DeviantArt 图集张数断言失败: 预期包含 {total_images} 张图片，反查实际检测到 {actual_count} 张，已判定为失败以防漏图", compliance
 
+                post_url = page.url
+                self.last_published_url = post_url
                 self.close_login_session(browser, context, page)
                 compliance.append(
                     self.verify_compliance_item(
@@ -1564,8 +1567,18 @@ class DeviantArtDispatcher(BaseDispatcher):
                         f"单作品图集核验通过 (成功 {total_images}/{total_images} 张)"
                     )
                 )
-                return True, f"DeviantArt 发布成功 (单作品图集核验通过，包含 {total_images}/{total_images} 张图片)", compliance
+                compliance.append(
+                    self.verify_compliance_item(
+                        "deviantart",
+                        "post_url",
+                        True,
+                        True,
+                        post_url
+                    )
+                )
+                return True, f"DeviantArt 发布成功: {post_url} (单作品图集核验通过，包含 {total_images}/{total_images} 张图片)", compliance
         except Exception as e:
+            self.last_published_url = None
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")
             return False, f"DeviantArt 自动化发布异常: {e}", compliance
 

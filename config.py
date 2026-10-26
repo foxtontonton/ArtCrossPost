@@ -58,6 +58,7 @@ DEFAULT_CONFIG = {
     "civitai_max_images_per_post": 20,                   # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
     "civitai_resources": [],                             # Civitai 关联模型资源 (支持 ID / URL / {"id": ..., "version": ...})
     "civitai_resources_scope": "all",                    # 关联作用域: "all"(全图) | "cover"(仅封面首图)
+    "use_da_post_link_for_traffic": True,                # DA 帖子 URL 透传引流到 X/Patreon (默认开启，失败回退主页)
     "civitai_tool": "ComfyUI",                           # 图片工具标注 (默认 "ComfyUI")
     "deviantart_known_galleries": [
         "Featured",
@@ -97,7 +98,8 @@ DEFAULT_CONFIG = {
         "kofi_min_duration": 20,          # Ko-fi 发布耗时安全护栏阈值 (秒，低于此值直接判异常以防假阳性)
         "x_wait_button_timeout": 120,     # X (Twitter) 发帖按钮等待就绪超时 (秒，应对服务端转码延迟)
         "x_da_link": "https://www.deviantart.com/foxtontonton", # X 推文预告引流 DA 链接
-        "x_nsfw_notice": "🔞 NSFW full set on DeviantArt 👇"      # X 推文 NSFW 引流提示文案
+        "x_nsfw_notice": "🔞 NSFW full set on DeviantArt 👇",     # X 推文 NSFW 引流提示文案
+        "use_da_post_link_for_traffic": True              # DA 帖子 URL 透传引流到 X/Patreon (默认开启，失败回退主页)
     }
 }
 
