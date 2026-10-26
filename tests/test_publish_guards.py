@@ -58,6 +58,7 @@ def test_da_gallery_not_found_blocks_publish(tmp_path, monkeypatch):
     mock_context = MagicMock()
     mock_context.pages = [mock_page]
     disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+    disp._cleanup_orphan_draft = MagicMock()
 
     payload = {
         "title": "NSFW Muscle Art",
@@ -69,6 +70,9 @@ def test_da_gallery_not_found_blocks_publish(tmp_path, monkeypatch):
     assert success is False
     assert "已阻断发布以防止作品发布到错误相册" in msg or "未能匹配或定位" in msg
     assert "NonExistentSpecialGallery" in msg
+    assert "草稿已完整保留在 DeviantArt Studio" in msg
+    assert "https://www.deviantart.com/studio" in msg
+    disp._cleanup_orphan_draft.assert_not_called()
 
 
 def test_da_gallery_readback_failure_blocks_publish(tmp_path, monkeypatch):
@@ -119,6 +123,7 @@ def test_da_gallery_readback_failure_blocks_publish(tmp_path, monkeypatch):
     mock_context = MagicMock()
     mock_context.pages = [mock_page]
     disp.create_persistent_stealth_context = MagicMock(return_value=mock_context)
+    disp._cleanup_orphan_draft = MagicMock()
 
     payload = {
         "title": "NSFW Muscle Art",
@@ -130,6 +135,9 @@ def test_da_gallery_readback_failure_blocks_publish(tmp_path, monkeypatch):
     assert success is False
     assert "相册回读校验失败" in msg
     assert "Secret Themed Gallery" in msg
+    assert "草稿已完整保留在 DeviantArt Studio" in msg
+    assert "https://www.deviantart.com/studio" in msg
+    disp._cleanup_orphan_draft.assert_not_called()
 
 
 def test_x_button_wait_timeout_and_retry(tmp_path, monkeypatch):
@@ -239,5 +247,149 @@ def test_assert_field_value_multiline_title_whitespace_normalization():
     )
     assert ok is True
     assert "字段回读一致" in msg
+
+
+def test_da_submit_button_missing_preserves_draft(tmp_path, monkeypatch):
+    """
+    测试【提交前草稿保护】：当提交按钮未找到时，草稿已完整填写，
+    必须保留草稿不删，并注明草稿位置 (https://www.deviantart.com/studio)。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+    disp = _setup_da(tmp_path, monkeypatch)
+    disp._cleanup_orphan_draft = MagicMock()
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png"
+
+    # submit 按钮找不到，但保留 input[type='file'] 与 title 输入框
+    mock_title = MagicMock()
+    mock_title.is_visible.return_value = True
+    def fake_query_selector_1(sel):
+        if "title" in sel or "dialog" in sel:
+            return mock_title
+        if "file" in sel:
+            return mock_cover_fi
+        return None
+
+    mock_page.query_selector_all = MagicMock(side_effect=lambda sel: [mock_cover_fi] if "input[type='file']" in sel else [])
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector_1)
+
+    dummy_img = tmp_path / "test.png"
+    dummy_img.write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, MagicMock(), [str(dummy_img)], "Preserved Draft Test",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is False
+    assert "未定位到发布提交按钮" in res_msg
+    assert "草稿已完整保留在 DeviantArt Studio" in res_msg
+    assert "https://www.deviantart.com/studio" in res_msg
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_da_submit_timeout_preserves_draft(tmp_path, monkeypatch):
+    """
+    测试【提交超时草稿保护】：提交后等待跳转作品页超时，
+    草稿完整保留在 Studio，绝不调用孤儿清理删除草稿。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+    disp = _setup_da(tmp_path, monkeypatch)
+    disp._cleanup_orphan_draft = MagicMock()
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    # assert_submitted 超时
+    disp.assert_submitted = MagicMock(return_value=(False, "DeviantArt 提交超时未跳转至作品展示页 (/art/)"))
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_cover_fi.get_attribute.return_value = "image/png"
+    mock_title = MagicMock()
+    mock_title.is_visible.return_value = True
+    mock_submit_btn = MagicMock()
+    mock_submit_btn.inner_text.return_value = "Submit"
+    mock_submit_btn.is_enabled.return_value = True
+    mock_submit_btn.get_attribute.return_value = "false"
+
+    def fake_query_selector_2(sel):
+        if "title" in sel or "dialog" in sel:
+            return mock_title
+        if "file" in sel:
+            return mock_cover_fi
+        if "Submit" in sel or "submit" in sel:
+            return mock_submit_btn
+        return None
+
+    def fake_query_selector_all_2(sel):
+        if "file" in sel:
+            return [mock_cover_fi]
+        if "Submit" in sel or "submit" in sel:
+            return [mock_submit_btn]
+        return []
+
+    mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all_2)
+    mock_page.query_selector = MagicMock(side_effect=fake_query_selector_2)
+
+    dummy_img = tmp_path / "test.png"
+    dummy_img.write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, MagicMock(), [str(dummy_img)], "Submit Timeout Test",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is False
+    assert "提交超时" in res_msg
+    assert "草稿已完整保留在 DeviantArt Studio" in res_msg
+    assert "https://www.deviantart.com/studio" in res_msg
+    disp._cleanup_orphan_draft.assert_not_called()
+
+
+def test_da_corrupted_upload_cleans_orphan_draft(tmp_path, monkeypatch):
+    """
+    测试【破损草稿孤儿清理】：当首图上传超时且标题输入框未渲染时（真正破损状态），
+    执行孤儿草稿自动清理，避免留下无图/无标题破损草稿。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+    # 模拟上传等待快速超时 (时间跳跃 > 120s)
+    current_t = [100.0]
+    def fake_time():
+        current_t[0] += 130.0
+        return current_t[0]
+    monkeypatch.setattr(time, "time", fake_time)
+
+    disp = _setup_da(tmp_path, monkeypatch)
+    disp._cleanup_orphan_draft = MagicMock()
+    disp.safe_goto = MagicMock()
+    # assert_attached 判定标题输入框未就绪 (上传超时)
+    disp.assert_attached = MagicMock(return_value=(False, "DeviantArt 素材上传超时或 Studio 模态框未渲染"))
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/submit"
+    mock_cover_fi = MagicMock()
+    mock_page.query_selector = MagicMock(return_value=None)
+    mock_page.query_selector_all = MagicMock(return_value=[mock_cover_fi])
+
+    dummy_img = tmp_path / "test.png"
+    dummy_img.write_bytes(b"dummy")
+
+    res_ok, res_msg = disp._submit_deviation(
+        mock_page, MagicMock(), [str(dummy_img)], "Corrupted Upload",
+        "Desc", [], False, "strict", False, "", []
+    )
+
+    assert res_ok is False
+    assert "素材上传超时" in res_msg
+    # 真正破损状态必须执行孤儿清理
+    disp._cleanup_orphan_draft.assert_called_once()
+
 
 
