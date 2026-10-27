@@ -772,3 +772,208 @@ def test_civitai_tag_flow_badge_assertion_failure(tmp_path):
     assert ok_cnt == 0
     assert fail_cnt == 1
     assert mock_input.fill.call_args[0][0] == "lost_badge_tag"
+
+
+# =========================================================================
+# Civitai 发布成功断言与容错增强测试 (fix/civitai-publish-flow):
+# 1. 发布后 URL 留在 /edit 页面但出现 View Post 按钮，断言发布成功并提取帖子 URL
+# 2. 轮询后走直达链接探测确认发布成功
+# 3. delete_orphan_draft 检测到已发布状态 (View Post) 坚决拒删，杜绝误删已发布作品
+# 4. 标签输入防误触顶部全局搜索条 (Search Civitai)，必须前置点击 TAG 入口唤起
+# =========================================================================
+
+def test_civitai_publish_success_when_url_remains_on_edit_but_view_post_appears(tmp_path):
+    """验证当 Civitai SPA 保持在 /posts/<id>/edit 但按钮流转为 View Post 时，正确判定发布成功"""
+    cookies_dir = tmp_path / "cookies"
+    cookies_dir.mkdir()
+    disp = CivitaiDispatcher(cookies_dir)
+
+    dummy_img = tmp_path / "test.png"
+    dummy_img.write_bytes(b"data")
+
+    payload = {
+        "title": "If You Were the Researcher in This Facility...",
+        "description": "Desc",
+        "tags": ["anime"],
+        "civitai_images": [str(dummy_img)],
+        "civitai_max_images_per_post": 20
+    }
+
+    mock_page = MagicMock()
+    mock_file_input = MagicMock()
+    mock_pub_btn = MagicMock()
+    mock_pub_btn.is_disabled.return_value = False
+    mock_saved_el = MagicMock()
+    mock_view_post_btn = MagicMock()
+    mock_view_post_btn.is_visible.return_value = True
+
+    # 模拟页面始终停留在 /posts/31951550/edit
+    mock_page.url = "https://civitai.com/posts/31951550/edit"
+
+    def fake_qs(selector):
+        if "input[type='file']" in selector:
+            return mock_file_input
+        if "button:has-text('Publish')" in selector:
+            return mock_pub_btn
+        if "SAVED" in selector:
+            return mock_saved_el
+        if "View Post" in selector:
+            return mock_view_post_btn
+        return MagicMock()
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+
+    with patch.object(disp, "create_persistent_stealth_context", return_value=mock_context), \
+         patch.object(disp, "safe_goto"), \
+         patch.object(disp, "delete_orphan_draft") as mock_delete:
+        success, msg, compliance = disp.publish(payload)
+
+    # 验证发布成功且正确提取了公开帖子链接，绝不调用草稿清理
+    assert success is True
+    assert "https://civitai.com/posts/31951550" in msg
+    mock_delete.assert_not_called()
+    assert any(c.get("item") == "post_url" and c.get("detail") == "https://civitai.com/posts/31951550" for c in compliance)
+
+
+def test_civitai_publish_success_when_direct_probe_succeeds(tmp_path):
+    """验证当 SPA 未跳转且无 View Post 按钮时，通过直达链接探测确认发布成功"""
+    cookies_dir = tmp_path / "cookies"
+    cookies_dir.mkdir()
+    disp = CivitaiDispatcher(cookies_dir)
+
+    dummy_img = tmp_path / "test.png"
+    dummy_img.write_bytes(b"data")
+
+    payload = {
+        "title": "Probe Test",
+        "description": "Desc",
+        "tags": [],
+        "civitai_images": [str(dummy_img)],
+        "civitai_max_images_per_post": 20
+    }
+
+    mock_page = MagicMock()
+    mock_file_input = MagicMock()
+    mock_pub_btn = MagicMock()
+    mock_pub_btn.is_disabled.return_value = False
+    mock_saved_el = MagicMock()
+
+    # 初始状态在 edit 页面
+    mock_page.url = "https://civitai.com/posts/31951550/edit"
+    mock_page.title.return_value = "Probe Test | Civitai"
+
+    def fake_goto(page, url, **kwargs):
+        if url == "https://civitai.com/posts/31951550":
+            mock_page.url = "https://civitai.com/posts/31951550"
+
+    def fake_qs(selector):
+        if "input[type='file']" in selector:
+            return mock_file_input
+        if "button:has-text('Publish')" in selector:
+            return mock_pub_btn
+        if "SAVED" in selector:
+            return mock_saved_el
+        if "View Post" in selector:
+            return None
+        return MagicMock()
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    mock_context = MagicMock()
+    mock_context.pages = [mock_page]
+
+    with patch.object(disp, "create_persistent_stealth_context", return_value=mock_context), \
+         patch.object(disp, "safe_goto", side_effect=fake_goto), \
+         patch.object(disp, "delete_orphan_draft") as mock_delete:
+        success, msg, compliance = disp.publish(payload)
+
+    assert success is True
+    assert "https://civitai.com/posts/31951550" in msg
+    mock_delete.assert_not_called()
+
+
+def test_delete_orphan_draft_refuses_to_delete_when_view_post_exists(tmp_path, caplog):
+    """验证安全机制：当页面显示 View Post 时，delete_orphan_draft 拒绝删除已发布作品"""
+    import logging
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+    mock_page.url = "https://civitai.com/posts/31951550/edit"
+
+    mock_vp_btn = MagicMock()
+    mock_vp_btn.is_visible.return_value = True
+    mock_del_btn = MagicMock()
+
+    def fake_qs(selector):
+        if "View Post" in selector:
+            return mock_vp_btn
+        if "Delete Post" in selector:
+            return mock_del_btn
+        return None
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    with caplog.at_level(logging.WARNING), patch.object(disp, "safe_goto"):
+        res = disp.delete_orphan_draft(mock_page, draft_id="31951550")
+
+    assert res is False
+    mock_del_btn.click.assert_not_called()
+    assert any("作品已发布，拒绝执行草稿删除" in r.message for r in caplog.records)
+
+
+def test_tag_flow_avoids_global_search_input(tmp_path):
+    """验证标签流程杜绝误触全局 Search Civitai 输入框，必须严格先点击 TAG 徽章唤起标签输入框"""
+    disp = CivitaiDispatcher(tmp_path)
+    mock_page = MagicMock()
+
+    call_history = []
+
+    # 模拟全局搜索框（常驻可见）
+    mock_global_search = MagicMock()
+    mock_global_search.is_visible.return_value = True
+    mock_global_search.get_attribute.side_effect = lambda attr: "Search Civitai" if attr == "placeholder" else ""
+
+    # 模拟真实标签入口按钮与标签输入框
+    mock_tag_badge = MagicMock()
+    is_tag_input_open = False
+    mock_tag_input = MagicMock()
+    mock_tag_input.is_visible.return_value = True
+
+    def fake_tag_click(**kwargs):
+        nonlocal is_tag_input_open
+        call_history.append("click_tag_badge")
+        is_tag_input_open = True
+    mock_tag_badge.click.side_effect = fake_tag_click
+
+    def fake_input_fill(val, **kwargs):
+        call_history.append(f"fill_{val}")
+    mock_tag_input.fill.side_effect = fake_input_fill
+
+    mock_badge = MagicMock()
+
+    def fake_qs(selector):
+        # 标签徽章断言
+        if "anime" in selector:
+            return mock_badge
+        # 真实标签输入框
+        if "Type your tag" in selector or "placeholder*='tag'" in selector:
+            if is_tag_input_open:
+                return mock_tag_input
+            return None
+        # TAG 按钮
+        if "TAG" in selector or "+ Tag" in selector:
+            return mock_tag_badge
+        return None
+
+    mock_page.query_selector.side_effect = fake_qs
+
+    ok_cnt, fail_cnt = disp.inject_tags(mock_page, ["anime"], per_tag_timeout_sec=1.0)
+
+    assert ok_cnt == 1
+    assert fail_cnt == 0
+    assert "click_tag_badge" in call_history
+    assert "fill_anime" in call_history
+    assert call_history.index("click_tag_badge") < call_history.index("fill_anime")
+

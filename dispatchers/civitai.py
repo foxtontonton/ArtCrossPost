@@ -460,11 +460,18 @@ class CivitaiDispatcher(BaseDispatcher):
         """
         清理因流程失败产生的孤儿草稿 (需求 11):
         尝试在当前编辑页或导航至 /posts/<draft_id>/edit，点击 Delete Post 并确认删除。
+        若检测到帖子已处于 Published 状态或含有 'View Post'，严禁删除以避免误伤已发布作品。
         """
         try:
             if draft_id and not page.url.endswith(f"/{draft_id}/edit"):
                 self.safe_goto(page, f"https://civitai.com/posts/{draft_id}/edit", timeout=30000)
                 time.sleep(2)
+
+            # 安全防护：若帖子已包含 View Post，说明作品已成功发布，绝不能当作草稿清理
+            vp_btn = page.query_selector("button:has-text('View Post'), a:has-text('View Post')")
+            if vp_btn and getattr(vp_btn, "is_visible", lambda: True)():
+                logger.warning(f"[Civitai] 检测到帖子 #{draft_id} 已显示 'View Post'，作品已发布，拒绝执行草稿删除！")
+                return False
 
             del_btn = page.query_selector("button:has-text('Delete Post')")
             if not del_btn:
@@ -538,9 +545,15 @@ class CivitaiDispatcher(BaseDispatcher):
                     has_error = True
                     continue
 
-                search_input.fill("")
+                try:
+                    search_input.fill("", timeout=3000)
+                except TypeError:
+                    search_input.fill("")
                 time.sleep(0.3)
-                search_input.fill(str(model_id))
+                try:
+                    search_input.fill(str(model_id), timeout=3000)
+                except TypeError:
+                    search_input.fill(str(model_id))
                 time.sleep(2.0)
 
                 # 查找搜索结果卡片
@@ -620,8 +633,8 @@ class CivitaiDispatcher(BaseDispatcher):
     def _attach_single_card_tool(self, page, card_idx: int, tool_name: str) -> bool:
         """为单张卡片执行工具标注 (如 ComfyUI)"""
         try:
-            raw_tool_btns = page.query_selector_all("button:has-text('TOOL')")
-            tool_btns = [b for b in raw_tool_btns if "TOOL" in (self._safe_inner_text(b) or "TOOL")]
+            raw_tool_btns = page.query_selector_all("button:has-text('TOOL'), button:has-text('+ TOOL')")
+            tool_btns = [b for b in raw_tool_btns if getattr(b, "is_visible", lambda: True)() and "TOOL" in (self._safe_inner_text(b) or "TOOL")]
             if card_idx >= len(tool_btns):
                 logger.warning(f"[Civitai] 图片 #{card_idx + 1} 未找到 '+ TOOL' 按钮，跳过工具标注")
                 return False
@@ -630,23 +643,38 @@ class CivitaiDispatcher(BaseDispatcher):
             tool_btn.click()
             time.sleep(1.0)
 
-            # 寻找弹出层中的输入框或直接选项
+            # 寻找弹出层中的可见输入框 (优先 combobox/search 输入框，杜绝不可见元素引发 30s 阻塞)
             tool_input = page.query_selector(
-                "div[role='dialog'] input, div[id*='popover'] input, div[class*='Popover'] input, "
-                "input[placeholder*='tool' i], input[placeholder*='search' i]"
+                "input[role='combobox'][placeholder*='search' i], "
+                "input[placeholder='search...'], "
+                "input[placeholder*='tool' i], "
+                "div[role='dialog'] input, div[id*='popover'] input, div[class*='Popover'] input"
             )
-            if tool_input:
+            if tool_input and getattr(tool_input, "is_visible", lambda: True)():
                 tool_input.fill(tool_name)
-                time.sleep(0.4)
-                opt = page.query_selector(f"div[role='option']:has-text('{tool_name}'), button:has-text('{tool_name}'), div:has-text('{tool_name}')")
-                if opt:
+                time.sleep(0.5)
+
+                opt = page.query_selector(
+                    f"[role='listbox'] span:text-is('{tool_name}'), "
+                    f"[role='listbox'] :text-is('{tool_name}'), "
+                    f"div[role='option']:has-text('{tool_name}'), "
+                    f"span:text-is('{tool_name}'), "
+                    f"button:has-text('{tool_name}'), "
+                    f"div:has-text('{tool_name}')"
+                )
+                if opt and getattr(opt, "is_visible", lambda: True)():
                     opt.click()
                 else:
                     tool_input.press("Enter")
                 time.sleep(0.5)
             else:
-                opt = page.query_selector(f"button:has-text('{tool_name}'), div[role='option']:has-text('{tool_name}'), div[role='menuitem']:has-text('{tool_name}')")
-                if opt:
+                opt = page.query_selector(
+                    f"button:has-text('{tool_name}'), "
+                    f"div[role='option']:has-text('{tool_name}'), "
+                    f"div[role='menuitem']:has-text('{tool_name}'), "
+                    f"span:text-is('{tool_name}')"
+                )
+                if opt and getattr(opt, "is_visible", lambda: True)():
                     opt.click()
                     time.sleep(0.5)
                 else:
@@ -774,23 +802,24 @@ class CivitaiDispatcher(BaseDispatcher):
         for idx, tag_str in enumerate(clean_tags):
             try:
                 # Step 1: 检查输入框是否已处于可见状态，若未出现则点击 "+ Tag" 唤起
+                # 注意：切勿匹配包含 'search' 的输入框，避免误中 Civitai 顶部全局搜索条！
                 tag_input = page.query_selector(
-                    "input.mantine-Autocomplete-input, "
-                    "input[placeholder*='tag' i], "
-                    "input[placeholder*='search' i], "
-                    "div[role='combobox'] input"
+                    "input[placeholder*='Type your tag' i], "
+                    "input[placeholder*='tag' i]:not([placeholder*='Search' i]), "
+                    "input.mantine-TextInput-input[placeholder*='tag' i], "
+                    "input[placeholder*='tag' i]"
                 )
                 input_visible = tag_input is not None and getattr(tag_input, "is_visible", lambda: True)()
 
                 if not input_visible:
                     tag_btn = page.query_selector(
+                        "div.mantine-Badge-root span:text-is('TAG'), "
+                        "div[class*='Badge']:has-text('TAG'), "
                         "[data-tour='post:tag'], "
-                        "div[class*='Alert-root']:has-text('Tag'), "
                         "button:has-text('+ Tag'), "
                         "div:has-text('+ Tag'), "
-                        "button:has-text('Tag'), "
-                        "div[class*='Badge']:has-text('Tag'), "
-                        "span:has-text('+ Tag')"
+                        "span:has-text('+ Tag'), "
+                        "button:has-text('Tag')"
                     )
                     if not tag_btn:
                         if idx == 0:
@@ -821,15 +850,15 @@ class CivitaiDispatcher(BaseDispatcher):
                             failed_count += 1
                             continue
 
-                    # 轮询等待可见的自动补全输入框出现 (最多等待 per_tag_timeout_sec 秒)
+                    # 轮询等待可见的标签输入框出现 (最多等待 per_tag_timeout_sec 秒)
                     tag_input = None
                     start_wait = time.time()
                     while time.time() - start_wait < per_tag_timeout_sec:
                         candidate = page.query_selector(
-                            "input.mantine-Autocomplete-input, "
+                            "input[placeholder*='Type your tag' i], "
+                            "input[placeholder*='tag' i]:not([placeholder*='Search' i]), "
+                            "input.mantine-TextInput-input[placeholder*='tag' i], "
                             "input[placeholder*='tag' i], "
-                            "input[placeholder*='search' i], "
-                            "div[role='combobox'] input, "
                             ":focus"
                         )
                         if candidate and getattr(candidate, "is_visible", lambda: True)():
@@ -883,6 +912,8 @@ class CivitaiDispatcher(BaseDispatcher):
                 start_badge_wait = time.time()
                 while time.time() - start_badge_wait < 2.5:
                     badge = page.query_selector(
+                        f":text-is('{tag_str.upper()}'), "
+                        f":text-is('{tag_str}'), "
                         f"div[class*='Badge']:has-text('{tag_str}'), "
                         f"span[class*='Badge']:has-text('{tag_str}'), "
                         f"[class*='badge' i]:has-text('{tag_str}'), "
@@ -1061,20 +1092,55 @@ class CivitaiDispatcher(BaseDispatcher):
                 logger.info("[Civitai] 点击 Publish 按钮提交发布...")
                 pub_btn.click()
 
-                # 等待 URL 成功跳转至 /posts/<数字>
+                # 等待发帖完成 (支持 URL 跳转、'View Post' 状态流转与页面发布断言)
                 published_url = None
                 for _ in range(25):
                     time.sleep(1)
                     cur_url = page.url
                     match = POST_URL_REGEX.search(cur_url)
+
+                    # 1. 成功路径 A: SPA 页面 URL 直接跳转至 /posts/<数字> (无 /edit 与 /create)
                     if match and not cur_url.endswith("/edit") and not cur_url.endswith("/create"):
                         published_url = f"https://civitai.com/posts/{match.group(1)}"
                         break
 
+                    # 2. 成功路径 B: 按钮变为 'View Post' 或出现查看公开作品入口
+                    vp_btn = page.query_selector("button:has-text('View Post'), a:has-text('View Post')")
+                    if vp_btn and getattr(vp_btn, "is_visible", lambda: True)():
+                        target_id = match.group(1) if match else detected_draft_id
+                        if target_id:
+                            published_url = f"https://civitai.com/posts/{target_id}"
+                            break
+
+                    # 3. 成功路径 C: 页面显示 Published 状态且未见未禁用的 Publish 按钮
+                    still_pub_btn = page.query_selector("button:has-text('Publish'):not([disabled])")
+                    if not still_pub_btn:
+                        is_published = page.query_selector("div:has-text('Published'), span:has-text('Published')")
+                        target_id = match.group(1) if match else detected_draft_id
+                        if is_published and target_id:
+                            published_url = f"https://civitai.com/posts/{target_id}"
+                            break
+
+                # 4. 兜底验证: 若 25s 轮询结束仍未确认但已知草稿/帖子 ID，尝试直达链接验证是否已成功发布
+                if not published_url and detected_draft_id:
+                    try:
+                        self.safe_goto(page, f"https://civitai.com/posts/{detected_draft_id}", timeout=15000)
+                        time.sleep(1.5)
+                        cur_url = page.url
+                        match = POST_URL_REGEX.search(cur_url)
+                        if match and not cur_url.endswith("/edit") and not cur_url.endswith("/create") and "404" not in (page.title() or ""):
+                            published_url = f"https://civitai.com/posts/{detected_draft_id}"
+                            logger.info(f"[Civitai] 通过直达链接确认发帖成功: {published_url}")
+                    except Exception as probe_err:
+                        logger.warning(f"[Civitai] 直达链接探测发帖状态异常: {probe_err}")
+
                 if not published_url:
                     # 匹配失败
-                    logger.error(f"[Civitai] 提交后 URL 未跳转至成功帖子页面 (当前 URL: {page.url})")
-                    if detected_draft_id:
+                    logger.error(f"[Civitai] 提交后未能确认发布成功 (当前 URL: {page.url})")
+                    # 仅在非公开态且存在 Delete Post 按钮时尝试清理孤儿草稿，严禁误删已发布作品
+                    has_delete_btn = bool(page.query_selector("button:has-text('Delete Post')"))
+                    is_edit_mode = "edit" in (page.url or "")
+                    if detected_draft_id and is_edit_mode and has_delete_btn:
                         self.delete_orphan_draft(page, detected_draft_id)
                     context.close()
                     return False, f"发布提交未确认成功 (页面未跳转至公开帖子形态，当前 URL: {page.url})", []
