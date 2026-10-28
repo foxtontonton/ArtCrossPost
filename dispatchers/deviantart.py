@@ -11,12 +11,20 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Optional, Dict, Any
 from .base import BaseDispatcher
 try:
     from logger import get_logger
 except ImportError:
     from ..logger import get_logger
+
+try:
+    from config import load_config
+except ImportError:
+    try:
+        from ..config import load_config
+    except ImportError:
+        load_config = lambda: {}
 
 logger = get_logger("DeviantArt")
 
@@ -520,7 +528,42 @@ class DeviantArtDispatcher(BaseDispatcher):
         except Exception as e_clean:
             logger.warning(f"[DeviantArt] 清理孤儿草稿过程提示: {e_clean}")
 
-    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, thumb_wait_timeout=60):
+    def read_existing_description(self, desc_area) -> Optional[str]:
+        """
+        从 DA 描述框中读出现有预设内容 (tiptap 取 innerText，textarea 取 value)。
+        成功读取返回文本字符串 (可能包含前导/尾随空白)；定位不到或读取异常返回 None。
+        """
+        if not desc_area:
+            return None
+        try:
+            if hasattr(desc_area, "evaluate"):
+                val = desc_area.evaluate("""el => {
+                    if (!el) return '';
+                    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                        return el.value || '';
+                    }
+                    return el.innerText || el.textContent || '';
+                }""")
+                if isinstance(val, str):
+                    return val
+                elif val is not None and type(val).__name__ != "MagicMock":
+                    return str(val)
+
+            # 兼容 mock 环境或无 evaluate 情况
+            if hasattr(desc_area, "inner_text"):
+                txt = desc_area.inner_text()
+                if isinstance(txt, str):
+                    return txt
+            if hasattr(desc_area, "get_attribute"):
+                val_attr = desc_area.get_attribute("value")
+                if isinstance(val_attr, str):
+                    return val_attr
+            return ""
+        except Exception as e:
+            logger.warning(f"[DeviantArt] 未读到预设描述: 读取描述框现有内容异常: {e}")
+            return None
+
+    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, thumb_wait_timeout=60, keep_preset_description=None):
         if isinstance(images, (str, Path)):
             images = [str(images)]
         else:
@@ -643,32 +686,96 @@ class DeviantArtDispatcher(BaseDispatcher):
             logger.error(f"[DeviantArt] 标题断言失败: {f_msg}。草稿已完整保留在 DeviantArt Studio")
             return False, f"DeviantArt 标题断言失败: {f_msg}。草稿已完整保留在 DeviantArt Studio (https://www.deviantart.com/studio)，可前往确认。"
 
-        # 6. 填写描述 (优先在当前打开的 dialog / ReactModal 容器内定位，并防止 <dialog open> 指针遮挡导致 30s 超时)
+        # 6. 填写描述 (需求: 保留 DA 表单预设 Description，分支 feature/da-keep-preset-description)
+        if keep_preset_description is None:
+            try:
+                keep_preset_description = load_config().get("deviantart_keep_preset_description", True)
+            except Exception:
+                keep_preset_description = True
+        keep_preset_description = bool(keep_preset_description)
+
         desc_area = page.query_selector(
             "dialog[open] div.tiptap[contenteditable='true'], dialog[open] div[role='textbox'], dialog[open] textarea[name='description'], dialog[open] div[contenteditable='true'], "
             ".ReactModal__Content div.tiptap[contenteditable='true'], .ReactModal__Content div[role='textbox'], .ReactModal__Content textarea[name='description'], .ReactModal__Content div[contenteditable='true'], "
             "div.tiptap[contenteditable='true'], div[role='textbox'], textarea[name='description'], div[contenteditable='true']"
         )
-        if desc_area and desc:
-            try:
-                desc_area.click(timeout=3000)
-                desc_area.fill(desc, timeout=5000)
-            except Exception as e_desc:
-                logger.debug(f"[DeviantArt] 描述框常规点击被拦截，切换 JS 安全注入: {e_desc}")
+
+        program_desc = (desc or "").strip()
+        desc_source = "仅程序描述"
+        desc_to_fill = None
+
+        if not desc_area:
+            logger.warning("[DeviantArt] 未读到预设描述: 描述输入框未定位")
+            desc_source = "仅程序描述"
+        else:
+            raw_preset = self.read_existing_description(desc_area)
+            if raw_preset is None:
+                # 读预设失败 (定位不到或读取异常)
+                logger.warning("[DeviantArt] 未读到预设描述: 读取描述框异常")
+                if program_desc:
+                    desc_to_fill = program_desc
+                    desc_source = "仅程序描述"
+                else:
+                    desc_source = "仅程序描述"
+            else:
+                preset_text = raw_preset.strip()
+                if not preset_text:
+                    # 读出为空或纯空白
+                    logger.info("[DeviantArt] 未读到预设描述: 描述框内现有文本为空")
+                    if program_desc:
+                        desc_to_fill = program_desc
+                        desc_source = "仅程序描述"
+                        logger.info(f"[DeviantArt] 描述框无预设文本，直接填入程序描述: '{program_desc[:40]}...'")
+                    else:
+                        desc_source = "仅程序描述"
+                else:
+                    # 框里有预设文本
+                    if not keep_preset_description:
+                        # 开关关闭 → 恢复现行为 (程序描述直接替换)
+                        if program_desc:
+                            desc_to_fill = program_desc
+                            desc_source = "仅程序描述"
+                            logger.info("[DeviantArt] 保留预设描述开关已关闭，按现行为直接替换描述 (仅程序描述)")
+                        else:
+                            desc_source = "预设保留"
+                            logger.info("[DeviantArt] 保留预设描述开关已关闭且程序描述为空，保留表单现有文本")
+                    else:
+                        # 开关开启 (默认)
+                        if program_desc:
+                            # 框里有预设文本 + 程序描述非空 → 拼接后填入，顺序固定为：程序描述 + "\n\n" + 预设描述 (程序在前，预设在后)
+                            desc_to_fill = f"{program_desc}\n\n{preset_text}"
+                            desc_source = "拼接"
+                            logger.info(f"[DeviantArt] 描述框存在预设文本且程序描述非空，已执行拼接填入 (程序在前，预设在后)")
+                        else:
+                            # 框里有预设文本 + 程序描述为空 → 不碰描述框 (现行为，保留)
+                            desc_to_fill = None
+                            desc_source = "预设保留"
+                            logger.info(f"[DeviantArt] 描述框存在预设文本且程序描述为空，保留表单预设描述不触碰描述框: '{preset_text[:40]}...'")
+
+            if desc_to_fill is not None:
                 try:
-                    desc_area.evaluate("""(el, val) => {
-                        el.focus();
-                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                            el.value = val;
-                        } else {
-                            el.innerText = val;
-                        }
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }""", desc)
-                except Exception as e_js:
-                    logger.warning(f"[DeviantArt] 描述框 JS 注入提示: {e_js}")
-            page.wait_for_timeout(300)
+                    desc_area.click(timeout=3000)
+                    desc_area.fill(desc_to_fill, timeout=5000)
+                except Exception as e_desc:
+                    logger.debug(f"[DeviantArt] 描述框常规点击被拦截，切换 JS 安全注入: {e_desc}")
+                    try:
+                        desc_area.evaluate("""(el, val) => {
+                            el.focus();
+                            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                                el.value = val;
+                            } else {
+                                el.innerText = val;
+                            }
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""", desc_to_fill)
+                    except Exception as e_js:
+                        logger.warning(f"[DeviantArt] 描述框 JS 注入提示: {e_js}")
+                page.wait_for_timeout(300)
+
+        self._last_desc_source = desc_source
+        if compliance is not None and isinstance(compliance, list):
+            compliance.append(self.verify_compliance_item("deviantart", "description_source", True, True, desc_source))
 
         # 7. 勾选官方专用 AI 创作标识: "Created using AI tools"
         ai_selector = "input[type='checkbox'][name='isAiGenerated'], input[name='isAiGenerated'], label:has-text('Created using AI tools') input"
@@ -1358,9 +1465,9 @@ class DeviantArtDispatcher(BaseDispatcher):
         time.sleep(3)
         return True, ""
 
-    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance):
+    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, **kwargs):
         """兼容旧版单图调用的别名方法"""
-        return self._submit_deviation(page, context, [img_path], title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance)
+        return self._submit_deviation(page, context, [img_path], title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, **kwargs)
 
     def _count_deviantart_gallery_images(self, page, expected_count: int) -> int:
         """
@@ -1487,6 +1594,13 @@ class DeviantArtDispatcher(BaseDispatcher):
         is_ai = payload.get("platform_options", {}).get("deviantart_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
         gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
 
+        keep_preset = payload.get("deviantart_keep_preset_description")
+        if keep_preset is None:
+            keep_preset = payload.get("platform_options", {}).get("deviantart_keep_preset_description")
+        if keep_preset is None:
+            keep_preset = load_config().get("deviantart_keep_preset_description", True)
+        keep_preset = bool(keep_preset)
+
         da_max = payload.get("deviantart_max_images_per_deviation") or \
                  payload.get("platform_options", {}).get("deviantart_max_images_per_deviation", 10)
 
@@ -1522,10 +1636,17 @@ class DeviantArtDispatcher(BaseDispatcher):
                 page.wait_for_timeout(1500)
 
                 # 2. 单作品多图投稿
-                sub_ok, sub_msg = self._submit_deviation(
-                    page, context, images, title, desc, _tags,
-                    is_mature, mature_level, is_ai, gallery, compliance
-                )
+                try:
+                    sub_ok, sub_msg = self._submit_deviation(
+                        page, context, images, title, desc, _tags,
+                        is_mature, mature_level, is_ai, gallery, compliance,
+                        keep_preset_description=keep_preset
+                    )
+                except TypeError:
+                    sub_ok, sub_msg = self._submit_deviation(
+                        page, context, images, title, desc, _tags,
+                        is_mature, mature_level, is_ai, gallery, compliance
+                    )
                 if not sub_ok:
                     self.close_login_session(browser, context, page)
                     compliance.append(
@@ -1537,7 +1658,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                             f"单作品图集投稿失败: {sub_msg}"
                         )
                     )
-                    return False, f"DeviantArt 发布失败: {sub_msg}", compliance
+                    desc_source = getattr(self, "_last_desc_source", "仅程序描述") or "仅程序描述"
+                    return False, f"DeviantArt 发布失败: {sub_msg} (描述来源: {desc_source})", compliance
 
                 # 3. 成功断言: 访问作品页反查图集图片数 == 预期传入数 (不一致大声失败)
                 actual_count = self._count_deviantart_gallery_images(page, total_images)
@@ -1576,7 +1698,8 @@ class DeviantArtDispatcher(BaseDispatcher):
                         post_url
                     )
                 )
-                return True, f"DeviantArt 发布成功: {post_url} (单作品图集核验通过，包含 {total_images}/{total_images} 张图片)", compliance
+                desc_source = getattr(self, "_last_desc_source", "仅程序描述") or "仅程序描述"
+                return True, f"DeviantArt 发布成功: {post_url} (单作品图集核验通过，包含 {total_images}/{total_images} 张图片；描述来源: {desc_source})", compliance
         except Exception as e:
             self.last_published_url = None
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")

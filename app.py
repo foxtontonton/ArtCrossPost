@@ -4113,6 +4113,8 @@ class MainWindow(QMainWindow):
                         self.config["defaults"]["deviantart_mature"] = da_map.get(idx, "strict")
                     if "gallery" in da_opts:
                         self.config["defaults"]["deviantart_default_gallery"] = get_da_gallery_from_widget(da_opts["gallery"])
+                    if "keep_preset" in da_opts:
+                        self.config["defaults"]["deviantart_keep_preset_description"] = da_opts["keep_preset"].isChecked()
 
                 # Patreon
                 if "patreon" in self.platform_controls:
@@ -5312,6 +5314,13 @@ class MainWindow(QMainWindow):
             da_ai.stateChanged.connect(lambda: self._schedule_config_save())
             opts_layout.addWidget(da_ai)
             opts["ai"] = da_ai
+
+            da_keep_preset = QCheckBox("保留表单预设描述")
+            da_keep_preset.setToolTip("开启时保留并拼接 DA 预设描述（程序文案在首，预设在后）；关闭则直接替换")
+            da_keep_preset.setChecked(self.config.get("defaults", {}).get("deviantart_keep_preset_description", True))
+            da_keep_preset.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(da_keep_preset)
+            opts["keep_preset"] = da_keep_preset
 
         elif disp.name == "patreon":
             pat_censor = QCheckBox("打码保护")
@@ -7128,6 +7137,10 @@ class MainWindow(QMainWindow):
                 platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
             if "ai" in opts:
                 platform_options["deviantart_ai"] = opts["ai"].isChecked()
+            if "keep_preset" in opts:
+                platform_options["deviantart_keep_preset_description"] = opts["keep_preset"].isChecked()
+            else:
+                platform_options["deviantart_keep_preset_description"] = self.config.get("defaults", {}).get("deviantart_keep_preset_description", True)
             da_limit_val = self.config.get("defaults", {}).get(
                 "deviantart_max_images_per_deviation",
                 self.config.get("deviantart_max_images_per_deviation", 10)
@@ -7688,6 +7701,10 @@ class MainWindow(QMainWindow):
                 platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
             if "ai" in opts:
                 platform_options["deviantart_ai"] = opts["ai"].isChecked()
+            if "keep_preset" in opts:
+                platform_options["deviantart_keep_preset_description"] = opts["keep_preset"].isChecked()
+            else:
+                platform_options["deviantart_keep_preset_description"] = self.config.get("defaults", {}).get("deviantart_keep_preset_description", True)
             da_limit_val = self.config.get("defaults", {}).get(
                 "deviantart_max_images_per_deviation",
                 self.config.get("deviantart_max_images_per_deviation", 10)
