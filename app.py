@@ -57,6 +57,13 @@ from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_te
 from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
 from schedule_dialogs import ScheduledPublishDialog, ExpiredTasksDialog
 from history_manager import PublishHistoryManager
+from platform_icons import (
+    platform_icon,
+    ClickablePlatformIcon,
+    open_platform_profile,
+    get_platform_profile_url,
+    DEFAULT_PLATFORM_PROFILE_URLS,
+)
 
 
 class NoWheelEventFilter(QObject):
@@ -3051,8 +3058,11 @@ class SettingsDialog(QDialog):
             c_layout.setContentsMargins(14, 12, 14, 12)
             c_layout.setSpacing(8)
 
-            # 顶层：平台名称 (左) + 状态指示 (右)
+            # 顶层：平台官方图标与名称 (左) + 状态指示 (右)
             top_row = QHBoxLayout()
+            top_row.setSpacing(6)
+            icon_btn = ClickablePlatformIcon(disp.name, size=18, parent_window=self.main_window)
+            top_row.addWidget(icon_btn)
             p_name = QLabel(disp.display_name)
             p_name.setStyleSheet("font-weight: bold; color: #f3f4f6;")
             top_row.addWidget(p_name)
@@ -4755,7 +4765,9 @@ class MainWindow(QMainWindow):
 
         # X 文案实时预览面板 (P1-1)
         self.x_preview_tab = self._build_x_text_preview_tab()
-        self.center_tabs.addTab(self.x_preview_tab, "🐦 X (Twitter) 推文预览")
+        x_tab_icon = platform_icon("x")
+        x_tab_title = "X (Twitter) 推文预览" if not x_tab_icon.isNull() else "🐦 X (Twitter) 推文预览"
+        self.center_tabs.addTab(self.x_preview_tab, x_tab_icon, x_tab_title)
 
         center_layout.addWidget(self.center_tabs)
         self.main_splitter.addWidget(center_widget)
@@ -5153,10 +5165,13 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # 头部单行紧凑布局：[✔] 平台名称 + 用户名与状态徽标 + [登录/重新登录] 直接登录按钮
+        # 头部单行紧凑布局：[图标] [✔] 平台名称 + 用户名与状态徽标 + [登录/重新登录] 直接登录按钮
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
+
+        icon_btn = ClickablePlatformIcon(disp.name, size=18, parent_window=self)
+        header.addWidget(icon_btn)
 
         cb = QCheckBox(disp.display_name)
         selected_plats = self.config.get("selected_platforms", ["x_twitter", "deviantart"])
@@ -5379,7 +5394,8 @@ class MainWindow(QMainWindow):
             "dispatcher": disp,
             "options": opts,
             "status_lbl": status_lbl,
-            "login_btn": login_btn
+            "login_btn": login_btn,
+            "icon_btn": icon_btn
         }
         return card
 
@@ -6826,7 +6842,10 @@ class MainWindow(QMainWindow):
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                         import shutil
                         if str(clean_da_gif) != str(da_out_path):
-                            shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            try:
+                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            except shutil.SameFileError:
+                                pass
                         da_images.append(str(clean_da_gif))
                     except RuntimeError as e:
                         self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
@@ -6839,7 +6858,10 @@ class MainWindow(QMainWindow):
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
                             import shutil
                             if str(clean_da_gif) != str(da_out_path):
-                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                                try:
+                                    shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                                except shutil.SameFileError:
+                                    pass
                             da_images.append(str(clean_da_gif))
                         except RuntimeError as e:
                             self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
@@ -7054,7 +7076,10 @@ class MainWindow(QMainWindow):
                     if Path(da_target).exists():
                         import shutil
                         if str(clean_da_path) != str(da_target):
-                            shutil.copyfile(str(da_target), str(clean_da_path))
+                            try:
+                                shutil.copyfile(str(da_target), str(clean_da_path))
+                            except shutil.SameFileError:
+                                pass
                         da_images.append(str(clean_da_path))
                     else:
                         da_images.append(str(da_target))
@@ -7341,7 +7366,10 @@ class MainWindow(QMainWindow):
             """)
             row_layout = QHBoxLayout(row_frame)
             row_layout.setContentsMargins(6, 4, 6, 4)
-            row_layout.setSpacing(10)
+            row_layout.setSpacing(8)
+
+            icon_btn = ClickablePlatformIcon(disp_name, size=16, parent_window=self)
+            row_layout.addWidget(icon_btn)
 
             name_lbl = QLabel(f"<b>{disp_title}</b>")
             name_lbl.setStyleSheet("color: #f1f5f9; min-width: 90px;")
