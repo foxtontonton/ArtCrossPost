@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "civitai_resources_scope": "all",                    # 关联作用域: "all"(全图) | "cover"(仅封面首图)
     "use_da_post_link_for_traffic": True,                # DA 帖子 URL 透传引流到 X/Patreon (默认开启，失败回退主页)
     "civitai_tool": "ComfyUI",                           # 图片工具标注 (默认 "ComfyUI")
+    "deviantart_keep_preset_description": True,           # DA 发布保留表单预设描述 (默认 True，关闭则直接替换)
     "deviantart_known_galleries": [
         "Featured",
         "NSFW - Ai Training Clip",
@@ -86,6 +87,7 @@ DEFAULT_CONFIG = {
         "deviantart_mature": "strict",
         "deviantart_default_gallery": "", # 默认发布相册 (留空使用默认)
         "deviantart_censor": True,        # DeviantArt 专属打码保护开关
+        "deviantart_keep_preset_description": True, # DA 发布保留表单预设描述 (默认 True，关闭则直接替换)
         "deviantart_max_images_per_deviation": 10, # 单作品图片上限 (默认10张，Core会员可调至100)
         "civitai_max_images_per_post": 20, # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
         "civitai_resources": [],          # Civitai 关联模型资源 (支持 ID / URL / {"id": ..., "version": ...})
