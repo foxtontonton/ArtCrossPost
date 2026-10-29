@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
         "civitai_resources": [],          # Civitai 关联模型资源 (支持 ID / URL / {"id": ..., "version": ...})
         "civitai_resources_scope": "all", # 关联作用域: "all"(全图) | "cover"(仅封面首图)
         "civitai_tool": "ComfyUI",        # 图片工具标注 (默认 "ComfyUI")
+        "civitai_censor": False,          # Civitai 专属打码保护开关 (默认原图，可勾选启用打码)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
