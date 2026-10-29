@@ -57,6 +57,8 @@ from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_te
 from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
 from schedule_dialogs import ScheduledPublishDialog, ExpiredTasksDialog
 from history_manager import PublishHistoryManager
+from flow_layout import FlowLayout
+from ui_icons import get_ui_svg_icon, create_ui_icon_button
 
 
 class NoWheelEventFilter(QObject):
@@ -199,14 +201,25 @@ QPushButton#accentBtn:hover {{
     background-color: {accent_hover};
     border-color: {accent_hover};
 }}
-QPushButton:pressed, QPushButton#secondaryBtn:pressed, QPushButton#accentBtn:pressed {{
+QPushButton:pressed, QPushButton#secondaryBtn:pressed, QPushButton#accentBtn:pressed, QPushButton#iconBtn:pressed {{
     background-color: #1f1f2e;
     border: 1px solid {accent};
 }}
-QPushButton:disabled, QPushButton#secondaryBtn:disabled, QPushButton#accentBtn:disabled {{
+QPushButton:disabled, QPushButton#secondaryBtn:disabled, QPushButton#accentBtn:disabled, QPushButton#iconBtn:disabled {{
     background-color: #1a1a24;
     border: 1px solid #282838;
     color: #64748b;
+}}
+QPushButton#iconBtn {{
+    background-color: {card};
+    color: #ffffff;
+    border-radius: 6px;
+    padding: 2px;
+    border: 1px solid {border};
+}}
+QPushButton#iconBtn:hover {{
+    background-color: #272738;
+    border: 1px solid {accent};
 }}
 QPushButton#publishBtn {{
     background-color: #059669;
@@ -3265,10 +3278,13 @@ class SettingsDialog(QDialog):
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
         da_combo_row.addWidget(self.def_da_gallery_combo, 1)
 
-        self.btn_refresh_da_galleries = QPushButton("🔄 刷新相册列表")
-        self.btn_refresh_da_galleries.setObjectName("secondaryBtn")
-        self.btn_refresh_da_galleries.setToolTip("从 DeviantArt 账号拉取最新真实相册列表")
-        self.btn_refresh_da_galleries.setStyleSheet("font-size: 11px; padding: 4px 10px;")
+        self.btn_refresh_da_galleries = create_ui_icon_button(
+            icon_name="refresh.svg",
+            tooltip="刷新相册列表",
+            btn_size=28,
+            icon_size=18,
+            object_name="iconBtn"
+        )
         self.btn_refresh_da_galleries.clicked.connect(self._on_sync_da_galleries_clicked)
         da_combo_row.addWidget(self.btn_refresh_da_galleries)
 
@@ -3590,10 +3606,14 @@ class SettingsDialog(QDialog):
                 QMessageBox.critical(self, "刷新相册失败", "未找到 DeviantArt 分发器组件")
                 return
             self.btn_refresh_da_galleries.setEnabled(False)
-            self.btn_refresh_da_galleries.setText("⏳ 正在刷新...")
+            if self.btn_refresh_da_galleries.text():
+                self.btn_refresh_da_galleries.setText("⏳ 正在刷新...")
+            self.btn_refresh_da_galleries.setToolTip("正在刷新相册列表...")
             ok, gals, msg = da_disp.fetch_galleries()
             self.btn_refresh_da_galleries.setEnabled(True)
-            self.btn_refresh_da_galleries.setText("🔄 刷新相册列表")
+            if self.btn_refresh_da_galleries.text():
+                self.btn_refresh_da_galleries.setText("🔄 刷新相册列表")
+            self.btn_refresh_da_galleries.setToolTip("刷新相册列表")
             if ok:
                 self.config["deviantart_known_galleries"] = gals
                 save_config(self.config)
@@ -4164,11 +4184,13 @@ class MainWindow(QMainWindow):
         font_lbl.setStyleSheet("color: #9ca3af; font-weight: 500;")
         font_bar.addWidget(font_lbl)
 
-        self.zoom_out_btn = QPushButton("➖")
-        self.zoom_out_btn.setObjectName("secondaryBtn")
-        self.zoom_out_btn.setToolTip("缩小界面字号 (-1px)")
-        self.zoom_out_btn.setFixedWidth(34)
-        self.zoom_out_btn.setMinimumHeight(28)
+        self.zoom_out_btn = create_ui_icon_button(
+            icon_name="text_decrease.svg",
+            tooltip="缩小界面字号 (-1px)",
+            btn_size=28,
+            icon_size=18,
+            object_name="iconBtn"
+        )
         self.zoom_out_btn.clicked.connect(lambda: self._adjust_ui_font_size(-1))
         font_bar.addWidget(self.zoom_out_btn)
 
@@ -4183,11 +4205,13 @@ class MainWindow(QMainWindow):
         self.header_font_spin.valueChanged.connect(self._on_header_font_changed)
         font_bar.addWidget(self.header_font_spin)
 
-        self.zoom_in_btn = QPushButton("➕")
-        self.zoom_in_btn.setObjectName("secondaryBtn")
-        self.zoom_in_btn.setToolTip("放大界面字号 (+1px)")
-        self.zoom_in_btn.setFixedWidth(34)
-        self.zoom_in_btn.setMinimumHeight(28)
+        self.zoom_in_btn = create_ui_icon_button(
+            icon_name="text_increase.svg",
+            tooltip="放大界面字号 (+1px)",
+            btn_size=28,
+            icon_size=18,
+            object_name="iconBtn"
+        )
         self.zoom_in_btn.clicked.connect(lambda: self._adjust_ui_font_size(1))
         font_bar.addWidget(self.zoom_in_btn)
 
@@ -5212,7 +5236,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         # 平台专有选项行
-        opts_layout = QHBoxLayout()
+        if disp.name == "deviantart":
+            opts_layout = FlowLayout()
+            opts_layout.setContentsMargins(0, 2, 0, 0)
+            opts_layout.setSpacing(8)
+        else:
+            opts_layout = QHBoxLayout()
         opts = {}
 
         if disp.name == "x_twitter":
@@ -5274,7 +5303,13 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(da_censor)
             opts["censor"] = da_censor
 
-            opts_layout.addWidget(QLabel("Mature:"))
+            # Mature 选项容器 (标签与下拉框成组，避免跨行错位)
+            mature_box = QWidget()
+            mature_box.setStyleSheet("background: transparent; border: none;")
+            mature_layout = QHBoxLayout(mature_box)
+            mature_layout.setContentsMargins(0, 0, 0, 0)
+            mature_layout.setSpacing(4)
+            mature_layout.addWidget(QLabel("Mature:"))
             da_combo = QComboBox()
             make_responsive_combo(da_combo)
             da_combo.addItems(["Strict (严格成人)", "Moderate (轻度)", "None (全年龄)"])
@@ -5282,32 +5317,40 @@ class MainWindow(QMainWindow):
             da_map = {"strict": 0, "moderate": 1, "none": 2}
             da_combo.setCurrentIndex(da_map.get(da_mature, 0))
             da_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-            opts_layout.addWidget(da_combo)
+            mature_layout.addWidget(da_combo)
+            opts_layout.addWidget(mature_box)
             opts["mature"] = da_combo
 
             # 发布相册 (Gallery: 包含真实相册列表，支持下拉选择或直接输入)
-            gal_label_row = QHBoxLayout()
-            gal_label_row.setSpacing(8)
-            gal_label_row.addWidget(QLabel("相册 (Gallery):"))
-            gal_label_row.addStretch()
-
-            btn_refresh_da = QPushButton("🔄 刷新相册列表")
-            btn_refresh_da.setObjectName("secondaryBtn")
-            btn_refresh_da.setToolTip("从 DeviantArt 账号拉取最新真实相册列表")
-            btn_refresh_da.setStyleSheet("font-size: 11px; padding: 2px 8px;")
-            gal_label_row.addWidget(btn_refresh_da)
-            opts_layout.addLayout(gal_label_row)
+            gal_box = QWidget()
+            gal_box.setStyleSheet("background: transparent; border: none;")
+            gal_layout = QHBoxLayout(gal_box)
+            gal_layout.setContentsMargins(0, 0, 0, 0)
+            gal_layout.setSpacing(4)
+            gal_layout.addWidget(QLabel("相册 (Gallery):"))
 
             da_gallery_combo = QComboBox()
             make_responsive_combo(da_gallery_combo)
             da_gallery_combo.setEditable(True)
+            da_gallery_combo.setMinimumWidth(110)
             self.da_gallery_combo = da_gallery_combo
             self._populate_da_gallery_combo(da_gallery_combo)
-
-            btn_refresh_da.clicked.connect(lambda: self.sync_da_galleries(sender_btn=btn_refresh_da))
             da_gallery_combo.currentTextChanged.connect(lambda: self._schedule_config_save())
-            opts_layout.addWidget(da_gallery_combo)
+            gal_layout.addWidget(da_gallery_combo)
+
+            btn_refresh_da = create_ui_icon_button(
+                icon_name="refresh.svg",
+                tooltip="刷新相册列表",
+                btn_size=28,
+                icon_size=18,
+                object_name="iconBtn"
+            )
+            btn_refresh_da.clicked.connect(lambda: self.sync_da_galleries(sender_btn=btn_refresh_da))
+            gal_layout.addWidget(btn_refresh_da)
+
+            opts_layout.addWidget(gal_box)
             opts["gallery"] = da_gallery_combo
+            opts["refresh_btn"] = btn_refresh_da
 
             da_ai = QCheckBox("Created using AI tools")
             da_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
@@ -5563,12 +5606,16 @@ class MainWindow(QMainWindow):
 
         if sender_btn:
             sender_btn.setEnabled(False)
-            sender_btn.setText("⏳ 正在刷新...")
+            if sender_btn.text():
+                sender_btn.setText("⏳ 正在刷新...")
+            sender_btn.setToolTip("正在刷新相册列表...")
 
         def _on_done(ok, gals, msg):
             if sender_btn:
                 sender_btn.setEnabled(True)
-                sender_btn.setText("🔄 刷新相册列表")
+                if sender_btn.text():
+                    sender_btn.setText("🔄 刷新相册列表")
+                sender_btn.setToolTip("刷新相册列表")
 
             if ok:
                 self.config["deviantart_known_galleries"] = gals
@@ -6826,7 +6873,10 @@ class MainWindow(QMainWindow):
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                         import shutil
                         if str(clean_da_gif) != str(da_out_path):
-                            shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            try:
+                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            except shutil.SameFileError:
+                                pass
                         da_images.append(str(clean_da_gif))
                     except RuntimeError as e:
                         self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
@@ -6839,7 +6889,10 @@ class MainWindow(QMainWindow):
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
                             import shutil
                             if str(clean_da_gif) != str(da_out_path):
-                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                                try:
+                                    shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                                except shutil.SameFileError:
+                                    pass
                             da_images.append(str(clean_da_gif))
                         except RuntimeError as e:
                             self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
@@ -7054,7 +7107,10 @@ class MainWindow(QMainWindow):
                     if Path(da_target).exists():
                         import shutil
                         if str(clean_da_path) != str(da_target):
-                            shutil.copyfile(str(da_target), str(clean_da_path))
+                            try:
+                                shutil.copyfile(str(da_target), str(clean_da_path))
+                            except shutil.SameFileError:
+                                pass
                         da_images.append(str(clean_da_path))
                     else:
                         da_images.append(str(da_target))
