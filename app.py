@@ -1938,11 +1938,42 @@ def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     return compress_gif_frames(frames, duration, loop, out_p, max_limit_mb, log_prefix="[GIF Optimizer]")
 
 
+def link_or_copy_file(src, dst):
+    """
+    优先使用 os.link 创建硬链接（同卷零额外占用），
+    若目标已存在先尝试删除；若 link 失败（跨卷或权限等）回退至 shutil.copyfile。
+    """
+    import os
+    import shutil
+    from pathlib import Path
+    src_p = Path(src)
+    dst_p = Path(dst)
+    try:
+        if src_p.resolve() == dst_p.resolve():
+            return str(dst_p)
+    except Exception:
+        if str(src_p) == str(dst_p):
+            return str(dst_p)
+
+    dst_p.parent.mkdir(parents=True, exist_ok=True)
+    if dst_p.exists():
+        try:
+            dst_p.unlink()
+        except Exception:
+            pass
+
+    try:
+        os.link(str(src_p), str(dst_p))
+    except Exception:
+        shutil.copyfile(str(src_p), str(dst_p))
+    return str(dst_p)
+
+
 def optimize_static_image(input_img_path, output_img_path, max_limit_mb=None, quality=88, compress_only_when_over_limit=True):
     """
     静态图 (JPEG/PNG/WEBP) 专用压缩优化分支:
     - 现有管线逐张复用：JPEG 走静态图压缩分支
-    - compress_only_when_over_limit=True 时：若原图已是 JPEG 且未超过 max_limit_mb，则保持原始画质放行，严禁无损变有损过度压缩
+    - compress_only_when_over_limit=True 时：若原图已是 JPEG 且未超过 max_limit_mb，则保持原始画质放行，不生成多余副本，严禁无损变有损过度压缩
     - 若原图为 PNG/WEBP 或体积超限，则转码并压缩为高质量 JPEG (RGB)，优化色度采样子带
     - 若配置了 max_limit_mb 且输出超限，则自适应梯度调节 quality (88 -> 80 -> 72 -> 65)
       或等比微调缩放尺寸，确保体积严格满足限制。
@@ -1950,19 +1981,18 @@ def optimize_static_image(input_img_path, output_img_path, max_limit_mb=None, qu
     import shutil
     in_p = Path(input_img_path)
     out_p = Path(output_img_path)
-    out_p.parent.mkdir(parents=True, exist_ok=True)
 
     in_size = in_p.stat().st_size
     is_jpeg = in_p.suffix.lower() in (".jpg", ".jpeg")
 
-    # 保护原始画质：原图已是 JPEG 且体积未超限时，直接复制无损放行
+    # 保护原始画质：原图已是 JPEG 且体积未超限时，直接放行原图，不生成多余副本
     if compress_only_when_over_limit and is_jpeg and max_limit_mb is not None:
         max_bytes = max_limit_mb * 1024 * 1024
         if in_size <= max_bytes:
-            if str(in_p.resolve()) != str(out_p.resolve()):
-                shutil.copy2(str(in_p), str(out_p))
             logger.info(f"[Image Optimizer] 静态图体积 ({in_size / 1024 / 1024:.2f}MB) 未超过上限 ({max_limit_mb:.2f}MB)，保持原始无损放行")
-            return str(out_p)
+            return str(in_p)
+
+    out_p.parent.mkdir(parents=True, exist_ok=True)
 
     with Image.open(str(in_p)) as im:
         # 处理透明通道转换为白色背景 RGB
@@ -6824,9 +6854,8 @@ class MainWindow(QMainWindow):
                     da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
                     try:
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
-                        import shutil
                         if str(clean_da_gif) != str(da_out_path):
-                            shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                            link_or_copy_file(da_out_path, clean_da_gif)
                         da_images.append(str(clean_da_gif))
                     except RuntimeError as e:
                         self.notify(f"DeviantArt 高清 GIF 合成失败: {e}", level="error")
@@ -6837,9 +6866,8 @@ class MainWindow(QMainWindow):
                         da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_wm.gif"
                         try:
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
-                            import shutil
                             if str(clean_da_gif) != str(da_out_path):
-                                shutil.copyfile(str(da_out_path), str(clean_da_gif))
+                                link_or_copy_file(da_out_path, clean_da_gif)
                             da_images.append(str(clean_da_gif))
                         except RuntimeError as e:
                             self.notify(f"DeviantArt 水印 GIF 合成失败: {e}", level="error")
@@ -6905,16 +6933,32 @@ class MainWindow(QMainWindow):
                         x_video_final_path = str(out_mp4)
                         x_images_map[p] = x_video_final_path
                     else:
-                        # Rule 12: 无配对视频（或多图帖）时保留现行 GIF 路径不变
-                        x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
-                        x_c = c_params if is_x_censor else None
-                        try:
-                            self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
-                        except RuntimeError as e:
-                            self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
-                            logger.error(f"[发布准备] {e}")
-                            return
-                        x_images_map[p] = str(x_out_path)
+                        # Rule 12: 无配对视频（或多图帖）时动图分支：检查跨平台复用
+                        reused_x_gif = None
+                        if is_x_censor == is_da_censor:
+                            if da_out_path and Path(da_out_path).exists():
+                                da_sz = Path(da_out_path).stat().st_size
+                                if da_sz <= 13.8 * 1024 * 1024:
+                                    reused_x_gif = str(da_out_path)
+                                    logger.info(f"[GIF Optimizer] X (Twitter) 复用 DA 动图渲染结果 (体积 {da_sz / 1024 / 1024:.2f}MB ≤ 13.8MB，参数一致)")
+                            elif not wm_info:
+                                p_sz = Path(p).stat().st_size
+                                if p_sz <= 13.8 * 1024 * 1024:
+                                    reused_x_gif = str(p)
+                                    logger.info(f"[GIF Optimizer] X (Twitter) 复用原始动图 (体积 {p_sz / 1024 / 1024:.2f}MB ≤ 13.8MB，无码无水印)")
+
+                        if reused_x_gif:
+                            x_images_map[p] = reused_x_gif
+                        else:
+                            x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
+                            x_c = c_params if is_x_censor else None
+                            try:
+                                self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
+                            except RuntimeError as e:
+                                self.notify(f"X (Twitter) 动图压缩超限失败: {e}", level="error")
+                                logger.error(f"[发布准备] {e}")
+                                return
+                            x_images_map[p] = str(x_out_path)
                 else:
                     x_images_map[p] = da_images[-1]
 
@@ -6949,7 +6993,26 @@ class MainWindow(QMainWindow):
 
                 # 4. Ko-fi 动图 (严格 ≤ 3.8MB 门禁，保障官方动效播放)
                 if is_kofi_selected:
-                    if is_kofi_censor:
+                    reused_kofi_gif = None
+                    # 检查 DA 渲染产物是否可复用
+                    if is_kofi_censor == is_da_censor and da_out_path and Path(da_out_path).exists():
+                        da_sz = Path(da_out_path).stat().st_size
+                        if da_sz <= 3.8 * 1024 * 1024:
+                            reused_kofi_gif = str(da_out_path)
+                            logger.info(f"[Pre-publish Gate] [Ko-fi] 复用 DA 动图渲染结果 (体积 {da_sz / 1024 / 1024:.2f}MB ≤ 3.8MB，参数一致)")
+
+                    # 若 DA 产物未命中，检查 X 渲染产物是否可复用
+                    if not reused_kofi_gif and is_x_selected and (is_kofi_censor == is_x_censor):
+                        candidate_x = x_images_map.get(p)
+                        if candidate_x and candidate_x.lower().endswith(".gif") and Path(candidate_x).exists():
+                            x_sz = Path(candidate_x).stat().st_size
+                            if x_sz <= 3.8 * 1024 * 1024:
+                                reused_kofi_gif = candidate_x
+                                logger.info(f"[Pre-publish Gate] [Ko-fi] 复用 X 动图渲染结果 (体积 {x_sz / 1024 / 1024:.2f}MB ≤ 3.8MB，参数一致)")
+
+                    if reused_kofi_gif:
+                        kofi_images.append(reused_kofi_gif)
+                    elif is_kofi_censor:
                         kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_censor.gif"
                         try:
                             self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=3.8)
@@ -6991,7 +7054,6 @@ class MainWindow(QMainWindow):
                 # 静态图片处理
                 any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
                 pub_censor_path = None
-                clean_censor_path = None
 
                 if any_censor:
                     effective_boxes = self._get_effective_censor_boxes(
@@ -7026,9 +7088,6 @@ class MainWindow(QMainWindow):
                         pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored.{ext}"
                         cv2.imwrite(str(pub_censor_path), censored_bgr)
 
-                    clean_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_clean.{ext}"
-                    cv2.imwrite(str(clean_censor_path), censored_bgr)
-
                 if wm_info:
                     pub_raw_path = CACHE_DIR / f"{safe_title}_{idx}_raw_wm.{ext}"
                     self.watermark_engine.apply_watermark(
@@ -7046,15 +7105,14 @@ class MainWindow(QMainWindow):
                 else:
                     pub_raw_path = Path(p)
 
-                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，复制为洁净文件名；首图必须为作品本体名不带编号)
+                # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，硬链接/复制为洁净文件名；首图必须为作品本体名不带编号)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
                 clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
                 clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
                 try:
                     if Path(da_target).exists():
-                        import shutil
                         if str(clean_da_path) != str(da_target):
-                            shutil.copyfile(str(da_target), str(clean_da_path))
+                            link_or_copy_file(da_target, clean_da_path)
                         da_images.append(str(clean_da_path))
                     else:
                         da_images.append(str(da_target))
@@ -7070,12 +7128,12 @@ class MainWindow(QMainWindow):
                     x_quality = cfg_comp.get("jpeg_quality", 88)
                     x_only_over = cfg_comp.get("compress_only_when_over_limit", True)
                     try:
-                        optimize_static_image(x_target, opt_jpg, max_limit_mb=x_limit, quality=x_quality, compress_only_when_over_limit=x_only_over)
-                        x_images_map[p] = str(opt_jpg)
+                        final_x_path = optimize_static_image(x_target, opt_jpg, max_limit_mb=x_limit, quality=x_quality, compress_only_when_over_limit=x_only_over)
+                        x_images_map[p] = str(final_x_path)
                         in_mb = Path(x_target).stat().st_size / (1024 * 1024)
-                        out_mb = Path(opt_jpg).stat().st_size / (1024 * 1024)
+                        out_mb = Path(final_x_path).stat().st_size / (1024 * 1024)
                         if in_mb <= x_limit:
-                            if abs(in_mb - out_mb) < 0.001:
+                            if abs(in_mb - out_mb) < 0.001 and (str(final_x_path) == str(x_target) or Path(x_target).suffix.lower() in (".jpg", ".jpeg")):
                                 logger.info(f"[Image Optimizer] X 静态图保持原始无损放行: {in_mb:.2f}MB (未超门禁 ≤{x_limit}MB)")
                             else:
                                 logger.info(f"[Image Optimizer] X 静态图格式转码 (PNG/WebP -> JPEG): {in_mb:.2f}MB -> {out_mb:.2f}MB (质量={x_quality})")
@@ -7088,22 +7146,27 @@ class MainWindow(QMainWindow):
                     x_images_map[p] = str(x_target)
 
                 # Patreon 静态图
-                if is_pat_censor:
-                    pat_target = pub_censor_path if wm_info else (clean_censor_path or pub_censor_path)
-                else:
-                    pat_target = pub_raw_path if wm_info else Path(p)
+                pat_target = pub_censor_path if is_pat_censor else pub_raw_path
                 patreon_images.append(str(pat_target))
 
                 # Ko-fi 静态图
-                if is_kofi_censor:
-                    kofi_target = pub_censor_path if wm_info else (clean_censor_path or pub_censor_path)
-                else:
-                    kofi_target = pub_raw_path if wm_info else Path(p)
+                kofi_target = pub_censor_path if is_kofi_censor else pub_raw_path
                 kofi_images.append(str(kofi_target))
 
         # X (Twitter) 专属图按选用状态提取：勾选则按缩略图排序取勾选的最多4张；未勾选则回退取前4张
         x_candidate_paths = self.get_x_selected_images()
         x_images = [x_images_map[p] for p in x_candidate_paths if p in x_images_map]
+
+        # 清理生成后最终未被 X 选用的 _xopt.jpg 缓存残骸
+        x_selected_set = set(x_images)
+        for _p, mapped_path in x_images_map.items():
+            if mapped_path and mapped_path not in x_selected_set:
+                mp = Path(mapped_path)
+                if mp.name.endswith("_xopt.jpg") and mp.exists():
+                    try:
+                        mp.unlink()
+                    except Exception as e:
+                        logger.debug(f"[Image Optimizer] 清理未选用 xopt 文件失败: {e}")
 
         tags = split_and_normalize_tags(self.tags_input.toPlainText())
 
