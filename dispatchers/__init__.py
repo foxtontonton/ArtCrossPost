@@ -3,6 +3,7 @@ from .x_twitter import XTwitterDispatcher
 from .deviantart import DeviantArtDispatcher
 from .monetization import PatreonDispatcher, KofiDispatcher
 from .civitai import CivitaiDispatcher
+from .bluesky import BlueskyDispatcher
 
 def get_all_dispatchers(cookies_dir):
     return [
@@ -10,5 +11,6 @@ def get_all_dispatchers(cookies_dir):
         DeviantArtDispatcher(cookies_dir),
         PatreonDispatcher(cookies_dir),
         KofiDispatcher(cookies_dir),
-        CivitaiDispatcher(cookies_dir)
+        CivitaiDispatcher(cookies_dir),
+        BlueskyDispatcher(cookies_dir)
     ]
