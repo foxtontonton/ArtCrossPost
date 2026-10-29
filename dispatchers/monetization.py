@@ -19,6 +19,21 @@ try:
 except ImportError:
     from ..config import load_config
 
+try:
+    from signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+except ImportError:
+    from ..signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+
 logger = get_logger("Monetization")
 
 class PatreonDispatcher(BaseDispatcher):
@@ -566,9 +581,60 @@ class PatreonDispatcher(BaseDispatcher):
                     if tag_line and tag_line not in full_desc:
                         full_desc = f"{full_desc}\n\n{tag_line}".strip() if full_desc else tag_line
 
-                desc_area = page.query_selector("div[contenteditable='true'], textarea:not([placeholder='Title'])")
+                desc_area = page.query_selector("div[contenteditable='true'], div.ProseMirror, textarea:not([placeholder='Title'])")
                 if desc_area and full_desc:
-                    desc_area.fill(full_desc)
+                    try:
+                        desc_area.click()
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+
+                    if has_signature(full_desc):
+                        html_content = render_description_to_html(full_desc)
+                        try:
+                            desc_area.evaluate("""(el, html) => {
+                                el.focus();
+                                const sel = window.getSelection();
+                                sel.selectAllChildren(el);
+                                const ok = document.execCommand('insertHTML', false, html);
+                                if (!ok) {
+                                    el.innerHTML = html;
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
+                            }""", html_content)
+                        except Exception as e_rich:
+                            logger.warning(f"[Patreon] ProseMirror 富文本真超链接注入提示: {e_rich}，回退 fill")
+                            desc_area.fill(full_desc)
+
+                        time.sleep(0.5)
+
+                        # 提交前回读断言: 回读编辑器 HTML，断言 5 个签名链接全部存在
+                        readback_html = ""
+                        try:
+                            val = desc_area.evaluate("el => el.innerHTML || ''")
+                            if isinstance(val, str):
+                                readback_html = val
+                        except Exception:
+                            if hasattr(desc_area, "inner_html"):
+                                try:
+                                    ib = desc_area.inner_html()
+                                    if isinstance(ib, str):
+                                        readback_html = ib
+                                except Exception:
+                                    pass
+
+                        sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url)
+                        if not sig_ok:
+                            missing_str = ", ".join(sig_missing)
+                            logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                            self.close_login_session(browser, context)
+                            return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
+                        logger.info("[Patreon] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
+                        compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "5/5 真超链接已生效"))
+                    else:
+                        desc_area.fill(full_desc)
+                        time.sleep(0.5)
 
                 # 3.5 添加原生标签 (Patreon 官方标签输入框)
                 if tags:

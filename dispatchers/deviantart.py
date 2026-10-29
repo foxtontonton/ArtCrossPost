@@ -26,6 +26,21 @@ except ImportError:
     except ImportError:
         load_config = lambda: {}
 
+try:
+    from signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+except ImportError:
+    from ..signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+
 logger = get_logger("DeviantArt")
 
 class DeviantArtDispatcher(BaseDispatcher):
@@ -771,6 +786,56 @@ class DeviantArtDispatcher(BaseDispatcher):
                         }""", desc_to_fill)
                     except Exception as e_js:
                         logger.warning(f"[DeviantArt] 描述框 JS 注入提示: {e_js}")
+
+                # 富文本真超链接渲染 (需求: 全平台统一程序签名，带真超链接)
+                # 当描述包含签名时，通过 Tiptap/ProseMirror insertHTML 或 setContent 通道渲染为真实 <a> 标签
+                if has_signature(desc_to_fill):
+                    html_content = render_description_to_html(desc_to_fill)
+                    try:
+                        desc_area.evaluate("""(el, html) => {
+                            el.focus();
+                            if (el.editor && typeof el.editor.commands.setContent === 'function') {
+                                el.editor.commands.setContent(html);
+                                return;
+                            }
+                            const sel = window.getSelection();
+                            sel.selectAllChildren(el);
+                            const ok = document.execCommand('insertHTML', false, html);
+                            if (!ok) {
+                                el.innerHTML = html;
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                            }
+                        }""", html_content)
+                    except Exception as e_rich:
+                        logger.warning(f"[DeviantArt] 描述框富文本真超链接注入提示: {e_rich}")
+
+                    page.wait_for_timeout(300)
+
+                    # 提交前回读断言: 填完后回读编辑器 HTML，断言 5 个签名链接的 <a href="目标URL"> 全部存在
+                    readback_html = ""
+                    try:
+                        val = desc_area.evaluate("el => el.innerHTML || ''")
+                        if isinstance(val, str):
+                            readback_html = val
+                    except Exception:
+                        if hasattr(desc_area, "inner_html"):
+                            try:
+                                ib = desc_area.inner_html()
+                                if isinstance(ib, str):
+                                    readback_html = ib
+                            except Exception:
+                                pass
+
+                    sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
+                    if not sig_ok:
+                        missing_str = ", ".join(sig_missing)
+                        logger.error(f"[DeviantArt] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                        return False, f"DeviantArt 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}。发布已中止，草稿保留在 Studio。"
+                    logger.info("[DeviantArt] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
+                    if compliance is not None and isinstance(compliance, list):
+                        compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, "5/5 真超链接已生效"))
+
                 page.wait_for_timeout(300)
 
         self._last_desc_source = desc_source
