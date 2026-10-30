@@ -7,6 +7,7 @@ ArtCrossPost - Bluesky Dispatcher (AT Protocol 官方开放 API 路线)
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,9 +26,13 @@ except ImportError:
 
 BSKY_HOST = "https://bsky.social"
 XRPC_BASE = f"{BSKY_HOST}/xrpc"
+BSKY_VIDEO_HOST = "https://video.bsky.app"
+BSKY_VIDEO_SERVICE_DID = "did:web:video.bsky.app"
 MAX_GRAPHEMES = 300
 MAX_IMAGES = 4
 MAX_BLOB_SIZE = 950_000  # 950KB 安全门禁 (Bluesky 上限 1,000,000 字节)
+MAX_VIDEO_SIZE_MB = 300.0  # 官方限制 300MB
+MAX_VIDEO_DURATION_SEC = 600.0  # 官方限制 10 分钟 (600 秒)
 
 
 def count_graphemes(text: str) -> int:
@@ -457,24 +462,177 @@ class BlueskyDispatcher(BaseDispatcher):
             return True, login_result["msg"]
         return False, login_result["msg"]
 
+    def get_service_auth(
+        self,
+        access_jwt: str,
+        aud: str = BSKY_VIDEO_SERVICE_DID,
+        lxm: str = "com.atproto.repo.uploadBlob",
+        exp_seconds: int = 1800
+    ) -> Tuple[Optional[str], str]:
+        """获取视频服务的短效服务授权 Token (com.atproto.server.getServiceAuth)"""
+        headers = {"Authorization": f"Bearer {access_jwt}"}
+        exp_timestamp = int(datetime.now(timezone.utc).timestamp()) + exp_seconds
+        params = {
+            "aud": aud,
+            "lxm": lxm,
+            "exp": exp_timestamp
+        }
+        try:
+            resp = requests.get(
+                f"{XRPC_BASE}/com.atproto.server.getServiceAuth",
+                headers=headers,
+                params=params,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                token = resp.json().get("token")
+                if token:
+                    return token, ""
+                return None, f"getServiceAuth 响应缺少 token 字段: {resp.text}"
+            return None, f"getServiceAuth 失败 (HTTP {resp.status_code}): {resp.text}"
+        except Exception as e:
+            return None, f"getServiceAuth 请求网络异常: {e}"
+
+    def poll_job_status(
+        self,
+        job_id: str,
+        service_token: Optional[str] = None,
+        poll_interval: float = 1.0,
+        timeout_seconds: float = 60.0
+    ) -> Tuple[Optional[dict], str]:
+        """轮询 app.bsky.video.getJobStatus 直至完成、失败或超时"""
+        status_url = f"{BSKY_VIDEO_HOST}/xrpc/app.bsky.video.getJobStatus"
+        headers = {}
+        if service_token:
+            headers["Authorization"] = f"Bearer {service_token}"
+
+        start_time = time.time()
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout_seconds:
+                return None, f"视频转码轮询超时 ({timeout_seconds:.0f}s)"
+
+            try:
+                resp = requests.get(
+                    status_url,
+                    params={"jobId": job_id},
+                    headers=headers,
+                    timeout=15
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    job_status = data.get("jobStatus", {})
+                    state = str(job_status.get("state", "")).upper()
+                    if state in ("JOB_STATE_COMPLETED", "COMPLETED"):
+                        blob = job_status.get("blob")
+                        if blob:
+                            return blob, ""
+                        return None, "视频处理完成但未返回 blob 数据"
+                    elif state in ("JOB_STATE_FAILED", "FAILED"):
+                        err_msg = job_status.get("error") or job_status.get("message") or "未知错误"
+                        return None, f"视频转码失败: {err_msg}"
+                    else:
+                        logger.debug(f"[Bluesky] 视频转码进行中 (state={state}, progress={job_status.get('progress', 0)}%)...")
+                else:
+                    logger.debug(f"[Bluesky] 查询任务状态返回 HTTP {resp.status_code}: {resp.text}")
+            except Exception as e:
+                logger.debug(f"[Bluesky] 查询任务状态网络异常: {e}")
+
+            time.sleep(poll_interval)
+
+    def upload_video(
+        self,
+        video_path: str,
+        access_jwt: str,
+        did: str,
+        poll_interval: float = 1.0,
+        timeout_seconds: float = 60.0
+    ) -> Tuple[Optional[dict], str]:
+        """
+        调用 Bluesky 官方 video.bsky.app 微服务上传视频 (P0-1 ~ P0-3):
+        1. 门禁检查 (体积 <= 300MB, 时长 <= 600s)
+        2. 获取 service auth token
+        3. POST video.bsky.app/xrpc/app.bsky.video.uploadVideo 上传二进制
+        4. 轮询 getJobStatus 获取最终 processed BlobRef，超时/失败报错
+        """
+        from video_engine import validate_bluesky_video_constraints
+        valid_ok, valid_msg = validate_bluesky_video_constraints(
+            video_path,
+            max_size_mb=MAX_VIDEO_SIZE_MB,
+            max_duration_sec=MAX_VIDEO_DURATION_SEC
+        )
+        if not valid_ok:
+            return None, f"视频门禁拦截: {valid_msg}"
+
+        service_token, auth_err = self.get_service_auth(
+            access_jwt,
+            aud=BSKY_VIDEO_SERVICE_DID,
+            lxm="com.atproto.repo.uploadBlob"
+        )
+        if not service_token:
+            return None, f"获取视频服务授权失败: {auth_err}"
+
+        vp = Path(video_path)
+        try:
+            video_bytes = vp.read_bytes()
+        except Exception as e:
+            return None, f"读取视频文件失败: {e}"
+
+        upload_url = f"{BSKY_VIDEO_HOST}/xrpc/app.bsky.video.uploadVideo"
+        upload_params = {"did": did, "name": vp.name}
+        upload_headers = {
+            "Authorization": f"Bearer {service_token}",
+            "Content-Type": "video/mp4"
+        }
+
+        try:
+            resp = requests.post(
+                upload_url,
+                params=upload_params,
+                headers=upload_headers,
+                data=video_bytes,
+                timeout=60
+            )
+            if resp.status_code not in (200, 202):
+                return None, f"视频上传至 video.bsky.app 失败 (HTTP {resp.status_code}): {resp.text}"
+
+            data = resp.json()
+            job_status = data.get("jobStatus", {})
+            job_id = job_status.get("jobId") or data.get("jobId")
+            if not job_id:
+                if job_status.get("blob"):
+                    return job_status["blob"], ""
+                return None, f"视频上传成功但响应中无 jobId: {data}"
+        except Exception as e:
+            return None, f"视频上传网络异常: {e}"
+
+        return self.poll_job_status(
+            job_id,
+            service_token=service_token,
+            poll_interval=poll_interval,
+            timeout_seconds=timeout_seconds
+        )
+
     def _upload_image_blob(self, img_path: str, access_jwt: str) -> Tuple[Optional[dict], str]:
-        """调用 com.atproto.repo.uploadBlob 上传图片，超出 950KB 门禁自动压缩转码"""
+        """调用 com.atproto.repo.uploadBlob 上传图片，超出 950KB 门禁自动压缩转码 (P0-3 仅允许静态格式)"""
         path = Path(img_path)
         if not path.is_file():
             return None, f"文件不存在: {img_path}"
 
+        suffix = path.suffix.lower()
+        if suffix == ".gif":
+            return None, "GIF 动图不支持通过图片通道上传 (存在静默压缩为静态图风险)，必须走视频独立管线"
+
         raw_bytes = path.read_bytes()
         mime_type = "image/jpeg"
-        if path.suffix.lower() == ".png":
+        if suffix == ".png":
             mime_type = "image/png"
-        elif path.suffix.lower() == ".webp":
+        elif suffix == ".webp":
             mime_type = "image/webp"
-        elif path.suffix.lower() == ".gif":
-            mime_type = "image/gif"
 
-        # 检查并自动压缩超过 MAX_BLOB_SIZE 的大图
+        # 检查并自动压缩超过 MAX_BLOB_SIZE 的大图 (仅限静态格式)
         if len(raw_bytes) > MAX_BLOB_SIZE:
-            logger.info(f"[Bluesky] 图片 '{path.name}' 大小 ({len(raw_bytes)} 字节) 超过 950KB 门禁，自动执行 JPEG 压缩")
+            logger.info(f"[Bluesky] 静态图片 '{path.name}' 大小 ({len(raw_bytes)} 字节) 超过 950KB 门禁，自动执行 JPEG 压缩")
             try:
                 import io
                 with Image.open(io.BytesIO(raw_bytes)) as im:
@@ -521,10 +679,10 @@ class BlueskyDispatcher(BaseDispatcher):
         expected_image_count: int,
         expected_label: Optional[str],
         access_jwt: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        expected_embed_type: Optional[str] = None
     ) -> Tuple[bool, str]:
-        """P0-1: 回读已创建的帖子并严格断言正文、图片数与成人标签"""
-        import time
+        """P0-1 / P0-4: 回读已创建的帖子并严格断言正文、图片数、视频 embed 与成人标签"""
         headers = {"Authorization": f"Bearer {access_jwt}"}
 
         post_record = None
@@ -554,11 +712,26 @@ class BlueskyDispatcher(BaseDispatcher):
         if actual_text != expected_text:
             return False, f"回读正文不一致: 预期 '{expected_text[:60]}...'，实际回读 '{actual_text[:60]}...'"
 
-        # 2. 断言图片数
-        embed = post_record.get("embed", {})
-        actual_images = embed.get("images", []) if embed.get("$type") == "app.bsky.embed.images" else []
-        if len(actual_images) != expected_image_count:
-            return False, f"回读图片数不一致: 预期 {expected_image_count} 张，实际回读 {len(actual_images)} 张"
+        # 2. P0-4: 断言 embed 类型与媒体内容
+        embed = post_record.get("embed", {}) if isinstance(post_record, dict) else {}
+        actual_embed_type = embed.get("$type") if isinstance(embed, dict) else None
+
+        if expected_embed_type:
+            if actual_embed_type != expected_embed_type:
+                return False, f"回读 embed 类型不一致: 预期 '{expected_embed_type}'，实际回读 '{actual_embed_type}'"
+
+        if expected_embed_type == "app.bsky.embed.video":
+            video_ref = embed.get("video") if isinstance(embed, dict) else None
+            if not video_ref:
+                return False, "回读视频帖缺少有效 video blob 引用"
+        elif expected_embed_type == "app.bsky.embed.images":
+            actual_images = embed.get("images", []) if isinstance(embed, dict) else []
+            if len(actual_images) != expected_image_count:
+                return False, f"回读图片数不一致: 预期 {expected_image_count} 张，实际回读 {len(actual_images)} 张"
+        elif expected_image_count > 0:
+            actual_images = embed.get("images", []) if actual_embed_type == "app.bsky.embed.images" else []
+            if len(actual_images) != expected_image_count:
+                return False, f"回读图片数不一致: 预期 {expected_image_count} 张，实际回读 {len(actual_images)} 张"
 
         # 3. 断言 NSFW self-labels
         labels_obj = post_record.get("labels", {})
@@ -641,34 +814,98 @@ class BlueskyDispatcher(BaseDispatcher):
         if not chunks or not chunks[0]:
             return False, "发布内容为空，已终止"
 
-        # P0-5: 多图上传与 Blob 准备 (单帖上限 4 张)
-        images = payload.get("bluesky_images") or payload.get("images", [])
-        total_images_count = len(images)
-        if total_images_count > MAX_IMAGES:
-            discarded = total_images_count - MAX_IMAGES
-            logger.warning(f"[Bluesky] payload 包含 {total_images_count} 张图片，超出上限 4 张，已舍弃后 {discarded} 张")
-            images = images[:MAX_IMAGES]
+        # P0-1 / P0-2: 视频与 GIF 视频化处理 (单帖单 embed 规范)
+        video_target = payload.get("bluesky_video") or payload.get("video")
+        raw_images = payload.get("bluesky_images") or payload.get("images", [])
 
+        gif_candidates = [p for p in raw_images if str(p).lower().endswith(".gif")]
+        vid_candidates = [p for p in raw_images if any(str(p).lower().endswith(ext) for ext in (".mp4", ".mov", ".webm"))]
+
+        discarded_images_count = payload.get("bluesky_discarded_images_count", 0)
+        is_video_post = bool(video_target or vid_candidates or gif_candidates)
+        video_embed_obj = None
         uploaded_embed_images = []
-        image_alts = payload.get("image_alts", {})
-        for idx, img_path in enumerate(images):
-            blob_res, err = self._upload_image_blob(img_path, access_jwt)
-            if not blob_res:
-                return False, f"图片上传失败 (第 {idx + 1} 张 '{Path(img_path).name}'): {err}"
 
-            w, h = 1, 1
+        converted_source_media = None
+        if is_video_post:
+            if not video_target:
+                if vid_candidates:
+                    video_target = str(vid_candidates[0])
+                elif gif_candidates:
+                    from video_engine import convert_gif_to_mp4
+                    first_gif = gif_candidates[0]
+                    converted_source_media = str(first_gif)
+                    from config import CACHE_DIR
+                    cache_dir = Path(CACHE_DIR)
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    mp4_path = cache_dir / f"bsky_video_{Path(first_gif).stem}.mp4"
+                    try:
+                        if not (mp4_path.exists() and mp4_path.stat().st_size > 0):
+                            convert_gif_to_mp4(first_gif, mp4_path)
+                        video_target = str(mp4_path)
+                    except Exception as e:
+                        return False, f"Bluesky 动图转码视频失败: {e}"
+
+            # 统计同帖舍弃的静态图/多余动图数
+            remaining_media = [
+                p for p in raw_images
+                if str(p) != str(video_target) and str(p) != str(converted_source_media)
+            ]
+            if remaining_media:
+                discarded_images_count = max(discarded_images_count, len(remaining_media))
+                logger.warning(
+                    f"[Bluesky] 检测到动图/视频，根据单帖单 embed 规范，仅发布首个动图视频，舍弃其余 {discarded_images_count} 张素材"
+                )
+
+            # 上传视频到 video.bsky.app
+            video_blob, upload_err = self.upload_video(video_target, access_jwt, did)
+            if not video_blob:
+                return False, f"Bluesky 视频上传失败: {upload_err}"
+
+            # 解析视频宽高
+            from video_engine import probe_video_info
+            w, h = 0, 0
             try:
-                with Image.open(img_path) as im:
-                    w, h = im.size
-            except Exception:
-                pass
+                v_info = probe_video_info(video_target)
+                w = v_info.get("width", 0)
+                h = v_info.get("height", 0)
+            except Exception as e:
+                logger.debug(f"[Bluesky] 解析视频宽高异常 (使用缺省值): {e}")
 
-            alt = image_alts.get(str(img_path), "")
-            uploaded_embed_images.append({
-                "image": blob_res,
-                "alt": alt,
-                "aspectRatio": {"width": w, "height": h}
-            })
+            video_embed_obj = {
+                "$type": "app.bsky.embed.video",
+                "video": video_blob
+            }
+            if w > 0 and h > 0:
+                video_embed_obj["aspectRatio"] = {"width": w, "height": h}
+        else:
+            # 纯静态图片通道
+            images = raw_images
+            total_images_count = len(images)
+            if total_images_count > MAX_IMAGES:
+                discarded = total_images_count - MAX_IMAGES
+                logger.warning(f"[Bluesky] payload 包含 {total_images_count} 张图片，超出上限 4 张，已舍弃后 {discarded} 张")
+                images = images[:MAX_IMAGES]
+
+            image_alts = payload.get("image_alts", {})
+            for idx, img_path in enumerate(images):
+                blob_res, err = self._upload_image_blob(img_path, access_jwt)
+                if not blob_res:
+                    return False, f"图片上传失败 (第 {idx + 1} 张 '{Path(img_path).name}'): {err}"
+
+                w, h = 1, 1
+                try:
+                    with Image.open(img_path) as im:
+                        w, h = im.size
+                except Exception:
+                    pass
+
+                alt = image_alts.get(str(img_path), "")
+                uploaded_embed_images.append({
+                    "image": blob_res,
+                    "alt": alt,
+                    "aspectRatio": {"width": w, "height": h}
+                })
 
         # P0-3: 成人分级 self-labels
         is_nsfw = (
@@ -704,9 +941,11 @@ class BlueskyDispatcher(BaseDispatcher):
             if facets:
                 record["facets"] = facets
 
-            # 仅首帖附加媒体图片与成人 self-labels
+            # 仅首帖附加媒体 (视频或图片) 与成人 self-labels
             if idx == 0:
-                if uploaded_embed_images:
+                if is_video_post and video_embed_obj:
+                    record["embed"] = video_embed_obj
+                elif uploaded_embed_images:
                     record["embed"] = {
                         "$type": "app.bsky.embed.images",
                         "images": uploaded_embed_images
@@ -752,16 +991,18 @@ class BlueskyDispatcher(BaseDispatcher):
                 root_ref = current_ref
             parent_ref = current_ref
 
-            # P0-1: 真成功断言 (首帖及每条串帖独立回读验证)
-            expected_imgs = len(uploaded_embed_images) if idx == 0 else 0
+            # P0-1 / P0-4: 真成功断言 (首帖及每条串帖独立回读验证)
+            expected_imgs = 0 if is_video_post else (len(uploaded_embed_images) if idx == 0 else 0)
             expected_label = label_val if (idx == 0 and is_nsfw) else None
+            expected_embed = "app.bsky.embed.video" if (is_video_post and idx == 0) else ("app.bsky.embed.images" if (uploaded_embed_images and idx == 0) else None)
 
             assert_ok, assert_err = self._assert_post_published(
                 post_uri,
                 expected_text=chunk_text,
                 expected_image_count=expected_imgs,
                 expected_label=expected_label,
-                access_jwt=access_jwt
+                access_jwt=access_jwt,
+                expected_embed_type=expected_embed
             )
             if not assert_ok:
                 return False, f"P0-1 真成功断言失败 (第 {idx + 1} 帖): {assert_err}"
@@ -770,8 +1011,14 @@ class BlueskyDispatcher(BaseDispatcher):
         primary_uri = created_uris[0]
         rkey = primary_uri.split("/")[-1]
         web_link = f"https://bsky.app/profile/{handle}/post/{rkey}"
-        logger.info(f"[Bluesky] 发布成功且真成功断言全数通过: {web_link}")
-        return True, f"发布成功: {web_link}"
+        if is_video_post and discarded_images_count > 0:
+            msg = f"发布成功: {web_link} (视频，已舍弃 {discarded_images_count} 张同帖素材)"
+        elif is_video_post:
+            msg = f"发布成功: {web_link} (视频)"
+        else:
+            msg = f"发布成功: {web_link}"
+        logger.info(f"[Bluesky] {msg}")
+        return True, msg
 
     def delete_post(self, uri: str) -> Tuple[bool, str]:
         """删除指定 ATProto 帖子，用于测试发帖后的安全清理销毁"""
