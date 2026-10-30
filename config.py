@@ -70,6 +70,13 @@ DEFAULT_CONFIG = {
         "Cage - A muscle growth story",
         "Film set"
     ],
+    "platform_profile_urls": {
+        "x": "https://x.com/FOXTONTONTON",
+        "deviantart": "https://www.deviantart.com/foxtontonton",
+        "patreon": "https://patreon.com/foxtontonton",
+        "civitai": "https://civitai.red/user/FOXTONTONTON",
+        "kofi": "https://ko-fi.com/foxtontonton"
+    },
     # 4. 压缩优化与并发控制策略
     "compression": {
         "compress_only_when_over_limit": True, # 默认只在超平台门禁时压缩，未超限保持原始画质
