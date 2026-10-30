@@ -2400,9 +2400,10 @@ class PublishThread(QThread):
                     import re as _re
                     m = _re.search(r"https?://(?:www\.)?deviantart\.com/[^/\s]+/art/[^/\s]+", str(da_msg))
                     if m:
-                        captured_url = m.group(0)
+                        captured_url = m.group(0).split('?')[0].split('#')[0].rstrip('/')
 
             if da_success and captured_url:
+                captured_url = str(captured_url).split('?')[0].split('#')[0].rstrip('/')
                 actual_traffic_link = captured_url
                 traffic_notice = ""
                 logger.info(f"[PublishThread] 阶段 1 成功！已捕获 DA 当帖引流链接: {actual_traffic_link}")

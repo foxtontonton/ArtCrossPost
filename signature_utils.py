@@ -218,6 +218,28 @@ def render_description_to_plain_text(desc: str) -> str:
     return MARKDOWN_LINK_REGEX.sub(r"\1", desc)
 
 
+def _url_path_identity(url: str) -> Tuple[str, str]:
+    """返回 (规范化域名去掉www, 规范化小写路径去掉尾随斜杠)"""
+    if not url:
+        return ("", "")
+    try:
+        p = urlparse(url.strip())
+        netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = p.path.rstrip("/").lower()
+        return (netloc, path)
+    except Exception:
+        return ("", "")
+
+
+def extract_html_hrefs(html_content: str) -> List[str]:
+    """提取 HTML 中所有的 <a href="..."> 属性值列表"""
+    if not html_content:
+        return []
+    return re.findall(r'<a\s+[^>]*?href=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+
+
 def verify_signature_links_in_html(
     html_content: str,
     expected_links: Optional[List[Tuple[str, str]]] = None,
@@ -227,10 +249,11 @@ def verify_signature_links_in_html(
     回读富文本编辑器 HTML，严格断言签名中的 6 个真实超链接 <a href="目标URL"> 全部存在。
     缺任一返回 (False, [未生效链接清单])。
     禁止纯文本填了就算成功。
+    支持按路径比对与 DA 链接查询参数剥除。
 
     :param html_content: 编辑器回读的 innerHTML
     :param expected_links: 期望的 (平台名, URL) 清单，默认 CANONICAL_SIGNATURE_LINKS
-    :param da_post_url: 当 DA 透传帖子链接存在时，DeviantArt 链接允许匹配当帖 URL
+    :param da_post_url: 当 DA 透传帖子链接存在时，DeviantArt 链接允许匹配当帖 URL (自动剥除查询串并按路径比对)
     :return: (is_all_present, missing_links_info)
     """
     if not html_content:
@@ -238,23 +261,40 @@ def verify_signature_links_in_html(
 
     targets = expected_links if expected_links is not None else list(CANONICAL_SIGNATURE_LINKS)
 
-    # 提取所有 <a ... href="..." ...> 中的 href 属性
-    # 支持单双引号及转义
-    raw_hrefs = re.findall(r'<a\s+[^>]*?href=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+    raw_hrefs = extract_html_hrefs(html_content)
     normalized_dom_urls = [normalize_url(h) for h in raw_hrefs]
+    dom_identities = [_url_path_identity(h) for h in raw_hrefs]
+
+    clean_da_post = str(da_post_url).split("?")[0].split("#")[0].rstrip("/") if da_post_url else None
+    da_netloc, da_path = _url_path_identity(clean_da_post) if clean_da_post else ("", "")
 
     missing = []
 
     for name, expected_url in targets:
+        clean_exp = expected_url.split("?")[0].split("#")[0].rstrip("/")
         norm_expected = normalize_url(expected_url)
+        exp_netloc, exp_path = _url_path_identity(clean_exp)
 
+        # 1. 尝试完全归一化 URL 精确匹配
         matched = norm_expected in normalized_dom_urls
 
-        # 若是 DeviantArt 平台且存在 da_post_url 透传，允许匹配当帖链接
-        if not matched and name.lower() in ("deviantart", "da") and da_post_url:
-            norm_da_post = normalize_url(da_post_url)
+        # 2. 路径比对匹配 (忽略末尾斜杠、查询参数、大小写以及 www. 前缀)
+        if not matched and exp_path:
+            for d_net, d_path in dom_identities:
+                if d_path == exp_path and (not d_net or exp_netloc in d_net or d_net in exp_netloc):
+                    matched = True
+                    break
+
+        # 3. 若是 DeviantArt 平台且存在 da_post_url 透传，允许匹配当帖链接 (支持路径比对与剥查询串)
+        if not matched and name.lower() in ("deviantart", "da") and clean_da_post:
+            norm_da_post = normalize_url(clean_da_post)
             if norm_da_post in normalized_dom_urls:
                 matched = True
+            elif da_path:
+                for d_net, d_path in dom_identities:
+                    if d_path == da_path and (not d_net or "deviantart.com" in d_net):
+                        matched = True
+                        break
 
         if not matched:
             missing.append(f"{name} ({expected_url})")

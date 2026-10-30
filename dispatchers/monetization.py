@@ -24,6 +24,7 @@ try:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        extract_html_hrefs,
         has_signature,
     )
 except ImportError:
@@ -31,6 +32,7 @@ except ImportError:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        extract_html_hrefs,
         has_signature,
     )
 
@@ -446,8 +448,10 @@ class PatreonDispatcher(BaseDispatcher):
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
         desc = payload.get("patreon_description") or payload.get("description", "")
-        # DA 帖子 URL 透传替换 (需求三 9)
+        # DA 帖子 URL 透传替换 (需求三 9: 剥除查询参数与锚点)
         da_post_url = payload.get("da_post_url")
+        if da_post_url:
+            da_post_url = str(da_post_url).split("?")[0].split("#")[0].rstrip("/")
         if da_post_url and desc:
             from config import load_config
             cfg = load_config()
@@ -626,10 +630,12 @@ class PatreonDispatcher(BaseDispatcher):
 
                         sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url)
                         if not sig_ok:
+                            raw_hrefs = extract_html_hrefs(readback_html)
+                            hrefs_str = ", ".join(repr(h) for h in raw_hrefs) if raw_hrefs else "无任何 href"
                             missing_str = ", ".join(sig_missing)
-                            logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                            logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}；实际回读 href 清单: [{hrefs_str}]")
                             self.close_login_session(browser, context)
-                            return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
+                            return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str} (实际回读 href 清单: [{hrefs_str}])", compliance
                         logger.info("[Patreon] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
                         compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "6/6 真超链接已生效"))
                     else:

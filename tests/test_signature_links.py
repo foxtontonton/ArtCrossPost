@@ -201,6 +201,28 @@ def test_verify_signature_links_da_post_url_propagation():
     assert len(missing_with_prop) == 0
 
 
+def test_verify_signature_links_da_query_params_and_path_matching():
+    """测试 DA 链接剥查询串与路径比对: 无论输入或 DOM 中是否带有参数，均按路径匹配通过"""
+    da_clean_url = "https://www.deviantart.com/foxtontonton/art/New-Alpha-Post-888888"
+    da_url_with_query = da_clean_url + "?ga_submit_new=10%3A123456789&ga_type=edit#comments"
+
+    # DOM 中的 href 带有其他参数或末尾斜杠
+    html_sample_with_query = (
+        '<p>Body text</p>'
+        '<p>🎬X: <a href="https://x.com/FOXTONTONTON">@FOXTONTONTON</a></p>'
+        f'<p>🖼️DeviantArt: <a href="{da_clean_url}/?attributes=test">FOXTONTONTON</a></p>'
+        '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
+        '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
+        '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
+    )
+
+    # 传入带查询串的 da_post_url，应自动剥除参数并按路径与 DOM 中的 href 匹配成功
+    ok, missing = verify_signature_links_in_html(html_sample_with_query, da_post_url=da_url_with_query)
+    assert ok is True
+    assert len(missing) == 0
+
+
 # ==================== Dispatcher Integration Tests ====================
 import time
 from unittest.mock import MagicMock, patch
@@ -680,6 +702,8 @@ def test_patreon_dispatcher_signature_missing_link_aborts(tmp_path, monkeypatch)
     assert ok is False
     assert "签名超链接断言失败" in msg
     assert "Ko-fi" in msg
+    assert "实际回读 href 清单" in msg
+    assert "https://x.com/FOXTONTONTON" in msg
     mock_pub_btn.click.assert_not_called()
 
 

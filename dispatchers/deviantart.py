@@ -1742,7 +1742,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                     )
                     return False, f"DeviantArt 图集张数断言失败: 预期包含 {total_images} 张图片，反查实际检测到 {actual_count} 张，已判定为失败以防漏图", compliance
 
-                post_url = page.url
+                post_url = page.url.split('?')[0].split('#')[0].rstrip('/')
                 self.last_published_url = post_url
                 self.close_login_session(browser, context, page)
                 compliance.append(
