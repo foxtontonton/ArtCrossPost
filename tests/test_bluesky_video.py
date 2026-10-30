@@ -361,6 +361,100 @@ def test_upload_video_pipeline(dummy_mp4, temp_cookies_dir):
         assert mock_poll.called
 
 
+def test_resolve_pds_did_from_credentials_and_network(temp_cookies_dir):
+    """测试从凭据缓存与 PLC 目录 DID 文档中准确解析 PDS DID (did:web:<host>)"""
+    disp = BlueskyDispatcher(cookies_dir=temp_cookies_dir)
+
+    # 1. 从凭据缓存的 didDoc 中解析
+    cached_doc = {
+        "id": "did:plc:testuser123",
+        "service": [
+            {
+                "id": "#atproto_pds",
+                "type": "AtprotoPersonalDataServer",
+                "serviceEndpoint": "https://amanita.us-east.host.bsky.network"
+            }
+        ]
+    }
+    disp._save_credentials({"did": "did:plc:testuser123", "didDoc": cached_doc})
+    pds_did = disp.resolve_pds_did("did:plc:testuser123")
+    assert pds_did == "did:web:amanita.us-east.host.bsky.network"
+
+    # 2. 缓存无记录时从 plc.directory 获取
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "id": "did:plc:networkuser456",
+        "service": [
+            {
+                "id": "#atproto_pds",
+                "type": "AtprotoPersonalDataServer",
+                "serviceEndpoint": "https://my-custom-pds.example.org/xrpc"
+            }
+        ]
+    }
+    with patch("requests.get", return_value=mock_resp):
+        pds_did_net = disp.resolve_pds_did("did:plc:networkuser456")
+        assert pds_did_net == "did:web:my-custom-pds.example.org"
+
+
+def test_upload_video_401_audience_error_self_healing_retry(dummy_mp4, temp_cookies_dir):
+    """测试视频上传遇到 401 受众不符错误时，自动从响应提取 PDS DID 并重新 mint token 成功重试一次"""
+    disp = BlueskyDispatcher(cookies_dir=temp_cookies_dir)
+
+    # Mock get_service_auth 记录调用历史
+    auth_calls = []
+    def fake_get_service_auth(jwt, aud=None, lxm=None, exp_seconds=1800, did=None):
+        auth_calls.append(aud)
+        return f"token-for-{aud}", ""
+
+    # Mock POST uploadVideo: 第一次返回 401 受众错误（实机错误原文整串带双引号），第二次重试返回 200 成功
+    resp_401 = MagicMock()
+    resp_401.status_code = 401
+    resp_401.text = 'invalid token: invalid token audience did:web:video.bsky.app, should be the user\'s PDS DID "did:web:amanita.us-east.host.bsky.network"'
+
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.json.return_value = {"jobStatus": {"jobId": "job-recovered", "state": "JOB_STATE_CREATED"}}
+
+    with patch.object(disp, "get_service_auth", side_effect=fake_get_service_auth), \
+         patch("requests.post", side_effect=[resp_401, resp_200]) as mock_post, \
+         patch.object(disp, "poll_job_status") as mock_poll:
+
+        mock_poll.return_value = ({"$type": "blob", "ref": "recovered-blob"}, "")
+
+        blob, err = disp.upload_video(str(dummy_mp4), access_jwt="my-jwt", did="did:plc:testuser")
+        assert blob == {"$type": "blob", "ref": "recovered-blob"}
+        assert err == ""
+
+        # 断言发生了自愈重试，重新请求了正确的 PDS DID
+        assert len(auth_calls) == 2
+        assert auth_calls[1] == "did:web:amanita.us-east.host.bsky.network"
+        assert mock_post.call_count == 2
+
+
+def test_did_extraction_regex_quotes_variants():
+    """验证 401 自愈正则对带双引号、单引号、转义引号及无引号等实机原文均可准确提取 DID"""
+    import re
+    regex1 = r"should be (?:the user's PDS DID )?[\"'\\]*[\"']?(did:[a-zA-Z0-9_.:-]+)"
+    regex2 = r"(?:expected|pds did)[:\s]+[\"'\\]*[\"']?(did:[a-zA-Z0-9_.:-]+)"
+
+    # 实机原文: should be the user's PDS DID "did:web:xxx"
+    msg_real = 'invalid token: invalid token audience did:web:video.bsky.app, should be the user\'s PDS DID "did:web:amanita.us-east.host.bsky.network"'
+    m = re.search(regex1, msg_real, re.I)
+    assert m and m.group(1) == "did:web:amanita.us-east.host.bsky.network"
+
+    # JSON 序列化转义原文
+    msg_json = '{"error":"Unauthorized","message":"invalid token: invalid token audience did:web:video.bsky.app, should be the user\'s PDS DID \\"did:web:amanita.us-east.host.bsky.network\\""}'
+    m_json = re.search(regex1, msg_json, re.I)
+    assert m_json and m_json.group(1) == "did:web:amanita.us-east.host.bsky.network"
+
+    # 备用正则实机格式
+    msg_alt = 'Bad audience: expected pds did: "did:web:pds.example.org"'
+    m_alt = re.search(regex2, msg_alt, re.I)
+    assert m_alt and m_alt.group(1) == "did:web:pds.example.org"
+
+
 # ==============================================================================
 # 7. 单帖单 embed 规范: 视频帖舍弃同帖静态图
 # ==============================================================================
