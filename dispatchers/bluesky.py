@@ -34,6 +34,8 @@ MAX_IMAGES = 4
 MAX_BLOB_SIZE = 950_000  # 950KB 安全门禁 (Bluesky 上限 1,000,000 字节)
 MAX_VIDEO_SIZE_MB = 300.0  # 官方限制 300MB
 MAX_VIDEO_DURATION_SEC = 600.0  # 官方限制 10 分钟 (600 秒)
+DEFAULT_BLUESKY_DA_LINK = "https://www.deviantart.com/foxtontonton"
+DEFAULT_BLUESKY_NSFW_NOTICE = "🔞 NSFW full set on DeviantArt 👇"
 
 
 def count_graphemes(text: str) -> int:
@@ -163,6 +165,224 @@ def split_into_thread(text: str, max_graphemes: int = MAX_GRAPHEMES) -> List[str
         rem = rem[split_idx:].strip()
 
     return chunks
+
+
+def truncate_at_sentence_boundary_bsky(text: str, budget: int) -> str:
+    r"""在句子边界进行严格截断，绝不截断半句话。按 Bluesky 字素簇 (graphemes) 计算。
+    句子终结符判定:
+    - 中文标点: 。、！、？、…
+    - 英文标点: .、!、? 后紧跟空白符、换行符或文本末尾: [.!?]+(?=[\s\n]|$)
+    - 换行符: \n+
+    若整段文本都在预算内，返回全文；若最长可在预算内的前缀中找不到任何完整句子终结符，返回空字符串。
+    """
+    if not text or budget <= 0:
+        return ""
+    if count_graphemes(text) <= budget:
+        return text.strip()
+
+    # 二分查找 graphemes 在 budget 内的最长字符切片
+    low, high = 0, len(text)
+    best_len = 0
+    while low <= high:
+        mid = (low + high) // 2
+        cand = text[:mid]
+        if count_graphemes(cand) <= budget:
+            best_len = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    prefix = text[:best_len]
+    if not prefix:
+        return ""
+
+    # 在 prefix 内向前检索最后一个句子终结符
+    pattern = r'[。！？\u2026]|\n+|[.!?]+(?=[\s\n]|$)'
+    matches = list(re.finditer(pattern, prefix))
+    if matches:
+        last_match = matches[-1]
+        cut_point = last_match.end()
+        return prefix[:cut_point].strip()
+
+    return ""
+
+
+def format_bluesky_teaser_post(
+    title: str = "",
+    desc: str = "",
+    tags: Optional[List[str]] = None,
+    da_link: Optional[str] = None,
+    nsfw_notice: Optional[str] = None,
+    limit: int = MAX_GRAPHEMES,
+    is_ai: bool = True,
+    add_ai_tags: bool = True,
+) -> str:
+    """
+    Bluesky 方案 B 预告+引流统一排版引擎 (与 X 共通同构、同优先级):
+    1. 格式:
+       [正文预告]
+
+       🔞 NSFW full set on DeviantArt 👇 [DA链接]
+
+       [标签行]
+    2. 优先级:
+       - 必保: 🔞 提示句 + DA 链接 (链接按原文真实字素长度计，不用 X 的 23 字加权)
+       - 次保: 标签，在剩余预算内从尾部逐个砍尽量全保
+       - 可截: 正文只留开头预告，必须在句子边界截断，不许截半句
+    3. 预算:
+       总字素 <= limit (默认 300)
+       引流句与链接必保 -> 标签从尾部逐个砍 -> 预告最后在句子边界截
+    """
+    title = (title or "").strip()
+    desc = (desc or "").strip()
+    tags = list(tags or [])
+
+    # 规范化外部传入或默认的 DA 引流参数
+    if da_link is None:
+        try:
+            from config import load_config
+            cfg = load_config()
+            da_link = (
+                cfg.get("defaults", {}).get("bluesky_da_link")
+                or cfg.get("defaults", {}).get("x_da_link")
+                or DEFAULT_BLUESKY_DA_LINK
+            )
+        except Exception:
+            da_link = DEFAULT_BLUESKY_DA_LINK
+
+    if nsfw_notice is None:
+        try:
+            from config import load_config
+            cfg = load_config()
+            nsfw_notice = (
+                cfg.get("defaults", {}).get("bluesky_nsfw_notice")
+                or cfg.get("defaults", {}).get("x_nsfw_notice")
+                or DEFAULT_BLUESKY_NSFW_NOTICE
+            )
+        except Exception:
+            nsfw_notice = DEFAULT_BLUESKY_NSFW_NOTICE
+
+    da_link = (da_link or "").strip()
+    nsfw_notice = (nsfw_notice or "").strip()
+
+    if nsfw_notice and da_link:
+        notice_line = f"{nsfw_notice} {da_link}".strip()
+    else:
+        notice_line = (nsfw_notice or da_link or "").strip()
+
+    # 清理正文并剔除旧的赞助签名与引流模板 (不带签名，teaser 取代签名)
+    if desc:
+        from signature_utils import split_body_and_signature
+        body_part, _ = split_body_and_signature(desc)
+    else:
+        body_part = ""
+
+    raw_body = f"{title}\n\n{body_part}".strip() if title and body_part else (title or body_part)
+    sig_markers = [
+        "---",
+        "where to find me",
+        "patreon.com",
+        "ko-fi.com",
+        "fanbox.cc",
+        "fantia.jp",
+        "subscribestar",
+        "dlsite",
+        "gumroad",
+        "bsky.app",
+        "civitai.red",
+    ]
+    cleaned_body_lines = []
+    for line in raw_body.splitlines():
+        if any(marker in line.lower() for marker in sig_markers):
+            break
+        cleaned_body_lines.append(line)
+    body = "\n".join(cleaned_body_lines).strip()
+
+    # 规范化标签并计入 AI 标签
+    raw_tags = list(tags)
+    if is_ai and add_ai_tags:
+        for ai_t in ("AIArt", "GenerativeArt"):
+            if not any(str(t).lstrip("#").lower() == ai_t.lower() for t in raw_tags):
+                raw_tags.append(ai_t)
+
+    hashtags = []
+    seen = set()
+    for t in raw_tags:
+        clean = re.sub(r"^[#＃]+", "", str(t).strip())
+        clean = re.sub(r"\s+", "_", clean).strip()
+        if not clean:
+            continue
+        tag_lower = clean.lower()
+        if tag_lower in seen:
+            continue
+        if f"#{tag_lower}" in body.lower() or f"#{clean}" in body:
+            continue
+        seen.add(tag_lower)
+        hashtags.append(f"#{clean}")
+
+    # 步骤 1: 预算必保提示句 + 尽量全保标签
+    current_tags = list(hashtags)
+    while current_tags:
+        tag_str = " ".join(current_tags)
+        cand_base = f"{notice_line}\n\n{tag_str}" if notice_line else tag_str
+        if count_graphemes(cand_base) <= limit:
+            break
+        current_tags.pop()
+
+    tag_str = " ".join(current_tags)
+    base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
+
+    if not body:
+        return base_without_body
+
+    # 步骤 2: 检查正文短文是否可全文保留
+    full_cand = f"{body}\n\n{base_without_body}" if base_without_body else body
+    if count_graphemes(full_cand) <= limit:
+        return full_cand
+
+    # 步骤 3: 正文超限，在可用预算内按句子边界截断
+    sep_overhead = 2 if base_without_body else 0
+    body_budget = limit - count_graphemes(base_without_body) - sep_overhead
+    teaser = truncate_at_sentence_boundary_bsky(body, body_budget)
+
+    # 步骤 4: 可用长度 <= 0 或连第一句也放不下时，先砍标签尾部腾出预算
+    while not teaser and current_tags:
+        current_tags.pop()
+        tag_str = " ".join(current_tags)
+        base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
+        sep_overhead = 2 if base_without_body else 0
+        body_budget = limit - count_graphemes(base_without_body) - sep_overhead
+        if body_budget > 0:
+            teaser = truncate_at_sentence_boundary_bsky(body, body_budget)
+
+    # 步骤 5: 组合最终结果，仍不够则只发提示句 + 链接
+    if teaser:
+        return f"{teaser}\n\n{base_without_body}" if base_without_body else teaser
+    else:
+        return base_without_body
+
+
+def format_bluesky_full_text(
+    title: str = "",
+    desc: str = "",
+    tags: Optional[List[str]] = None,
+    da_link: Optional[str] = None,
+    nsfw_notice: Optional[str] = None,
+    limit: int = MAX_GRAPHEMES,
+    is_ai: bool = True,
+    add_ai_tags: bool = True,
+) -> str:
+    """组合 Bluesky 完整发帖正文 (自动应用预告+引流策略方案 B)"""
+    return format_bluesky_teaser_post(
+        title=title,
+        desc=desc,
+        tags=tags,
+        da_link=da_link,
+        nsfw_notice=nsfw_notice,
+        limit=limit,
+        is_ai=is_ai,
+        add_ai_tags=add_ai_tags,
+    )
 
 
 class BlueskyDispatcher(BaseDispatcher):
@@ -767,33 +987,54 @@ class BlueskyDispatcher(BaseDispatcher):
             "Content-Type": "application/json"
         }
 
-        # 2. 正文组织与话题标签拼接 (含签名 Markdown 链接 -> 裸 URL 转换)
+        # 2. 正文组织与预告引流格式排版 (方案 B 预告+引流格式)
         title = payload.get("title", "").strip()
         desc = payload.get("description", "").strip()
-        sig_template = payload.get("signature_template")
-        desc = render_description_for_bluesky(desc, sig_template)
         tags = payload.get("tags", [])
 
-        text_parts = []
-        if title:
-            text_parts.append(title)
-        if desc:
-            text_parts.append(desc)
-        base_text = "\n\n".join(text_parts).strip()
-
-        if tags:
-            tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags])
-            base_text = f"{base_text}\n\n{tag_str}".strip() if base_text else tag_str
-
-        # P0-4: AI 披露
         platform_opts = payload.get("platform_options", {})
         is_ai = payload.get("is_ai_generated", True)
         add_ai_tags = platform_opts.get("bluesky_ai_hashtags", True)
-        if is_ai and add_ai_tags:
-            ai_tags = "#AIArt #GenerativeArt"
-            base_text = f"{base_text}\n\n{ai_tags}".strip() if base_text else ai_tags
 
-        # P0-2: 字数上限与字素簇计数
+        try:
+            from config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+
+        da_link = (
+            payload.get("bluesky_da_link")
+            or payload.get("actual_traffic_link")
+            or payload.get("da_post_url")
+            or platform_opts.get("bluesky_da_link")
+            or payload.get("x_da_link")
+            or platform_opts.get("x_da_link")
+            or cfg.get("defaults", {}).get("bluesky_da_link")
+            or cfg.get("defaults", {}).get("x_da_link")
+            or DEFAULT_BLUESKY_DA_LINK
+        )
+        nsfw_notice = (
+            payload.get("bluesky_nsfw_notice")
+            or platform_opts.get("bluesky_nsfw_notice")
+            or payload.get("x_nsfw_notice")
+            or platform_opts.get("x_nsfw_notice")
+            or cfg.get("defaults", {}).get("bluesky_nsfw_notice")
+            or cfg.get("defaults", {}).get("x_nsfw_notice")
+            or DEFAULT_BLUESKY_NSFW_NOTICE
+        )
+
+        base_text = format_bluesky_teaser_post(
+            title=title,
+            desc=desc,
+            tags=tags,
+            da_link=da_link,
+            nsfw_notice=nsfw_notice,
+            limit=MAX_GRAPHEMES,
+            is_ai=is_ai,
+            add_ai_tags=add_ai_tags
+        )
+
+        # P0-2: 字数上限安全网与字素簇计数 (正常情况下 base_text 已在 MAX_GRAPHEMES 内)
         grapheme_len = count_graphemes(base_text)
         chunks = []
         if grapheme_len <= MAX_GRAPHEMES:

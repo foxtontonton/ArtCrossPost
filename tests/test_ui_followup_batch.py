@@ -253,19 +253,17 @@ class TestUIFollowupBatch:
         record = create_calls[0]["json"]["record"]
         record_text = record["text"]
 
-        # 验证正文保留 [OC] 但签名无方括号
+        # 验证正文保留 [OC]，旧签名被预告引流格式取代 (teaser 格式替代签名)
         assert "[OC]" in record_text
         assert "[2026]" in record_text
-        _, post_sig = split_body_and_signature(record_text)
-        assert "[" not in post_sig and "]" not in post_sig, "发帖记录签名段中不得有方括号残留"
+        assert "Where to find me" not in record_text
 
-        # 验证 facets 包含了链接
+        # 验证 facets 包含了预告 DA 引流链接
         post_facets = record.get("facets", [])
         post_links = [f["features"][0]["uri"] for f in post_facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
-        assert "https://x.com/FOXTONTONTON" in post_links
-        assert "https://ko-fi.com/foxtontonton" in post_links
+        assert "https://www.deviantart.com/foxtontonton" in post_links
 
-        # 2. 完整 5 链接全量签名超限串推场景
+        # 2. 超限串推安全网场景
         captured_requests.clear()
         payload_thread = {
             "title": "Full Links Post [OC]",
@@ -273,6 +271,7 @@ class TestUIFollowupBatch:
             "tags": [],
             "images": [],
             "is_ai_generated": False,
+            "bluesky_nsfw_notice": "超限提示句。" * 60,
             "platform_options": {
                 "bluesky_ai_hashtags": False,
                 "bluesky_over_limit_action": "thread"
@@ -287,13 +286,9 @@ class TestUIFollowupBatch:
         all_thread_links = []
         for call in thread_calls:
             rec = call["json"]["record"]
-            _, chunk_sig = split_body_and_signature(rec["text"])
-            if chunk_sig:
-                assert "[" not in chunk_sig and "]" not in chunk_sig
             for f in rec.get("facets", []):
                 if f["features"][0].get("$type") == "app.bsky.richtext.facet#link":
                     all_thread_links.append(f["features"][0]["uri"])
 
-        # 验证全部 5 个链接均在串推中被提取为 link facet
-        for _, u in CANONICAL_SIGNATURE_LINKS:
-            assert u in all_thread_links, f"全量串推中必须完整包含签名链接 facet: {u}"
+        # 验证预告 DA 引流链接在串推中被提取为 link facet
+        assert "https://www.deviantart.com/foxtontonton" in all_thread_links

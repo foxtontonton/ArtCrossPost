@@ -2332,7 +2332,7 @@ class PublishThread(QThread):
         traffic_notice = ""
 
         da_disp = next((d for d in valid_dispatchers if d.name == "deviantart"), None)
-        has_followers = any(d.name in ("x_twitter", "patreon") for d in valid_dispatchers)
+        has_followers = any(d.name in ("x_twitter", "patreon", "bluesky") for d in valid_dispatchers)
         should_two_phase = bool(use_da_post_link and da_disp and has_followers)
 
         def _publish_worker(disp):
@@ -2417,6 +2417,8 @@ class PublishThread(QThread):
             self.payload["traffic_notice"] = traffic_notice
             self.payload["x_da_link"] = actual_traffic_link
             self.payload.setdefault("platform_options", {})["x_da_link"] = actual_traffic_link
+            self.payload["bluesky_da_link"] = actual_traffic_link
+            self.payload.setdefault("platform_options", {})["bluesky_da_link"] = actual_traffic_link
 
             # 透传至 Patreon 正文末尾引流签名里的 DA 链接
             pat_desc = self.payload.get("patreon_description") or self.payload.get("description", "")
@@ -6105,24 +6107,25 @@ class MainWindow(QMainWindow):
         if hasattr(self, "bsky_char_counter_lbl"):
             is_bsky_checked = hasattr(self, "platform_controls") and "bluesky" in self.platform_controls and self.platform_controls["bluesky"]["checkbox"].isChecked()
             if is_bsky_checked:
-                from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
-                bsky_text_parts = []
-                if title:
-                    bsky_text_parts.append(title)
-                if desc:
-                    bsky_text_parts.append(render_description_for_bluesky(desc, self.config.get("signature_template")))
-                bsky_text = "\n\n".join(bsky_text_parts).strip()
-                if tags:
-                    tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags])
-                    bsky_text = f"{bsky_text}\n\n{tag_str}".strip() if bsky_text else tag_str
-
+                from dispatchers.bluesky import format_bluesky_teaser_post, count_graphemes, MAX_GRAPHEMES
                 is_ai = self.ai_checkbox.isChecked() if hasattr(self, "ai_checkbox") else True
                 bsky_opts = self.platform_controls.get("bluesky", {}).get("options", {})
                 bsky_ai_cb = bsky_opts.get("ai_hashtags")
                 add_ai_tags = bsky_ai_cb.isChecked() if bsky_ai_cb else self.config.get("defaults", {}).get("bluesky_ai_hashtags", True)
-                if is_ai and add_ai_tags:
-                    ai_tags = "#AIArt #GenerativeArt"
-                    bsky_text = f"{bsky_text}\n\n{ai_tags}".strip() if bsky_text else ai_tags
+
+                da_link = self.config.get("defaults", {}).get("bluesky_da_link") or self.config.get("defaults", {}).get("x_da_link")
+                nsfw_notice = self.config.get("defaults", {}).get("bluesky_nsfw_notice") or self.config.get("defaults", {}).get("x_nsfw_notice")
+
+                bsky_text = format_bluesky_teaser_post(
+                    title=title,
+                    desc=desc,
+                    tags=tags,
+                    da_link=da_link,
+                    nsfw_notice=nsfw_notice,
+                    limit=MAX_GRAPHEMES,
+                    is_ai=is_ai,
+                    add_ai_tags=add_ai_tags
+                )
 
                 bsky_count = count_graphemes(bsky_text)
                 bsky_limit = MAX_GRAPHEMES
@@ -8024,21 +8027,31 @@ class MainWindow(QMainWindow):
         # 针对 Bluesky 进行字素超限决策检查 (P0-2)
         is_bsky_selected = any(d.name == "bluesky" for d in selected)
         if is_bsky_selected:
-            from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
-            bsky_tp = []
-            if title_val:
-                bsky_tp.append(title_val)
-            if desc_val:
-                bsky_tp.append(render_description_for_bluesky(desc_val, self.config.get("signature_template")))
-            bsky_full_text = "\n\n".join(bsky_tp).strip()
-            if tags_val:
-                tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags_val])
-                bsky_full_text = f"{bsky_full_text}\n\n{tag_str}".strip() if bsky_full_text else tag_str
-
+            from dispatchers.bluesky import format_bluesky_teaser_post, count_graphemes, MAX_GRAPHEMES
             is_ai_val = platform_options.get("is_ai_generated", True)
-            if is_ai_val and platform_options.get("bluesky_ai_hashtags", True):
-                ai_tags = "#AIArt #GenerativeArt"
-                bsky_full_text = f"{bsky_full_text}\n\n{ai_tags}".strip() if bsky_full_text else ai_tags
+            add_ai_val = platform_options.get("bluesky_ai_hashtags", True)
+            da_link = (
+                platform_options.get("bluesky_da_link")
+                or self.config.get("defaults", {}).get("bluesky_da_link")
+                or platform_options.get("x_da_link")
+                or self.config.get("defaults", {}).get("x_da_link")
+            )
+            nsfw_notice = (
+                platform_options.get("bluesky_nsfw_notice")
+                or self.config.get("defaults", {}).get("bluesky_nsfw_notice")
+                or platform_options.get("x_nsfw_notice")
+                or self.config.get("defaults", {}).get("x_nsfw_notice")
+            )
+            bsky_full_text = format_bluesky_teaser_post(
+                title=title_val,
+                desc=desc_val,
+                tags=tags_val,
+                da_link=da_link,
+                nsfw_notice=nsfw_notice,
+                limit=MAX_GRAPHEMES,
+                is_ai=is_ai_val,
+                add_ai_tags=add_ai_val
+            )
 
             bsky_count = count_graphemes(bsky_full_text)
             bsky_limit = MAX_GRAPHEMES
@@ -8113,6 +8126,8 @@ class MainWindow(QMainWindow):
                 self.config.get("use_da_post_link_for_traffic", True)
             ),
             "x_da_link": self.config.get("defaults", {}).get("x_da_link", "https://www.deviantart.com/foxtontonton"),
+            "bluesky_da_link": self.config.get("defaults", {}).get("bluesky_da_link") or self.config.get("defaults", {}).get("x_da_link", "https://www.deviantart.com/foxtontonton"),
+            "bluesky_nsfw_notice": self.config.get("defaults", {}).get("bluesky_nsfw_notice") or self.config.get("defaults", {}).get("x_nsfw_notice", "🔞 NSFW full set on DeviantArt 👇"),
             "platform_options": platform_options
         }
 

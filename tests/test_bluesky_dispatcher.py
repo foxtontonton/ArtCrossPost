@@ -577,11 +577,12 @@ def test_publish_thread_reply_chain(temp_cookies_dir):
             }
         return resp
 
-    # 480 字素长文 (>300)，拆成串推
+    # 480 字素长文 (>300)，引流句超限触发安全网拆成串推
     long_desc = "这是第一篇长推文案段落。" * 40
     payload = {
         "title": "长推标题",
         "description": long_desc,
+        "bluesky_nsfw_notice": "超限提示句。" * 60,
         "platform_options": {
             "bluesky_over_limit_action": "thread",
             "bluesky_ai_hashtags": False
@@ -617,6 +618,7 @@ def test_publish_over_limit_no_action_ask_returns_false(temp_cookies_dir):
     payload = {
         "title": "长文标题",
         "description": long_desc,
+        "bluesky_nsfw_notice": "超限提示句。" * 60,
         "platform_options": {
             # 未提供 bluesky_over_limit_action，policy 为 ask
             "bluesky_over_limit_policy": "ask",
@@ -664,6 +666,7 @@ def test_publish_over_limit_fallback_to_policy_truncate(temp_cookies_dir):
     payload = {
         "title": "截断测试",
         "description": long_desc,
+        "bluesky_nsfw_notice": "超限提示句。" * 60,
         "platform_options": {
             # 未提供 bluesky_over_limit_action，policy 为 truncate
             "bluesky_over_limit_policy": "truncate",
@@ -709,6 +712,7 @@ def test_publish_over_limit_fallback_to_policy_thread(temp_cookies_dir):
     payload = {
         "title": "串推测试",
         "description": long_desc,
+        "bluesky_nsfw_notice": "超限提示句。" * 60,
         "platform_options": {
             # 未提供 bluesky_over_limit_action，policy 为 thread
             "bluesky_over_limit_policy": "thread",

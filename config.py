@@ -120,7 +120,9 @@ DEFAULT_CONFIG = {
         "bluesky_label": "porn",                          # Bluesky 成人分级 self-labels ("porn", "sexual", "nudity")
         "bluesky_ai_hashtags": True,                      # Bluesky AI 话题标签 (#AIArt #GenerativeArt)
         "bluesky_censor": True,                           # Bluesky 专属打码保护开关
-        "bluesky_over_limit_policy": "ask"                # Bluesky 超限策略 ("ask", "truncate", "thread")
+        "bluesky_over_limit_policy": "ask",               # Bluesky 超限策略 ("ask", "truncate", "thread")
+        "bluesky_da_link": "https://www.deviantart.com/foxtontonton", # Bluesky 预告引流 DA 链接
+        "bluesky_nsfw_notice": "🔞 NSFW full set on DeviantArt 👇",     # Bluesky NSFW 引流提示文案
     }
 }
 
