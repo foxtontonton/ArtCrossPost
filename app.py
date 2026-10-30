@@ -4137,6 +4137,12 @@ class MainWindow(QMainWindow):
                         idx = kofi_opts["visibility"].currentIndex()
                         self.config["defaults"]["kofi_visibility"] = kofi_map.get(idx, "supporters")
 
+                # Civitai
+                if "civitai" in self.platform_controls:
+                    civitai_opts = self.platform_controls["civitai"]["options"]
+                    if "censor" in civitai_opts:
+                        self.config["defaults"]["civitai_censor"] = civitai_opts["censor"].isChecked()
+
             save_config(self.config)
             logger.debug("[Config] 界面配置已成功持久化至 presets.json")
         except Exception as e:
@@ -5373,6 +5379,14 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(kofi_ai)
             opts["ai"] = kofi_ai
 
+        elif disp.name == "civitai":
+            civitai_censor = QCheckBox("打码保护")
+            civitai_censor.setChecked(self.config.get("defaults", {}).get("civitai_censor", False))
+            civitai_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            civitai_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            opts_layout.addWidget(civitai_censor)
+            opts["censor"] = civitai_censor
+
         layout.addLayout(opts_layout)
 
         self.platform_controls[disp.name] = {
@@ -5432,10 +5446,15 @@ class MainWindow(QMainWindow):
         if state == Qt.Checked and hasattr(self, "auto_censor_cb") and not self.auto_censor_cb.isChecked():
             self.auto_censor_cb.setChecked(True)
 
-    def _is_platform_censor_checked(self, disp_name: str) -> bool:
+    def _is_platform_censor_checked(self, disp_name: str, platform_options=None) -> bool:
+        if platform_options is not None:
+            key = "x_censor" if disp_name == "x_twitter" else f"{disp_name}_censor"
+            if key in platform_options:
+                return bool(platform_options[key])
         ctrl = self.platform_controls.get(disp_name)
         if not ctrl:
-            return False
+            key = "x_censor" if disp_name == "x_twitter" else f"{disp_name}_censor"
+            return bool(self.config.get("defaults", {}).get(key, False))
         cb = ctrl.get("options", {}).get("censor")
         if cb is not None:
             return cb.isChecked()
@@ -6733,18 +6752,23 @@ class MainWindow(QMainWindow):
         x_images_map = {}
         patreon_images = []
         kofi_images = []
+        civitai_images = []
 
-        censor_enabled = self.auto_censor_cb.isChecked()
-        wm_enabled = self.watermark_enabled_cb.isChecked()
-        apply_wm_publish = self.watermark_apply_publish_cb.isChecked()
+        if scheduled_snapshot and "censor_enabled" in scheduled_snapshot:
+            censor_enabled = scheduled_snapshot["censor_enabled"]
+        else:
+            censor_enabled = self.auto_censor_cb.isChecked() if hasattr(self, "auto_censor_cb") else False
+        wm_enabled = self.watermark_enabled_cb.isChecked() if hasattr(self, "watermark_enabled_cb") else False
+        apply_wm_publish = self.watermark_apply_publish_cb.isChecked() if hasattr(self, "watermark_apply_publish_cb") else False
 
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         is_kofi_selected = any(d.name == "kofi" for d in selected)
 
-        is_da_censor = censor_enabled and self._is_platform_censor_checked("deviantart")
-        is_x_censor = censor_enabled and self._is_platform_censor_checked("x_twitter")
-        is_pat_censor = censor_enabled and self._is_platform_censor_checked("patreon")
-        is_kofi_censor = censor_enabled and self._is_platform_censor_checked("kofi")
+        is_da_censor = censor_enabled and self._is_platform_censor_checked("deviantart", platform_options)
+        is_x_censor = censor_enabled and self._is_platform_censor_checked("x_twitter", platform_options)
+        is_pat_censor = censor_enabled and self._is_platform_censor_checked("patreon", platform_options)
+        is_kofi_censor = censor_enabled and self._is_platform_censor_checked("kofi", platform_options)
+        is_civitai_censor = censor_enabled and self._is_platform_censor_checked("civitai", platform_options)
 
         style, mode, ratio = self._get_current_censor_params()
         wm_text = self.watermark_text_input.text().strip()
@@ -6805,7 +6829,7 @@ class MainWindow(QMainWindow):
             } if (wm_enabled and apply_wm_publish and wm_text) else None
 
             if is_gif:
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor])
                 c_params = None
                 if any_censor:
                     final_boxes = self._get_effective_censor_boxes(
@@ -6988,9 +7012,10 @@ class MainWindow(QMainWindow):
                                 kofi_images.append(str(p))
                 else:
                     kofi_images.append(str(p))
+                civitai_images.append(str(p))
             else:
                 # 静态图片处理
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor])
                 pub_censor_path = None
                 clean_censor_path = None
 
@@ -7102,6 +7127,10 @@ class MainWindow(QMainWindow):
                     kofi_target = pub_raw_path if wm_info else Path(p)
                 kofi_images.append(str(kofi_target))
 
+                # Civitai 静态图
+                civitai_target = pub_censor_path if is_civitai_censor else pub_raw_path
+                civitai_images.append(str(civitai_target))
+
         # X (Twitter) 专属图按选用状态提取：勾选则按缩略图排序取勾选的最多4张；未勾选则回退取前4张
         x_candidate_paths = self.get_x_selected_images()
         x_images = [x_images_map[p] for p in x_candidate_paths if p in x_images_map]
@@ -7169,6 +7198,10 @@ class MainWindow(QMainWindow):
         platform_options["civitai_resources"] = civitai_res_val
         platform_options["civitai_resources_scope"] = civitai_scope_val
         platform_options["civitai_tool"] = civitai_tool_val
+        if "civitai" in self.platform_controls:
+            opts = self.platform_controls["civitai"]["options"]
+            if "censor" in opts:
+                platform_options["civitai_censor"] = opts["censor"].isChecked()
         platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
 
         if "patreon" in self.platform_controls:
@@ -7239,7 +7272,7 @@ class MainWindow(QMainWindow):
             "x_source_video_path": paired_video_for_x if is_single_gif_post else None,
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
-            "civitai_images": [str(p) for p in images_to_use],
+            "civitai_images": civitai_images,   # Civitai 专属图 (按 Civitai 打码选项)
             "civitai_max_images_per_post": civitai_limit_val,
             "civitai_resources": civitai_res_val,
             "civitai_resources_scope": civitai_scope_val,
@@ -7678,6 +7711,8 @@ class MainWindow(QMainWindow):
         platform_options = {}
         if "x_twitter" in self.platform_controls:
             opts = self.platform_controls["x_twitter"]["options"]
+            if "censor" in opts:
+                platform_options["x_censor"] = opts["censor"].isChecked()
             if "sensitive" in opts:
                 platform_options["x_sensitive"] = opts["sensitive"].isChecked()
             if "ai" in opts:
@@ -7690,6 +7725,8 @@ class MainWindow(QMainWindow):
 
         if "deviantart" in self.platform_controls:
             opts = self.platform_controls["deviantart"]["options"]
+            if "censor" in opts:
+                platform_options["deviantart_censor"] = opts["censor"].isChecked()
             if "mature" in opts:
                 txt = opts["mature"].currentText().lower()
                 if "moderate" in txt:
@@ -7714,6 +7751,8 @@ class MainWindow(QMainWindow):
 
         if "patreon" in self.platform_controls:
             opts = self.platform_controls["patreon"]["options"]
+            if "censor" in opts:
+                platform_options["patreon_censor"] = opts["censor"].isChecked()
             if "visibility" in opts:
                 txt = opts["visibility"].currentText().lower()
                 if "public" in txt or "公开" in txt:
@@ -7727,6 +7766,8 @@ class MainWindow(QMainWindow):
 
         if "kofi" in self.platform_controls:
             opts = self.platform_controls["kofi"]["options"]
+            if "censor" in opts:
+                platform_options["kofi_censor"] = opts["censor"].isChecked()
             if "visibility" in opts:
                 txt = opts["visibility"].currentText().lower()
                 if "everyone" in txt or "公开" in txt or "所有" in txt:
@@ -7736,6 +7777,11 @@ class MainWindow(QMainWindow):
             if "ai" in opts:
                 platform_options["kofi_ai"] = opts["ai"].isChecked()
 
+        if "civitai" in self.platform_controls:
+            opts = self.platform_controls["civitai"]["options"]
+            if "censor" in opts:
+                platform_options["civitai_censor"] = opts["censor"].isChecked()
+
         tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
         return {
             "title": self.title_input.text().strip(),
@@ -7744,6 +7790,7 @@ class MainWindow(QMainWindow):
             "image_paths": [str(p) for p in self.image_paths],
             "selected_platforms": selected_names,
             "platform_options": platform_options,
+            "censor_enabled": self.auto_censor_cb.isChecked() if hasattr(self, "auto_censor_cb") else False,
             "is_nsfw": self.nsfw_checkbox.isChecked(),
             "is_ai": self.ai_checkbox.isChecked(),
             "custom_censor_boxes": {str(k): v for k, v in getattr(self, "custom_censor_boxes", {}).items()},
