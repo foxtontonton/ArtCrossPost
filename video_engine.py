@@ -541,6 +541,9 @@ class VideoEngine:
                 "enabled": True,
                 "style": censor_params.get("style", "black_bar"),
                 "boxes": [[int(v) for v in b] for b in censor_params.get("boxes", [])],
+                "mosaic_size": int(censor_params.get("mosaic_size", 20)),
+                "blur_ksize": int(censor_params.get("blur_ksize", 45)),
+                "opacity": round(float(censor_params.get("opacity", 1.0)), 2),
                 "ref_size": list(ref_size) if ref_size else None,
             }
         norm_wm = None
@@ -680,6 +683,7 @@ class VideoEngine:
         vid_w: int,
         vid_h: int,
         has_watermark_input: bool = False,
+        censor_params: Optional[dict] = None,
     ) -> Tuple[str, str]:
         """
         构建 ffmpeg filter_complex 字符串 (规则 7 & 8):
@@ -705,19 +709,22 @@ class VideoEngine:
         chains: List[str] = []
         cur_pad = "[0:v]"
         step_idx = 0
+        c_params = censor_params or {}
 
         if valid_boxes:
+            alpha = max(0.0, min(1.0, float(c_params.get("opacity", 1.0))))
             if style == "black_bar":
                 draw_filters = [
-                    f"drawbox=x={x}:y={y}:w={bw}:h={bh}:color=black@1:t=fill"
+                    f"drawbox=x={x}:y={y}:w={bw}:h={bh}:color=black@{alpha}:t=fill"
                     for (x, y, bw, bh) in valid_boxes
                 ]
                 next_pad = "[vcens]"
                 chains.append(f"{cur_pad}{','.join(draw_filters)}{next_pad}")
                 cur_pad = next_pad
             elif style == "mosaic":
+                mos_size = max(4, int(c_params.get("mosaic_size", 20)))
                 for i, (x, y, bw, bh) in enumerate(valid_boxes):
-                    cell = max(4, bw // 15)
+                    cell = mos_size
                     sw = max(2, bw // cell)
                     sh = max(2, bh // cell)
                     split_base = f"[vbase_{i}]"
@@ -733,18 +740,20 @@ class VideoEngine:
                     chains.append(f"{split_base}{mos_pad}overlay={x}:{y}{next_pad}")
                     cur_pad = next_pad
             elif style == "blur":
+                b_ksize = int(c_params.get("blur_ksize", 45))
+                b_sigma = max(1, b_ksize // 2)
                 for i, (x, y, bw, bh) in enumerate(valid_boxes):
                     split_base = f"[vbase_{i}]"
                     split_crop = f"[vcrop_{i}]"
                     blur_pad = f"[vblur_{i}]"
                     next_pad = f"[vcens_{i}]"
                     chains.append(f"{cur_pad}split=2{split_base}{split_crop}")
-                    chains.append(f"{split_crop}crop={bw}:{bh}:{x}:{y},gblur=sigma=20{blur_pad}")
+                    chains.append(f"{split_crop}crop={bw}:{bh}:{x}:{y},gblur=sigma={b_sigma}{blur_pad}")
                     chains.append(f"{split_base}{blur_pad}overlay={x}:{y}{next_pad}")
                     cur_pad = next_pad
             else:
                 draw_filters = [
-                    f"drawbox=x={x}:y={y}:w={bw}:h={bh}:color=black@1:t=fill"
+                    f"drawbox=x={x}:y={y}:w={bw}:h={bh}:color=black@{alpha}:t=fill"
                     for (x, y, bw, bh) in valid_boxes
                 ]
                 next_pad = "[vcens]"
@@ -837,6 +846,7 @@ class VideoEngine:
                 vid_w=vid_w,
                 vid_h=vid_h,
                 has_watermark_input=wm_enabled,
+                censor_params=censor_params,
             )
 
             cmd = [exe, "-y", "-hide_banner", "-i", str(in_p)]

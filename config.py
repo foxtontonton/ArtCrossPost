@@ -34,8 +34,10 @@ DEFAULT_CONFIG = {
     "censor": {
         "enabled": True,
         "style": "black_bar",  # "black_bar", "mosaic", "blur"
-        "coverage_mode": "moderate", # "slender", "moderate", "full"
-        "coverage_scale": 0.55, # 55% moderate scale
+        "opacity": 1.0,         # 20% - 100% 透明度混合 (默认 1.0)
+        "strength": 50,         # 0 - 100 强度/颗粒 (默认 50，对应 20px / ksize 45)
+        "coverage_mode": "moderate", # [Deprecated] 固定 moderate
+        "coverage_scale": 0.55, # [Deprecated] 固定 0.55
         "padding_ratio": 0.15, # 15% safety expansion for full mode
         "mosaic_size": 20,
         "blur_radius": 35

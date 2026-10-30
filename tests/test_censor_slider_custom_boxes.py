@@ -189,27 +189,27 @@ class TestCensorSliderCustomBoxes:
             # 模拟用户在画布上手调静态图打码框
             win._on_canvas_boxes_changed([[200, 200, 300, 300]])
             assert win.custom_censor_boxes[str(static_p)] == [[200, 200, 300, 300]]
-            assert win.custom_censor_captured_ratios[str(static_p)] == pytest.approx(0.50)
+            assert win.custom_censor_captured_ratios[str(static_p)] == pytest.approx(0.55)
 
-            # 调整拉杆到 100% (ratio = 1.00, 放大 2 倍 -> [150, 150, 350, 350])
+            # 调整强度拉杆到 100%，手动框保持画布拖拽尺寸不变（不再受拉杆缩放）
             win.censor_slider.setValue(100)
             win._do_refresh_live_preview()
             eff_static = win._get_effective_censor_boxes(str(static_p), orig_w=600, orig_h=600)
-            assert eff_static == [[150, 150, 350, 350]]
+            assert eff_static == [[200, 200, 300, 300]]
             # custom_censor_boxes 存储值保持原样未回写
             assert win.custom_censor_boxes[str(static_p)] == [[200, 200, 300, 300]]
 
-            # 拉回 50%，逐像素恢复
-            win.censor_slider.setValue(50)
+            # 拉至 0%，同样保持原样
+            win.censor_slider.setValue(0)
             assert win._get_effective_censor_boxes(str(static_p), orig_w=600, orig_h=600) == [[200, 200, 300, 300]]
 
-            # 切换到 GIF 动图，验证走同一套计算
+            # 切换到 GIF 动图，验证走同一套计算且手动框不受强度拉杆缩放
             win.current_preview_index = 1
             win.censor_slider.setValue(50)
             win._on_canvas_boxes_changed([[200, 200, 300, 300]])
             win.censor_slider.setValue(100)
             win._do_refresh_live_preview()
-            assert win.preview_canvas._censor_boxes == [[150, 150, 350, 350]]
+            assert win.preview_canvas._censor_boxes == [[200, 200, 300, 300]]
             assert win.custom_censor_boxes[str(gif_p)] == [[200, 200, 300, 300]]
 
             for t_attr in ("_draft_save_timer", "_layout_save_timer", "_config_save_timer", "_preview_timer", "x_counter_timer", "_schedule_poll_timer"):

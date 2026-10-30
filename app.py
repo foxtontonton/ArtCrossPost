@@ -42,7 +42,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEv
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
 
 from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
-from censor_engine import CensorEngine
+from censor_engine import CensorEngine, map_strength_to_mosaic_size, map_strength_to_blur_ksize
 from watermark_engine import WatermarkEngine
 from video_engine import (
     VideoEngine,
@@ -909,6 +909,9 @@ class UnifiedPreviewCanvas(QLabel):
             if self._censor_info and self._censor_info.get("enabled"):
                 boxes = self._censor_boxes if self._censor_boxes else self._censor_info.get("boxes", [])
                 style = self._censor_info.get("style", "black_bar")
+                c_op = float(self._censor_info.get("opacity", 1.0))
+                c_mos = int(self._censor_info.get("mosaic_size", 20))
+                c_blur = int(self._censor_info.get("blur_ksize", 45))
                 curr_pm = self._movie.currentPixmap() if style in ("mosaic", "blur") else None
 
                 for box in boxes:
@@ -920,7 +923,7 @@ class UnifiedPreviewCanvas(QLabel):
                     rect = QRect(dx1, dy1, box_w, box_h)
 
                     if style == "black_bar":
-                        painter.fillRect(rect, QColor(0, 0, 0))
+                        painter.fillRect(rect, QColor(0, 0, 0, int(c_op * 255)))
                     elif style == "mosaic" and curr_pm and not curr_pm.isNull():
                         pm_w = curr_pm.width()
                         pm_h = curr_pm.height()
@@ -929,9 +932,14 @@ class UnifiedPreviewCanvas(QLabel):
                         rw = max(1, min(pm_w - rx, int((bx2 - bx1) * (pm_w / orig_w))))
                         rh = max(1, min(pm_h - ry, int((by2 - by1) * (pm_h / orig_h))))
                         roi = curr_pm.copy(rx, ry, rw, rh)
-                        small = roi.scaled(max(3, rw // 15), max(3, rh // 15), Qt.IgnoreAspectRatio, Qt.FastTransformation)
+                        cell = max(4, int(c_mos * scale_x))
+                        small = roi.scaled(max(1, rw // cell), max(1, rh // cell), Qt.IgnoreAspectRatio, Qt.FastTransformation)
                         pixelated = small.scaled(box_w, box_h, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+                        if c_op < 0.999:
+                            painter.setOpacity(c_op)
                         painter.drawPixmap(dx1, dy1, pixelated)
+                        if c_op < 0.999:
+                            painter.setOpacity(1.0)
                     elif style == "blur" and curr_pm and not curr_pm.isNull():
                         pm_w = curr_pm.width()
                         pm_h = curr_pm.height()
@@ -940,9 +948,14 @@ class UnifiedPreviewCanvas(QLabel):
                         rw = max(1, min(pm_w - rx, int((bx2 - bx1) * (pm_w / orig_w))))
                         rh = max(1, min(pm_h - ry, int((by2 - by1) * (pm_h / orig_h))))
                         roi = curr_pm.copy(rx, ry, rw, rh)
-                        small = roi.scaled(max(4, rw // 16), max(4, rh // 16), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                        div = max(2, min(50, c_blur // 2))
+                        small = roi.scaled(max(2, rw // div), max(2, rh // div), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
                         blurred = small.scaled(box_w, box_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                        if c_op < 0.999:
+                            painter.setOpacity(c_op)
                         painter.drawPixmap(dx1, dy1, blurred)
+                        if c_op < 0.999:
+                            painter.setOpacity(1.0)
 
             # 1.2 动图动态文字水印图层覆盖 (字体族/加粗/精确方位计算)
             if self._watermark_info and self._watermark_info.get("enabled"):
@@ -4199,13 +4212,10 @@ class MainWindow(QMainWindow):
                 idx = self.censor_style_combo.currentIndex()
                 if 0 <= idx < len(style_keys):
                     self.config["censor"]["style"] = style_keys[idx]
-            if hasattr(self, "censor_mode_combo"):
-                mode_keys = ["moderate", "slender", "full"]
-                idx = self.censor_mode_combo.currentIndex()
-                if 0 <= idx < len(mode_keys):
-                    self.config["censor"]["coverage_mode"] = mode_keys[idx]
             if hasattr(self, "censor_slider"):
-                self.config["censor"]["coverage_scale"] = round(self.censor_slider.value() / 100.0, 2)
+                self.config["censor"]["strength"] = self.censor_slider.value()
+            if hasattr(self, "censor_opacity_slider"):
+                self.config["censor"]["opacity"] = round(self.censor_opacity_slider.value() / 100.0, 2)
 
             # 2. 水印参数
             if "watermark" not in self.config:
@@ -4651,7 +4661,7 @@ class MainWindow(QMainWindow):
         c_row1.addWidget(self.reset_censor_btn)
         censor_vlayout.addLayout(c_row1)
 
-        # 第 2 行 (水平并排): 样式 + 模式 (流式排布)
+        # 第 2 行 (水平并排): 样式 + 透明度 (流式排布)
         c_row2 = FlowLayout(spacing=6)
         c_row2.setContentsMargins(0, 0, 0, 0)
         self.censor_style_combo = QComboBox()
@@ -4663,45 +4673,42 @@ class MainWindow(QMainWindow):
         c_style = censor_cfg.get("style", "black_bar")
         style_map = {"black_bar": 0, "mosaic": 1, "blur": 2}
         self.censor_style_combo.setCurrentIndex(style_map.get(c_style, 0))
-        self.censor_style_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
-        self.censor_style_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
+        self.censor_style_combo.currentIndexChanged.connect(self._on_censor_style_changed)
         c_row2.addWidget(wrap_flow_field("样式:", self.censor_style_combo))
 
-        self.censor_mode_combo = QComboBox()
-        make_responsive_combo(self.censor_mode_combo)
-        self.censor_mode_combo.setMinimumContentsLength(16)
-        self.censor_mode_combo.setMinimumWidth(160)
-        self.censor_mode_combo.setMaximumWidth(220)
-        self.censor_mode_combo.addItems([
-            "适中局部 (标准推荐)",
-            "轻量细条 (极简保留90%)",
-            "严实全遮 (100%覆盖)"
-        ])
-        c_mode = censor_cfg.get("coverage_mode", "moderate")
-        mode_map = {"moderate": 0, "slender": 1, "full": 2}
-        self.censor_mode_combo.setCurrentIndex(mode_map.get(c_mode, 0))
-        self.censor_mode_combo.currentIndexChanged.connect(self._on_censor_mode_changed)
-        self.censor_mode_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        c_row2.addWidget(wrap_flow_field("模式:", self.censor_mode_combo))
+        # 新增透明度拉杆 (20% - 100%, 默认 100%)
+        self.censor_opacity_slider = QSlider(Qt.Horizontal)
+        self.censor_opacity_slider.setRange(20, 100)
+        self.censor_opacity_slider.setMinimumWidth(120)
+        self.censor_opacity_slider.setMaximumWidth(200)
+        init_op = int(round(censor_cfg.get("opacity", 1.0) * 100))
+        self.censor_opacity_slider.setValue(max(20, min(100, init_op)))
+        self.censor_opacity_slider.valueChanged.connect(self._on_censor_opacity_changed)
+
+        self.censor_opacity_label = QLabel(f"{self.censor_opacity_slider.value()}%")
+        self.censor_opacity_label.setMinimumWidth(36)
+        self.censor_opacity_label.setStyleSheet("color: #818cf8; font-weight: bold;")
+        c_row2.addWidget(wrap_flow_slider("透明度:", self.censor_opacity_slider, self.censor_opacity_label))
         censor_vlayout.addLayout(c_row2)
 
-        # 第 3 行 (水平并排): 尺寸滑块 + 数值
+        # 第 3 行 (水平并排): 强度/颗粒滑块 + 数值
         c_row3 = FlowLayout(spacing=6)
         c_row3.setContentsMargins(0, 0, 0, 0)
         self.censor_slider = QSlider(Qt.Horizontal)
-        self.censor_slider.setRange(20, 120)
+        self.censor_slider.setRange(0, 100)
         self.censor_slider.setMinimumWidth(120)
         self.censor_slider.setMaximumWidth(260)
-        init_scale = int(censor_cfg.get("coverage_scale", 0.55) * 100)
-        self.censor_slider.setValue(max(20, min(120, init_scale)))
+        init_strength = int(censor_cfg.get("strength", 50))
+        self.censor_slider.setValue(max(0, min(100, init_strength)))
         self.censor_slider.valueChanged.connect(self._on_censor_slider_changed)
-        self.censor_slider.valueChanged.connect(lambda: self._schedule_config_save())
 
         self.censor_ratio_label = QLabel(f"{self.censor_slider.value()}%")
         self.censor_ratio_label.setMinimumWidth(36)
         self.censor_ratio_label.setStyleSheet("color: #818cf8; font-weight: bold;")
-        c_row3.addWidget(wrap_flow_slider("尺寸:", self.censor_slider, self.censor_ratio_label))
+        c_row3.addWidget(wrap_flow_slider("强度:", self.censor_slider, self.censor_ratio_label))
         censor_vlayout.addLayout(c_row3)
+
+        self._on_censor_style_changed()
 
         media_layout.addWidget(censor_box)
 
@@ -6132,20 +6139,39 @@ class MainWindow(QMainWindow):
         self._schedule_config_save()
         self._update_x_char_counter()
 
-    def _on_censor_mode_changed(self, idx):
-        if getattr(self, "_is_restoring_config", False):
-            return
-        if idx == 0:
-            self.censor_slider.setValue(55)
-        elif idx == 1:
-            self.censor_slider.setValue(30)
-        elif idx == 2:
-            self.censor_slider.setValue(100)
+    def _on_censor_style_changed(self, idx=None):
+        styles = ["black_bar", "mosaic", "blur"]
+        s_idx = self.censor_style_combo.currentIndex() if hasattr(self, "censor_style_combo") else 0
+        cur_style = styles[s_idx] if 0 <= s_idx < len(styles) else "black_bar"
+        if hasattr(self, "censor_slider") and hasattr(self, "censor_ratio_label"):
+            if cur_style == "black_bar":
+                self.censor_slider.setEnabled(False)
+                self.censor_slider.setToolTip("黑条模式无颗粒/强度参数")
+                self.censor_ratio_label.setEnabled(False)
+            elif cur_style == "mosaic":
+                self.censor_slider.setEnabled(True)
+                self.censor_slider.setToolTip("调节马赛克方块大小 (4-64px)")
+                self.censor_ratio_label.setEnabled(True)
+            elif cur_style == "blur":
+                self.censor_slider.setEnabled(True)
+                self.censor_slider.setToolTip("调节高斯模糊核大小 (5-99)")
+                self.censor_ratio_label.setEnabled(True)
         self._schedule_preview_refresh()
         self._schedule_config_save()
 
+    def _on_censor_opacity_changed(self, val):
+        if hasattr(self, "censor_opacity_label"):
+            self.censor_opacity_label.setText(f"{val}%")
+        self._schedule_preview_refresh()
+        self._schedule_config_save()
+
+    def _on_censor_mode_changed(self, idx=0):
+        """[Deprecated] 模式下拉已废弃，保留空实现以兼容旧调用"""
+        pass
+
     def _on_censor_slider_changed(self, val):
-        self.censor_ratio_label.setText(f"{val}%")
+        if hasattr(self, "censor_ratio_label"):
+            self.censor_ratio_label.setText(f"{val}%")
         self._schedule_preview_refresh()
         self._schedule_config_save()
 
@@ -6165,12 +6191,23 @@ class MainWindow(QMainWindow):
 
     def _get_current_censor_params(self):
         styles = ["black_bar", "mosaic", "blur"]
-        modes = ["moderate", "slender", "full"]
-        return (
-            styles[self.censor_style_combo.currentIndex()],
-            modes[self.censor_mode_combo.currentIndex()],
-            self.censor_slider.value() / 100.0
-        )
+        style_idx = self.censor_style_combo.currentIndex() if hasattr(self, "censor_style_combo") else 0
+        style = styles[style_idx] if 0 <= style_idx < len(styles) else "black_bar"
+        mode = "moderate"
+        ratio = 0.55
+        return style, mode, ratio
+
+    def _get_censor_strength(self) -> int:
+        return self.censor_slider.value() if hasattr(self, "censor_slider") else 50
+
+    def _get_censor_opacity(self) -> float:
+        return (self.censor_opacity_slider.value() / 100.0) if hasattr(self, "censor_opacity_slider") else 1.0
+
+    def _get_censor_mosaic_size(self) -> int:
+        return map_strength_to_mosaic_size(self._get_censor_strength())
+
+    def _get_censor_blur_ksize(self) -> int:
+        return map_strength_to_blur_ksize(self._get_censor_strength())
 
     def _schedule_preview_refresh(self, instant=False):
         """调度实时预览渲染（防抖刷新，即时响应用户参数微调）"""
@@ -6301,7 +6338,8 @@ class MainWindow(QMainWindow):
                     )
 
                     style_map = {"black_bar": "纯黑条", "mosaic": "马赛克", "blur": "高斯模糊"}
-                    censor_desc = f"{style_map.get(style, style)} ({int(ratio*100)}%, {len(final_boxes)}处)"
+                    c_op = self._get_censor_opacity()
+                    censor_desc = f"{style_map.get(style, style)} ({len(final_boxes)}处, 透明度{int(c_op*100)}%)"
 
                 # 3. 准备动态水印参数
                 wm_active = self.watermark_enabled_cb.isChecked()
@@ -6336,7 +6374,10 @@ class MainWindow(QMainWindow):
                 censor_info = {
                     "enabled": censor_active,
                     "style": style,
-                    "boxes": final_boxes
+                    "boxes": final_boxes,
+                    "mosaic_size": self._get_censor_mosaic_size(),
+                    "blur_ksize": self._get_censor_blur_ksize(),
+                    "opacity": self._get_censor_opacity(),
                 }
                 self.preview_canvas.set_censor_boxes(final_boxes, orig_w, orig_h, enabled=censor_active)
                 self.preview_canvas.set_gif_overlay(censor_info, wm_info)
@@ -6364,6 +6405,9 @@ class MainWindow(QMainWindow):
                 effective_boxes = self._get_effective_censor_boxes(
                     img_path, mode=mode, ratio=ratio
                 )
+                mosaic_size = self._get_censor_mosaic_size()
+                blur_ksize = self._get_censor_blur_ksize()
+                censor_op = self._get_censor_opacity()
                 censored_bgr, boxes = self.censor_engine.apply_censor(
                     img_path,
                     output_path=None,
@@ -6371,10 +6415,13 @@ class MainWindow(QMainWindow):
                     mode=mode,
                     custom_ratio=ratio,
                     resolved_boxes=effective_boxes,
+                    mosaic_size=mosaic_size,
+                    blur_ksize=blur_ksize,
+                    opacity=censor_op,
                 )
                 img_step = censored_bgr
                 style_map = {"black_bar": "纯黑条", "mosaic": "马赛克", "blur": "高斯模糊"}
-                censor_desc = f"{style_map.get(style, style)} ({int(ratio*100)}%, {len(boxes)}处)"
+                censor_desc = f"{style_map.get(style, style)} ({len(boxes)}处, 透明度{int(censor_op*100)}%)"
             else:
                 img_step = img_path
 
@@ -6463,9 +6510,15 @@ class MainWindow(QMainWindow):
 
         censor_boxes = []
         censor_style = "black_bar"
+        censor_mosaic_size = 20
+        censor_blur_ksize = 45
+        censor_opacity = 1.0
         if censor_params and censor_params.get("enabled"):
             censor_boxes = censor_params.get("boxes", [])
             censor_style = censor_params.get("style", "black_bar")
+            censor_mosaic_size = censor_params.get("mosaic_size", 20)
+            censor_blur_ksize = censor_params.get("blur_ksize", 45)
+            censor_opacity = censor_params.get("opacity", 1.0)
 
         wm_enabled = wm_params and wm_params.get("enabled") and bool(wm_params.get("text"))
         if wm_enabled:
@@ -6485,18 +6538,30 @@ class MainWindow(QMainWindow):
                     x2, y2 = min(w, x2), min(h, y2)
                     if x2 <= x1 or y2 <= y1:
                         continue
-                    roi = fr_bgr[y1:y2, x1:x2]
+                    orig_roi = fr_bgr[y1:y2, x1:x2].copy()
                     if censor_style == "black_bar":
-                        fr_bgr[y1:y2, x1:x2] = (0, 0, 0)
+                        censor_roi = np.zeros_like(orig_roi)
                     elif censor_style == "mosaic":
                         rw, rh = max(1, x2 - x1), max(1, y2 - y1)
-                        cell = max(4, rw // 15)
+                        cell = max(4, int(censor_mosaic_size))
                         small_w = max(1, rw // cell)
                         small_h = max(1, rh // cell)
-                        small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-                        fr_bgr[y1:y2, x1:x2] = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+                        small = cv2.resize(orig_roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                        censor_roi = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
                     elif censor_style == "blur":
-                        fr_bgr[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (45, 45), 30)
+                        k = int(censor_blur_ksize)
+                        if k % 2 == 0:
+                            k += 1
+                        k = max(3, min(99, k))
+                        censor_roi = cv2.GaussianBlur(orig_roi, (k, k), 30)
+                    else:
+                        censor_roi = np.zeros_like(orig_roi)
+
+                    if censor_opacity >= 0.999:
+                        fr_bgr[y1:y2, x1:x2] = censor_roi
+                    else:
+                        alpha = max(0.0, min(1.0, float(censor_opacity)))
+                        fr_bgr[y1:y2, x1:x2] = cv2.addWeighted(censor_roi, alpha, orig_roi, 1.0 - alpha, 0)
 
             # 2. 压制水印
             fr_pil = Image.fromarray(cv2.cvtColor(fr_bgr, cv2.COLOR_BGR2RGB))
@@ -6571,7 +6636,14 @@ class MainWindow(QMainWindow):
                         final_boxes = self._get_effective_censor_boxes(
                             current_file, orig_w=w_ref, orig_h=h_ref, mode=mode, ratio=ratio
                         )
-                        censor_params = {"enabled": True, "style": style, "boxes": final_boxes}
+                        censor_params = {
+                            "enabled": True,
+                            "style": style,
+                            "boxes": final_boxes,
+                            "mosaic_size": self._get_censor_mosaic_size(),
+                            "blur_ksize": self._get_censor_blur_ksize(),
+                            "opacity": self._get_censor_opacity(),
+                        }
 
                     wm_params = None
                     if wm_active:
@@ -6628,7 +6700,7 @@ class MainWindow(QMainWindow):
             current_img = self.image_paths[self.current_preview_index]
             _, _, current_ratio = self._get_current_censor_params()
             self.custom_censor_boxes[current_img] = [list(b) for b in boxes]
-            self.custom_censor_captured_ratios[current_img] = float(current_ratio)
+            self.custom_censor_captured_ratios[current_img] = 0.55
             self._schedule_preview_refresh(instant=True)
             self.notify(f"已同步更新当前作品打码框位置与尺寸 (共 {len(boxes)} 处)！", level="info")
 
@@ -7182,6 +7254,9 @@ class MainWindow(QMainWindow):
         is_bsky_censor = censor_enabled and self._is_platform_censor_checked("bluesky", platform_options)
 
         style, mode, ratio = self._get_current_censor_params()
+        censor_mosaic = self._get_censor_mosaic_size()
+        censor_blur = self._get_censor_blur_ksize()
+        censor_opacity = self._get_censor_opacity()
         wm_text = self.watermark_text_input.text().strip()
         wm_font = self.watermark_font_combo.currentText()
         wm_size_pct = self._get_watermark_size_pct()
@@ -7250,7 +7325,14 @@ class MainWindow(QMainWindow):
                         custom_boxes_source=custom_boxes_source,
                         captured_ratios_source=captured_ratios_source,
                     )
-                    c_params = {"enabled": True, "style": style, "boxes": final_boxes}
+                    c_params = {
+                        "enabled": True,
+                        "style": style,
+                        "boxes": final_boxes,
+                        "mosaic_size": censor_mosaic,
+                        "blur_ksize": censor_blur,
+                        "opacity": censor_opacity,
+                    }
 
                 # 1. DeviantArt 动图
                 da_out_path = None
@@ -7581,6 +7663,9 @@ class MainWindow(QMainWindow):
                         mode=mode,
                         custom_ratio=ratio,
                         resolved_boxes=effective_boxes,
+                        mosaic_size=censor_mosaic,
+                        blur_ksize=censor_blur,
+                        opacity=censor_opacity,
                     )
                     if wm_info:
                         pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_wm.{ext}"

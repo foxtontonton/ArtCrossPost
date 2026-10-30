@@ -251,25 +251,25 @@ class TestUIIconsAndLayout:
         assert bsky_policy_combo.width() <= 200, f"超宽容器下 Bluesky 策略下拉不应超过上限 200px，实际: {bsky_policy_combo.width()}"
 
     def test_left_panel_zone3_responsive_wrapping_and_bounds(self):
-        """测试 12: 验证左栏 3 号区组装：340px 下 c_row2 两下拉上下分行且文字完整、w_row4 三组分行；800px 下回流同行且滑杆/下拉不超上限"""
+        """测试 12: 验证左栏 3 号区组装：340px 下 c_row2 样式与透明度上下分行、w_row4 三组分行；800px 下回流同行且滑杆/下拉不超上限"""
         win = MainWindow()
 
-        # 1. c_row2 (打码样式与模式)
+        # 1. c_row2 (打码样式与透明度)
         style_box = win.censor_style_combo.parentWidget()
-        mode_box = win.censor_mode_combo.parentWidget()
+        op_box = win.censor_opacity_slider.parentWidget()
         c_row2 = style_box.parentWidget().layout().itemAt(2).layout()
 
         # 340px 下分行
         c_row2.setGeometry(QRect(0, 0, 340, 120))
-        assert mode_box.y() > style_box.y(), f"340px 下 c_row2 样式与模式应上下分行，实际: style_y={style_box.y()}, mode_y={mode_box.y()}"
+        assert op_box.y() > style_box.y(), f"340px 下 c_row2 样式与透明度应上下分行，实际: style_y={style_box.y()}, op_y={op_box.y()}"
         assert win.censor_style_combo.width() >= 150, "样式下拉宽度不低于 150"
-        assert win.censor_mode_combo.width() >= 160, "模式下拉宽度不低于 160"
+        assert win.censor_opacity_slider.width() >= 120, "透明度滑杆宽度不低于 120"
 
         # 800px 下回流同行
         c_row2.setGeometry(QRect(0, 0, 800, 120))
-        assert mode_box.y() == style_box.y(), f"800px 下 c_row2 应回流同行，实际: style_y={style_box.y()}, mode_y={mode_box.y()}"
+        assert abs(op_box.y() - style_box.y()) <= 4, f"800px 下 c_row2 应回流同行，实际: style_y={style_box.y()}, op_y={op_box.y()}"
         assert win.censor_style_combo.width() <= 220, f"样式下拉不超上限 220，实际: {win.censor_style_combo.width()}"
-        assert win.censor_mode_combo.width() <= 220, f"模式下拉不超上限 220，实际: {win.censor_mode_combo.width()}"
+        assert win.censor_opacity_slider.width() <= 200, f"透明度滑杆不超上限 200，实际: {win.censor_opacity_slider.width()}"
 
         # 2. w_row4 (水印字号、透明、颜色)
         size_box = win.watermark_size_slider.parentWidget()
