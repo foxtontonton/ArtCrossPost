@@ -4321,6 +4321,8 @@ class MainWindow(QMainWindow):
                     civitai_opts = self.platform_controls["civitai"]["options"]
                     if "censor" in civitai_opts:
                         self.config["defaults"]["civitai_censor"] = civitai_opts["censor"].isChecked()
+                    if "channel" in civitai_opts:
+                        self.config["defaults"]["civitai_channel"] = civitai_opts["channel"].currentData() or "auto" 
 
                 # Bluesky
                 if "bluesky" in self.platform_controls:
@@ -5664,6 +5666,51 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(civitai_censor)
             opts["censor"] = civitai_censor
 
+            civitai_channel_combo = QComboBox()
+            make_responsive_combo(civitai_channel_combo)
+            civitai_channel_combo.setMinimumContentsLength(10)
+            civitai_channel_combo.setMinimumWidth(130)
+            civitai_channel_combo.setMaximumWidth(190)
+            civitai_channel_combo.addItem("自动选路 (auto)", "auto")
+            civitai_channel_combo.addItem("官方 API (api)", "api")
+            civitai_channel_combo.addItem("浏览器 (browser)", "browser")
+            cur_ch = self.config.get("defaults", {}).get("civitai_channel", "auto")
+            for c_i in range(civitai_channel_combo.count()):
+                if civitai_channel_combo.itemData(c_i) == cur_ch:
+                    civitai_channel_combo.setCurrentIndex(c_i)
+                    break
+            civitai_channel_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
+            civitai_ch_box = wrap_flow_field("通道:", civitai_channel_combo)
+            opts_layout.addWidget(civitai_ch_box)
+            opts["channel"] = civitai_channel_combo
+
+            # API Key 状态与录入按钮
+            key_status_lbl = QLabel()
+            key_status_lbl.setObjectName("civitaiKeyStatusLbl")
+            self._update_civitai_key_status_badge(key_status_lbl)
+
+            key_btn = QPushButton("录入 Key")
+            key_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #272738;
+                    border: 1px solid #3f3f46;
+                    border-radius: 4px;
+                    color: #e2e8f0;
+                    font-size: 11px;
+                    padding: 2px 6px;
+                }
+                QPushButton:hover {
+                    background-color: #383852;
+                    border-color: #6366f1;
+                    color: #ffffff;
+                }
+            """)
+            key_btn.clicked.connect(lambda: self._open_civitai_key_dialog(key_status_lbl))
+            key_box = wrap_flow_field("API Key:", key_status_lbl, extra_widget=key_btn)
+            opts_layout.addWidget(key_box)
+            opts["key_status"] = key_status_lbl
+            opts["key_btn"] = key_btn
+
         elif disp.name == "bluesky":
             bsky_censor = QCheckBox("打码保护")
             bsky_censor.setChecked(self.config.get("defaults", {}).get("bluesky_censor", True))
@@ -5725,7 +5772,40 @@ class MainWindow(QMainWindow):
         }
         return card
 
+    def _open_civitai_key_dialog(self, key_lbl=None):
+        disp = next((d for d in self.dispatchers if d.name == "civitai"), None)
+        if disp and hasattr(disp, "login_interactive"):
+            success, msg = disp.login_interactive(parent_window=self)
+            self._update_civitai_key_status_badge(key_lbl)
+            if success:
+                self.notify("Civitai API Key 录入成功！", level="success")
+                self._refresh_all_platform_statuses()
+            else:
+                if "取消" not in msg:
+                    self.notify(f"Civitai Key 校验未通过: {msg}", level="warning")
+
+    def _update_civitai_key_status_badge(self, key_lbl=None):
+        if key_lbl is None:
+            if hasattr(self, "platform_controls") and "civitai" in self.platform_controls:
+                key_lbl = self.platform_controls["civitai"]["options"].get("key_status")
+        if not key_lbl:
+            return
+        from dispatchers.civitai_api import get_civitai_api_key, mask_civitai_api_key
+        key = get_civitai_api_key()
+        if key:
+            key_lbl.setText(f"({mask_civitai_api_key(key)})")
+            key_lbl.setStyleSheet("color: #10b981; font-weight: bold;")
+        else:
+            key_lbl.setText("(未配置)")
+            key_lbl.setStyleSheet("color: #9ca3af;")
+
     def _start_platform_direct_login(self, disp, status_lbl, login_btn):
+        if disp.name == "civitai":
+            cur_ch = self.config.get("defaults", {}).get("civitai_channel", "auto")
+            if cur_ch == "api":
+                self._open_civitai_key_dialog()
+                return
+
         if disp.name == "bluesky":
             login_btn.setEnabled(False)
             status_lbl.setText("(● 正在录入凭据...)")
@@ -7857,14 +7937,21 @@ class MainWindow(QMainWindow):
             "civitai_tool",
             self.config.get("civitai_tool", "ComfyUI")
         )
+        civitai_channel_val = self.config.get("defaults", {}).get(
+            "civitai_channel",
+            self.config.get("civitai_channel", "auto")
+        )
+        if "civitai" in self.platform_controls:
+            opts = self.platform_controls["civitai"]["options"]
+            if "channel" in opts:
+                civitai_channel_val = opts["channel"].currentData() or civitai_channel_val
+            if "censor" in opts:
+                platform_options["civitai_censor"] = opts["censor"].isChecked()
         platform_options["civitai_max_images_per_post"] = civitai_limit_val
         platform_options["civitai_resources"] = civitai_res_val
         platform_options["civitai_resources_scope"] = civitai_scope_val
         platform_options["civitai_tool"] = civitai_tool_val
-        if "civitai" in self.platform_controls:
-            opts = self.platform_controls["civitai"]["options"]
-            if "censor" in opts:
-                platform_options["civitai_censor"] = opts["censor"].isChecked()
+        platform_options["civitai_channel"] = civitai_channel_val
         platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
 
         if "patreon" in self.platform_controls:
@@ -8012,6 +8099,7 @@ class MainWindow(QMainWindow):
             "bluesky_images": bluesky_images,
             "bluesky_video": bsky_video_final_path,
             "bluesky_discarded_images_count": discarded_for_bsky,
+            "civitai_channel": civitai_channel_val,
             "civitai_max_images_per_post": civitai_limit_val,
             "civitai_resources": civitai_res_val,
             "civitai_resources_scope": civitai_scope_val,
@@ -8523,6 +8611,8 @@ class MainWindow(QMainWindow):
 
         if "civitai" in self.platform_controls:
             opts = self.platform_controls["civitai"]["options"]
+            if "channel" in opts:
+                platform_options["civitai_channel"] = opts["channel"].currentData() or "auto"
             if "censor" in opts:
                 platform_options["civitai_censor"] = opts["censor"].isChecked()
 

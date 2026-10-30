@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "log_drawer_expanded": True,                          # 底部日志栏默认展开状态
     "settings_dialog_size": [760, 680],                   # 系统设置窗口记忆尺寸 (宽, 高)
     "settings_dialog_tab": 0,                             # 系统设置窗口记忆激活选项卡
+    "civitai_channel": "auto",                            # Civitai 分发通道: "auto" (默认按资源选路) | "api" | "browser"
     "civitai_max_images_per_post": 20,                   # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
     "civitai_resources": [],                             # Civitai 关联模型资源 (支持 ID / URL / {"id": ..., "version": ...})
     "civitai_resources_scope": "all",                    # 关联作用域: "all"(全图) | "cover"(仅封面首图)
@@ -101,6 +102,7 @@ DEFAULT_CONFIG = {
         "deviantart_censor": True,        # DeviantArt 专属打码保护开关
         "deviantart_keep_preset_description": True, # DA 发布保留表单预设描述 (默认 True，关闭则直接替换)
         "deviantart_max_images_per_deviation": 10, # 单作品图片上限 (默认10张，Core会员可调至100)
+        "civitai_channel": "auto",        # Civitai 分发通道: "auto" (默认按资源选路) | "api" | "browser"
         "civitai_max_images_per_post": 20, # Civitai 单帖图片上限 (平台硬顶 20，配置只许调小)
         "civitai_resources": [],          # Civitai 关联模型资源 (支持 ID / URL / {"id": ..., "version": ...})
         "civitai_resources_scope": "all", # 关联作用域: "all"(全图) | "cover"(仅封面首图)
@@ -162,6 +164,14 @@ def load_config():
                     merged["civitai_tool"] = str(merged["civitai_tool"]).strip()
                 if isinstance(merged.get("defaults"), dict) and "civitai_tool" in merged["defaults"] and merged["defaults"]["civitai_tool"] is not None:
                     merged["defaults"]["civitai_tool"] = str(merged["defaults"]["civitai_tool"]).strip()
+
+                # Civitai 分发通道校验 ("auto" | "api" | "browser")
+                if "civitai_channel" in merged:
+                    val = str(merged["civitai_channel"]).lower().strip()
+                    merged["civitai_channel"] = val if val in ("auto", "api", "browser") else "auto"
+                if isinstance(merged.get("defaults"), dict) and "civitai_channel" in merged["defaults"]:
+                    val = str(merged["defaults"]["civitai_channel"]).lower().strip()
+                    merged["defaults"]["civitai_channel"] = val if val in ("auto", "api", "browser") else "auto"
 
                 return merged
         except Exception:
