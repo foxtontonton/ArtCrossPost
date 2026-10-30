@@ -14,7 +14,7 @@ ArtCrossPost - Signature & Markdown Link Utilities
    正文纯文本填写，<、>、& 严格转义；正文与签名纯文本段中的方括号不得被误解析为链接；
    链接解析只认签名模板来源。
 3. 提交前回读断言:
-   回读编辑器 HTML，断言 5 个签名链接的 <a href="..."> 全部存在；缺任一报错阻断发布。
+   回读编辑器 HTML，断言 6 个签名链接的 <a href="..."> 全部存在；缺任一报错阻断发布。
 4. 纯文本回退:
    纯文本平台或回退上下文提取显示文字: [Display](URL) -> Display。
 """
@@ -31,19 +31,21 @@ CANONICAL_SIGNATURE_TEMPLATE = (
     "💜Patreon：[FOXTONTONTON](https://patreon.com/foxtontonton)\n\n"
     "☕Ko-fi: [FOXTONTONTON](https://ko-fi.com/foxtontonton)\n\n"
     "💎Civitai: [FOXTONTONTON](https://civitai.red/user/FOXTONTONTON)\n\n"
+    "🦋Bluesky: [FOXTONTONTON](https://bsky.app/profile/foxtontonton.bsky.social)\n\n"
     "You can find me on any of these platforms. Follow wherever you already hang out, "
     "and you won't miss the next chapter, illustration, or animation.\n\n"
     "If you like what you see, follow, like, and watch me — and if you'd like to support my work, "
     "you can buy me a coffee on Ko-fi. Thank you so much!"
 )
 
-# 5 个规范引流链接 (平台标识, 目标 URL)
+# 6 个规范引流链接 (平台标识, 目标 URL)
 CANONICAL_SIGNATURE_LINKS: List[Tuple[str, str]] = [
     ("X", "https://x.com/FOXTONTONTON"),
     ("DeviantArt", "https://www.deviantart.com/foxtontonton"),
     ("Patreon", "https://patreon.com/foxtontonton"),
     ("Ko-fi", "https://ko-fi.com/foxtontonton"),
     ("Civitai", "https://civitai.red/user/FOXTONTONTON"),
+    ("Bluesky", "https://bsky.app/profile/foxtontonton.bsky.social"),
 ]
 
 # Markdown 链接匹配正则: [显示文本](URL)
@@ -222,7 +224,7 @@ def verify_signature_links_in_html(
     da_post_url: Optional[str] = None,
 ) -> Tuple[bool, List[str]]:
     """
-    回读富文本编辑器 HTML，严格断言签名中的 5 个真实超链接 <a href="目标URL"> 全部存在。
+    回读富文本编辑器 HTML，严格断言签名中的 6 个真实超链接 <a href="目标URL"> 全部存在。
     缺任一返回 (False, [未生效链接清单])。
     禁止纯文本填了就算成功。
 

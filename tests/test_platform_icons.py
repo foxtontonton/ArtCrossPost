@@ -88,6 +88,7 @@ def test_icon_files_exist_and_decodable():
         "patreon.png": (256, 256),
         "civitai.png": (48, 48),
         "kofi.png": (64, 64),
+        "bluesky.png": (128, 128),
     }
 
     for filename, min_expected_size in expected_files.items():
@@ -110,7 +111,7 @@ def test_platform_icon_helper_known_and_unknown_keys(qapp):
     - 支持常见别名 (x_twitter, ko-fi 等)
     - 对未知 key 或空 key 返回空图标 QIcon()，不抛出异常
     """
-    known_keys = ["x", "deviantart", "patreon", "civitai", "kofi"]
+    known_keys = ["x", "deviantart", "patreon", "civitai", "kofi", "bluesky"]
     for k in known_keys:
         icon = platform_icon(k)
         assert isinstance(icon, QIcon), f"platform_icon({k}) 应返回 QIcon 实例"
@@ -120,6 +121,7 @@ def test_platform_icon_helper_known_and_unknown_keys(qapp):
     assert not platform_icon("x_twitter").isNull()
     assert not platform_icon("twitter").isNull()
     assert not platform_icon("ko-fi").isNull()
+    assert not platform_icon("bsky").isNull()
 
     # 未知 key 与非法入参容错
     assert platform_icon("unknown_platform_xyz").isNull()
@@ -146,6 +148,7 @@ def test_platform_profile_urls_exact_match():
         "patreon": "https://patreon.com/foxtontonton",
         "civitai": "https://civitai.red/user/FOXTONTONTON",
         "kofi": "https://ko-fi.com/foxtontonton",
+        "bluesky": "https://bsky.app/profile/foxtontonton.bsky.social",
     }
 
     # 断言 DEFAULT_CONFIG 中的默认配置
@@ -160,6 +163,7 @@ def test_platform_profile_urls_exact_match():
         assert get_platform_profile_url(k) == url
     assert get_platform_profile_url("x_twitter") == "https://x.com/FOXTONTONTON"
     assert get_platform_profile_url("ko-fi") == "https://ko-fi.com/foxtontonton"
+    assert get_platform_profile_url("bsky") == "https://bsky.app/profile/foxtontonton.bsky.social"
 
 
 # ==============================================================================
@@ -175,6 +179,8 @@ def test_open_platform_profile_calls_browser(qapp):
         ("patreon", "https://patreon.com/foxtontonton"),
         ("civitai", "https://civitai.red/user/FOXTONTONTON"),
         ("kofi", "https://ko-fi.com/foxtontonton"),
+        ("bluesky", "https://bsky.app/profile/foxtontonton.bsky.social"),
+        ("bsky", "https://bsky.app/profile/foxtontonton.bsky.social"),
     ]
 
     for key, expected_url in test_cases:
@@ -208,7 +214,7 @@ def test_icon_click_does_not_toggle_checkbox(mock_main_window):
     win = mock_main_window
 
     for plat_name, ctrl in win.platform_controls.items():
-        if plat_name not in ("x_twitter", "deviantart", "patreon", "kofi", "civitai"):
+        if plat_name not in ("x_twitter", "deviantart", "patreon", "kofi", "civitai", "bluesky"):
             continue
         cb = ctrl["checkbox"]
         icon_btn = ctrl["icon_btn"]

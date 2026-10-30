@@ -1125,8 +1125,8 @@ class CivitaiDispatcher(BaseDispatcher):
                                     self.delete_orphan_draft(page, detected_draft_id)
                                 context.close()
                                 return False, f"Civitai 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
-                            logger.info("[Civitai] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
-                            compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "5/5 真超链接已生效"))
+                            logger.info("[Civitai] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
+                            compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "6/6 真超链接已生效"))
                         else:
                             desc_box.fill(desc)
                             time.sleep(0.5)

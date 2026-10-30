@@ -180,12 +180,13 @@ class TestUIFollowupBatch:
         body_part, sig_part = split_body_and_signature(rendered)
         assert "[" not in sig_part and "]" not in sig_part, "签名部分不得有任何方括号残留"
 
-        # 3. 验证 extract_facets 准确提取全部 5 个链接 facet
+        # 3. 验证 extract_facets 准确提取全部 6 个链接 facet (含第 6 个 Bluesky 链接)
         facets = extract_facets(rendered)
         link_facets = [f for f in facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
-        assert len(link_facets) == 5, f"应准确提取全部 5 个链接 facet，实际提取: {len(link_facets)}"
+        assert len(link_facets) == 6, f"应准确提取全部 6 个链接 facet，实际提取: {len(link_facets)}"
 
         facet_uris = [f["features"][0]["uri"] for f in link_facets]
+        assert "https://bsky.app/profile/foxtontonton.bsky.social" in facet_uris
         for _, expected_url in CANONICAL_SIGNATURE_LINKS:
             assert expected_url in facet_uris, f"链接 facet 必须命中签名中的引流 URL: {expected_url}"
 

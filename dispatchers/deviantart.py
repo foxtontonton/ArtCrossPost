@@ -832,9 +832,9 @@ class DeviantArtDispatcher(BaseDispatcher):
                         missing_str = ", ".join(sig_missing)
                         logger.error(f"[DeviantArt] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
                         return False, f"DeviantArt 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}。发布已中止，草稿保留在 Studio。"
-                    logger.info("[DeviantArt] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
+                    logger.info("[DeviantArt] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
                     if compliance is not None and isinstance(compliance, list):
-                        compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, "5/5 真超链接已生效"))
+                        compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, "6/6 真超链接已生效"))
 
                 page.wait_for_timeout(300)
 
