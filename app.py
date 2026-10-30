@@ -2702,6 +2702,18 @@ def normalize_tags_to_string(raw_text: str) -> str:
     return ", ".join(tags)
 
 
+class VerticalScrollContent(QWidget):
+    """
+    用于垂直单向滚动区域 (QScrollArea) 的容器控件。
+    将 minimumSizeHint 的宽度设为 0，确保在启用 setWidgetResizable(True) 时，
+    容器宽度始终紧密跟随 QScrollArea viewport 宽度缩放，杜绝因内部控件固有尺寸
+    导致横向反向撑大或横向滚动条溢出。
+    """
+    def minimumSizeHint(self):
+        sz = super().minimumSizeHint()
+        return QSize(0, sz.height())
+
+
 class SmartTagEdit(QTextEdit):
     """
     智能标签输入框:
@@ -2712,6 +2724,8 @@ class SmartTagEdit(QTextEdit):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text = lambda: self.toPlainText()
         self.setText = lambda t: self.setPlainText(t)
 
@@ -4461,7 +4475,10 @@ class MainWindow(QMainWindow):
         # ==================== 第 1 栏 (左侧)：统一内容与图像保护控制 ====================
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_content = QWidget()
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.left_scroll = left_scroll
+        left_content = VerticalScrollContent()
+        self.left_content = left_content
         left_content.setStyleSheet("background-color: #121218;")
         left_layout = QVBoxLayout(left_content)
         self.left_layout = left_layout
@@ -4511,6 +4528,8 @@ class MainWindow(QMainWindow):
 
         self.tags_input = SmartTagEdit()
         self.tags_input.setObjectName("tags_input")
+        self.tags_input.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.tags_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         if hasattr(self.tags_input, "viewport"):
             self.tags_input.viewport().setObjectName("tags_input_viewport")
         self.tags_input.setPlaceholderText("通用标签 (输入空格、逗号或回车自动识别添加逗号，支持 # 识别)...")
@@ -4520,8 +4539,9 @@ class MainWindow(QMainWindow):
         tags_layout.addWidget(self.tags_input)
         meta_layout.addLayout(tags_layout)
 
-        # 全局开关：NSFW 与 AI 创作并排
-        toggle_row = QHBoxLayout()
+        # 全局开关：NSFW 与 AI 创作并排 (流式排布，狭窄或大字号时自然换行)
+        toggle_row = FlowLayout(spacing=6)
+        toggle_row.setContentsMargins(0, 0, 0, 0)
         self.nsfw_checkbox = QCheckBox("🔥 成人/敏感 (NSFW)")
         self.nsfw_checkbox.setChecked(self.config["defaults"].get("x_sensitive", True))
         self.nsfw_checkbox.stateChanged.connect(self._on_nsfw_toggled)
@@ -4533,7 +4553,6 @@ class MainWindow(QMainWindow):
         self.ai_checkbox.stateChanged.connect(self._on_master_ai_toggled)
         self.ai_checkbox.stateChanged.connect(lambda: self._schedule_config_save())
         toggle_row.addWidget(self.ai_checkbox)
-        toggle_row.addStretch()
         meta_layout.addLayout(toggle_row)
         self.meta_group = meta_group
         left_layout.addWidget(meta_group, 0)
@@ -4545,19 +4564,22 @@ class MainWindow(QMainWindow):
         desc_layout.setSpacing(6)
         self.desc_input = QTextEdit()
         self.desc_input.setObjectName("desc_input")
+        self.desc_input.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.desc_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         if hasattr(self.desc_input, "viewport"):
             self.desc_input.viewport().setObjectName("desc_input_viewport")
         self.desc_input.setPlaceholderText("输入作品描述、剧情背景、世界观或想对粉丝说的话...")
         self.desc_input.setMinimumHeight(85)
         desc_layout.addWidget(self.desc_input, 1)
 
-        sig_layout = QHBoxLayout()
+        # 签名与字数统计行 (流式排布，狭窄或大字号时自然换行)
+        sig_layout = FlowLayout(spacing=6)
+        sig_layout.setContentsMargins(0, 0, 0, 0)
         append_sig_btn = QPushButton("一键追加赞助引流尾巴 (Patreon/Ko-fi)")
         append_sig_btn.setObjectName("secondaryBtn")
         append_sig_btn.clicked.connect(self._append_signature)
         sig_layout.addWidget(append_sig_btn)
 
-        sig_layout.addStretch()
         self.x_char_counter_lbl = QLabel("X (Twitter): 0 / 280")
         self.x_char_counter_lbl.setStyleSheet("color: #9ca3af; font-weight: bold;")
         sig_layout.addWidget(self.x_char_counter_lbl)
@@ -4967,9 +4989,13 @@ class MainWindow(QMainWindow):
         # ==================== 第 3 栏 (右侧)：目标平台矩阵与发布控制 ====================
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        right_content = QWidget()
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.right_scroll = right_scroll
+        right_content = VerticalScrollContent()
+        self.right_content = right_content
         right_content.setStyleSheet("background-color: #121218;")
         right_layout = QVBoxLayout(right_content)
+        self.right_layout = right_layout
         right_layout.setContentsMargins(10, 4, 4, 4)
         right_layout.setSpacing(12)
 
