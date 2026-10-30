@@ -61,10 +61,24 @@ class FlowLayout(QLayout):
     def minimumSize(self):
         size = QSize()
         for item in self.itemList:
-            size = size.expandedTo(item.minimumSize())
+            size = size.expandedTo(self._effective_size(item))
         margins = self.contentsMargins()
         size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
         return size
+
+    def _effective_size(self, item):
+        hint = item.sizeHint()
+        min_sz = item.minimumSize()
+        wid = item.widget()
+        if wid is not None:
+            min_w = max(min_sz.width(), wid.minimumWidth(), wid.minimumSize().width(), wid.minimumSizeHint().width())
+            min_h = max(min_sz.height(), wid.minimumHeight(), wid.minimumSize().height(), wid.minimumSizeHint().height())
+        else:
+            min_w = min_sz.width()
+            min_h = min_sz.height()
+        w = max(hint.width(), min_w)
+        h = max(hint.height(), min_h)
+        return QSize(w, h)
 
     def _doLayout(self, rect, test_only):
         m = self.contentsMargins()
@@ -78,7 +92,7 @@ class FlowLayout(QLayout):
         cur_line_w = 0
 
         for item in self.itemList:
-            item_w = item.sizeHint().width()
+            item_w = self._effective_size(item).width()
             if cur_line and (cur_line_w + spacing + item_w > effective_rect.width()):
                 lines.append(cur_line)
                 cur_line = [item]
@@ -95,10 +109,10 @@ class FlowLayout(QLayout):
 
         cur_y = y
         for line in lines:
-            line_height = max((it.sizeHint().height() for it in line), default=0)
+            line_height = max((self._effective_size(it).height() for it in line), default=0)
             cur_x = x
             for it in line:
-                it_sz = it.sizeHint()
+                it_sz = self._effective_size(it)
                 if not test_only:
                     it_y = cur_y + (line_height - it_sz.height()) // 2
                     it.setGeometry(QRect(QPoint(cur_x, it_y), it_sz))
