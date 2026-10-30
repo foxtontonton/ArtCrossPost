@@ -619,18 +619,24 @@ class BlueskyDispatcher(BaseDispatcher):
 
         # P0-2: 字数上限与字素簇计数
         grapheme_len = count_graphemes(base_text)
-        over_limit_action = platform_opts.get("bluesky_over_limit_action")
-        if not over_limit_action and grapheme_len > MAX_GRAPHEMES:
-            over_limit_action = "truncate"
-
         chunks = []
         if grapheme_len <= MAX_GRAPHEMES:
             chunks = [base_text]
         else:
+            over_limit_action = platform_opts.get("bluesky_over_limit_action")
+            if not over_limit_action:
+                policy = platform_opts.get("bluesky_over_limit_policy")
+                if policy in ("truncate", "thread"):
+                    over_limit_action = policy
+                else:
+                    return False, f"Bluesky 文本字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})"
+
             if over_limit_action == "thread":
                 chunks = split_into_thread(base_text, MAX_GRAPHEMES)
-            else:
+            elif over_limit_action == "truncate":
                 chunks = [truncate_text(base_text, MAX_GRAPHEMES)]
+            else:
+                return False, f"Bluesky 文本字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})"
 
         if not chunks or not chunks[0]:
             return False, "发布内容为空，已终止"

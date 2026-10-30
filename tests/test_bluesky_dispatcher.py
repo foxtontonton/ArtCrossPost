@@ -604,6 +604,124 @@ def test_publish_thread_reply_chain(temp_cookies_dir):
         assert second_post["reply"]["parent"]["uri"] == created_uris[0]
 
 
+def test_publish_over_limit_no_action_ask_returns_false(temp_cookies_dir):
+    disp = BlueskyDispatcher(temp_cookies_dir)
+    disp._save_credentials({
+        "handle": "fox.bsky.social",
+        "app_password": "test-password",
+        "accessJwt": "mock-jwt",
+        "did": "did:plc:test123"
+    })
+
+    long_desc = "超限文本段落。" * 60
+    payload = {
+        "title": "长文标题",
+        "description": long_desc,
+        "platform_options": {
+            # 未提供 bluesky_over_limit_action，policy 为 ask
+            "bluesky_over_limit_policy": "ask",
+            "bluesky_ai_hashtags": False
+        }
+    }
+
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_get.return_value = mock_resp
+
+        ok, msg = disp.publish(payload)
+        assert ok is False
+        assert "超限且未指定处理方式" in msg
+
+
+def test_publish_over_limit_fallback_to_policy_truncate(temp_cookies_dir):
+    disp = BlueskyDispatcher(temp_cookies_dir)
+    disp._save_credentials({
+        "handle": "fox.bsky.social",
+        "app_password": "test-password",
+        "accessJwt": "mock-jwt",
+        "did": "did:plc:test123"
+    })
+
+    created_records = []
+
+    def _mock_post(url, json=None, data=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "createRecord" in url:
+            created_records.append(json["record"])
+            resp.json.return_value = {"uri": "at://did:plc:test123/app.bsky.feed.post/3rkey", "cid": "mockcid"}
+        return resp
+
+    def _mock_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "getPostThread" in url:
+            resp.json.return_value = {"thread": {"post": {"record": created_records[-1]}}}
+        return resp
+
+    long_desc = "超限文本截断测试段落。" * 40
+    payload = {
+        "title": "截断测试",
+        "description": long_desc,
+        "platform_options": {
+            # 未提供 bluesky_over_limit_action，policy 为 truncate
+            "bluesky_over_limit_policy": "truncate",
+            "bluesky_ai_hashtags": False
+        }
+    }
+
+    with patch("requests.post", side_effect=_mock_post), patch("requests.get", side_effect=_mock_get):
+        ok, msg = disp.publish(payload)
+        assert ok is True
+        assert len(created_records) == 1
+        assert count_graphemes(created_records[0]["text"]) <= MAX_GRAPHEMES
+        assert created_records[0]["text"].endswith("...")
+
+
+def test_publish_over_limit_fallback_to_policy_thread(temp_cookies_dir):
+    disp = BlueskyDispatcher(temp_cookies_dir)
+    disp._save_credentials({
+        "handle": "fox.bsky.social",
+        "app_password": "test-password",
+        "accessJwt": "mock-jwt",
+        "did": "did:plc:test123"
+    })
+
+    created_records = []
+
+    def _mock_post(url, json=None, data=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "createRecord" in url:
+            created_records.append(json["record"])
+            resp.json.return_value = {"uri": f"at://did:plc:test123/app.bsky.feed.post/rkey{len(created_records)}", "cid": "mockcid"}
+        return resp
+
+    def _mock_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "getPostThread" in url:
+            resp.json.return_value = {"thread": {"post": {"record": created_records[-1]}}}
+        return resp
+
+    long_desc = "超限串推策略回退测试段落。" * 40
+    payload = {
+        "title": "串推测试",
+        "description": long_desc,
+        "platform_options": {
+            # 未提供 bluesky_over_limit_action，policy 为 thread
+            "bluesky_over_limit_policy": "thread",
+            "bluesky_ai_hashtags": False
+        }
+    }
+
+    with patch("requests.post", side_effect=_mock_post), patch("requests.get", side_effect=_mock_get):
+        ok, msg = disp.publish(payload)
+        assert ok is True
+        assert len(created_records) >= 2
+
+
 # ==============================================================================
 # 8. 删除帖子 delete_post() 与自检探针测试
 # ==============================================================================
