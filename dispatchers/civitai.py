@@ -301,8 +301,18 @@ class CivitaiDispatcher(BaseDispatcher):
         p_dir.mkdir(parents=True, exist_ok=True)
         return str(p_dir.resolve())
 
+    def has_api_key(self) -> bool:
+        """检查是否存在有效 Civitai API Key (环境变量或本地凭据文件)"""
+        try:
+            from .civitai_api import get_civitai_api_key
+        except ImportError:
+            from dispatchers.civitai_api import get_civitai_api_key
+        return bool(get_civitai_api_key(self.data_dir))
+
     def has_saved_cookies(self) -> bool:
         """检查是否有保存的 Cookie 文件，或者持久化 profile 中已建立 Cookie 会话"""
+        if self.has_api_key():
+            return True
         if self.cookies_file.exists():
             return True
         prof_cookie = Path(self.get_app_browser_profile_dir()) / "Default" / "Network" / "Cookies"
@@ -323,6 +333,13 @@ class CivitaiDispatcher(BaseDispatcher):
                     }
             except Exception as e:
                 logger.warning(f"[{self.name}] 读取 profile 异常: {e}")
+
+        if self.has_api_key():
+            return {
+                "username": "FOXTONTONTON",
+                "avatar": None,
+                "logged_in": True
+            }
 
         cookies = self.get_cookies()
         if cookies and any("token" in c.get("name", "").lower() or "civ" in c.get("name", "").lower() for c in cookies):
@@ -345,6 +362,140 @@ class CivitaiDispatcher(BaseDispatcher):
             "avatar": None,
             "logged_in": False
         }
+
+    def login_interactive(self, parent_window=None) -> Tuple[bool, str]:
+        """弹出 Civitai API Key 录入与校验窗口 (仿 Bluesky 交互)"""
+        try:
+            from .civitai_api import (
+                get_civitai_api_key, save_civitai_api_key, clear_civitai_credentials,
+                mask_civitai_api_key, CivitaiApiClient
+            )
+        except ImportError:
+            from dispatchers.civitai_api import (
+                get_civitai_api_key, save_civitai_api_key, clear_civitai_credentials,
+                mask_civitai_api_key, CivitaiApiClient
+            )
+
+        try:
+            from PyQt5.QtWidgets import (
+                QApplication, QDialog, QVBoxLayout, QHBoxLayout,
+                QLabel, QLineEdit, QPushButton, QCheckBox
+            )
+            from PyQt5.QtCore import Qt
+        except ImportError:
+            return False, "无 GUI 运行环境，无法弹出凭据录入界面"
+
+        if QApplication.instance() is None:
+            return False, "无 GUI 运行环境，无法弹出凭据录入界面"
+
+        cur_key = get_civitai_api_key(self.data_dir) or ""
+
+        dialog = QDialog(parent_window)
+        dialog.setWindowTitle("Civitai API 凭据授权 (MCP 官方路线)")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet("background-color: #181822; color: #f3f4f6;")
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        guide_lbl = QLabel(
+            "<b>如何获取 Civitai API Key:</b><br>"
+            "1. 打开网页 <a href='https://civitai.com/user/account' style='color:#60a5fa;'>civitai.com/user/account</a><br>"
+            "2. 滚动至 <b>API Keys</b> 区域，点击 <b>Add API Key</b> 并勾选发帖权限<br>"
+            "3. 复制生成的 API Key 填入下方<br>"
+            "<span style='color:#9ca3af; font-size:11px;'>安全提示：API Key 仅保存在本机 data/ 目录或环境变量，绝不提交至代码仓库。</span>"
+        )
+        guide_lbl.setOpenExternalLinks(True)
+        guide_lbl.setWordWrap(True)
+        layout.addWidget(guide_lbl)
+
+        status_box = QLabel(f"当前已存状态: {mask_civitai_api_key(cur_key)}")
+        status_box.setStyleSheet("color: #10b981; font-weight: 500;" if cur_key else "color: #9ca3af;")
+        layout.addWidget(status_box)
+
+        layout.addWidget(QLabel("Civitai API Key:"))
+        key_edit = QLineEdit(cur_key)
+        key_edit.setPlaceholderText("填入 Civitai API Key")
+        key_edit.setEchoMode(QLineEdit.Password)
+        key_edit.setStyleSheet("background-color: #0c0d14; border: 1px solid #3f3f46; border-radius: 6px; padding: 6px; color: #fff;")
+        layout.addWidget(key_edit)
+
+        show_cb = QCheckBox("显示 Key 字符")
+        show_cb.stateChanged.connect(
+            lambda state: key_edit.setEchoMode(QLineEdit.Normal if state == Qt.Checked else QLineEdit.Password)
+        )
+        layout.addWidget(show_cb)
+
+        result_lbl = QLabel()
+        result_lbl.setStyleSheet("color: #f87171; font-weight: bold;")
+        result_lbl.setWordWrap(True)
+        result_lbl.hide()
+        layout.addWidget(result_lbl)
+
+        btn_row = QHBoxLayout()
+        clear_btn = QPushButton("清空凭据")
+        clear_btn.setStyleSheet("background-color: #7f1d1d; color: #fecaca; padding: 6px 12px; border-radius: 6px;")
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet("background-color: #27272a; color: #e4e4e7; padding: 6px 14px; border-radius: 6px;")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(cancel_btn)
+
+        confirm_btn = QPushButton("验证并连接")
+        confirm_btn.setStyleSheet("background-color: #2563eb; color: #ffffff; font-weight: bold; padding: 6px 16px; border-radius: 6px;")
+        btn_row.addWidget(confirm_btn)
+        layout.addLayout(btn_row)
+
+        login_result = {"ok": False, "msg": "用户取消录入"}
+
+        def _on_clear():
+            clear_civitai_credentials(self.data_dir)
+            key_edit.clear()
+            status_box.setText("当前已存状态: 未配置")
+            status_box.setStyleSheet("color: #9ca3af;")
+            result_lbl.setText("已清空本地保存的 API Key")
+            result_lbl.setStyleSheet("color: #fbbf24;")
+            result_lbl.show()
+
+        clear_btn.clicked.connect(_on_clear)
+
+        def _on_confirm():
+            k = key_edit.text().strip()
+            if not k:
+                result_lbl.setText("请输入 Civitai API Key")
+                result_lbl.show()
+                return
+
+            result_lbl.setText("正在连接 Civitai MCP 验证凭据...")
+            result_lbl.setStyleSheet("color: #60a5fa;")
+            result_lbl.show()
+            confirm_btn.setEnabled(False)
+            QApplication.processEvents()
+
+            try:
+                client = CivitaiApiClient(api_key=k)
+                client.handshake()
+                who_res = client.whoami()
+                who_text = who_res.get("result", {}).get("content", [{}])[0].get("text", "")
+                save_civitai_api_key(k, self.data_dir)
+                login_result["ok"] = True
+                login_result["msg"] = f"Civitai API Key 验证成功: {who_text[:50]}"
+                dialog.accept()
+            except Exception as e:
+                result_lbl.setText(f"验证失败: {e}")
+                result_lbl.setStyleSheet("color: #f87171;")
+                result_lbl.show()
+            finally:
+                confirm_btn.setEnabled(True)
+
+        confirm_btn.clicked.connect(_on_confirm)
+
+        if dialog.exec_() == QDialog.Accepted and login_result["ok"]:
+            return True, login_result["msg"]
+        return login_result["ok"], login_result["msg"]
 
     def probe_login(self) -> dict:
         """轻量探针检查登录态"""
@@ -956,6 +1107,63 @@ class CivitaiDispatcher(BaseDispatcher):
         return success_count, failed_count
 
     def publish(self, payload: dict) -> Tuple[bool, str, List[dict]]:
+        """
+        Civitai 原生分发入口 (混合通道按帖路由):
+        新配置 civitai_channel (auto 默认 / api / browser):
+        - auto: 生效资源数 ≥2 -> 浏览器通道; ≤1 -> API 通道 (恰 1 个经 modelVersionId 携带);
+                无 key -> 浏览器通道并注明
+        - api: 强制走 API 通道 (无 key -> 报错提示录 key，不许静默回退)
+        - browser: 强制走浏览器通道
+        - civitai_tool 不作回退触发; API 通道不带工具标注，但结果面板明示 'Civitai（API）：未携带工具标注'
+        """
+        try:
+            from .civitai_api import resolve_civitai_channel, get_civitai_api_key, publish_via_api, CivitaiApiError
+        except ImportError:
+            from dispatchers.civitai_api import resolve_civitai_channel, get_civitai_api_key, publish_via_api, CivitaiApiError
+
+        channel_cfg = (
+            payload.get("civitai_channel")
+            or payload.get("platform_options", {}).get("civitai_channel")
+            or load_config().get("defaults", {}).get("civitai_channel", "auto")
+        )
+
+        raw_resources = payload.get("civitai_resources")
+        if raw_resources is None:
+            raw_resources = payload.get("platform_options", {}).get("civitai_resources")
+        if raw_resources is None:
+            raw_resources = load_config().get("civitai_resources", [])
+
+        api_key = get_civitai_api_key(self.data_dir)
+
+        try:
+            chosen_channel, route_note, model_ver_id = resolve_civitai_channel(
+                channel_config=channel_cfg,
+                resources=raw_resources,
+                api_key=api_key
+            )
+        except CivitaiApiError as e:
+            logger.error(f"[Civitai] 通道路由判定失败: {e}")
+            return False, str(e), []
+
+        if chosen_channel == "api":
+            logger.info(f"[Civitai] 选定 API 官方通道发布 (modelVersionId={model_ver_id}, note={route_note})")
+            notes = [route_note] if route_note else []
+            return publish_via_api(
+                payload=payload,
+                api_key=api_key,
+                model_version_id=model_ver_id,
+                channel_notes=notes
+            )
+
+        # 选定或回退浏览器通道
+        logger.info(f"[Civitai] 选定浏览器自动化通道发布 (note={route_note})")
+        success, msg, compliance = self._publish_browser(payload)
+        if route_note:
+            msg = f"{route_note} | {msg}"
+            compliance.insert(0, {"category": "channel_fallback", "detail": route_note})
+        return success, msg, compliance
+
+    def _publish_browser(self, payload: dict) -> Tuple[bool, str, List[dict]]:
         """
         通过 Edge 持久化上下文执行 Civitai 原生发帖流程 (需求 7-11):
         1. 媒体过滤 (GIF 换配对视频、约束检查、≤20 拦截)
