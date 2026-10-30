@@ -59,6 +59,7 @@ except ImportError:
 MCP_URL = "https://mcp.civitai.com/mcp"
 REST_IMAGES_URL = "https://civitai.com/api/v1/images"
 POSTS_PAGE_URL = "https://civitai.com/posts"
+CIVITAI_MODELS_API_URL = "https://civitai.com/api/v1/models"
 
 
 class CivitaiApiError(Exception):
@@ -192,10 +193,101 @@ def probe_local_media_dimensions(file_path: Union[str, Path]) -> Tuple[int, int]
     return 1024, 1024  # 兜底尺寸
 
 
+def resolve_civitai_model_version(
+    resource_item: Any,
+    api_key: Optional[str] = None,
+    session: Optional[requests.Session] = None,
+    models_api_url: str = CIVITAI_MODELS_API_URL,
+    timeout: float = 15.0
+) -> Tuple[Optional[int], Optional[str]]:
+    """
+    通过 Civitai REST API 查询模型元数据，将用户配置的模型 ID / 模型 URL / {id, version}
+    解析为具体的 modelVersionId:
+    - version 字段为纯数字且命中列表中版本 id -> 用它
+    - version 字段为名称 -> 按 name 不区分大小写匹配
+    - 无 version 或匹配不到 -> 取列表第一个 (最新版) 并在结果注明降级 (与浏览器通道"降级默认版本"口径一致)
+    - REST 查不到/失败 -> 按未绑定资源处理并注明；任何情况下不许把模型 ID 当 modelVersionId 传出
+
+    返回: (resolved_version_id, note)
+    """
+    if not isinstance(resource_item, dict) or "id" not in resource_item or not isinstance(resource_item.get("id"), int):
+        parsed = parse_civitai_resources([resource_item])
+        if not parsed:
+            return None, "资源配置解析失败，已按未绑定模型版本处理"
+        item = parsed[0]
+    else:
+        item = resource_item
+
+    model_id = item.get("id")
+    version_req = item.get("version")
+
+    if not model_id or not isinstance(model_id, int):
+        return None, "资源配置解析失败，已按未绑定模型版本处理"
+
+    url = f"{models_api_url.rstrip('/')}/{model_id}"
+    headers = {"Accept": "application/json"}
+    if api_key and str(api_key).strip():
+        headers["Authorization"] = f"Bearer {str(api_key).strip()}"
+
+    s = session or requests
+    try:
+        resp = s.get(url, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            logger.warning(f"[Civitai API] REST 查询模型 {model_id} 失败 (HTTP {resp.status_code})")
+            return None, f"模型 {model_id} 查询失败，已按未绑定模型版本处理"
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"[Civitai API] REST 查询模型 {model_id} 异常: {e}")
+        return None, f"模型 {model_id} 查询失败，已按未绑定模型版本处理"
+
+    model_versions = data.get("modelVersions") or []
+    if not model_versions:
+        logger.warning(f"[Civitai API] 模型 {model_id} 无可用版本")
+        return None, f"模型 {model_id} 无可用版本，已按未绑定模型版本处理"
+
+    # 1. version 字段为纯数字且命中列表中版本 id -> 用它
+    if version_req is not None and str(version_req).strip():
+        v_str = str(version_req).strip()
+        if v_str.isdigit():
+            target_vid = int(v_str)
+            for v in model_versions:
+                if v.get("id") == target_vid:
+                    return target_vid, None
+
+    # 2. version 字段为名称 -> 按 name 不区分大小写匹配
+    if version_req is not None and str(version_req).strip():
+        target_name = str(version_req).strip().lower()
+        # 精确匹配 (不区分大小写)
+        for v in model_versions:
+            v_name = str(v.get("name") or "").strip().lower()
+            if v_name == target_name:
+                return v.get("id"), None
+        # 子串/模糊匹配 (不区分大小写，如 "V6" 匹配 "V6 (start with this one)")
+        for v in model_versions:
+            v_name = str(v.get("name") or "").strip().lower()
+            if target_name in v_name:
+                return v.get("id"), None
+
+    # 3. 无 version 或匹配不到 -> 取列表第一个 (最新版) 并在结果注明降级
+    default_v = model_versions[0]
+    default_vid = default_v.get("id")
+    if not default_vid:
+        return None, f"模型 {model_id} 默认版本无效，已按未绑定模型版本处理"
+
+    if version_req is not None and str(version_req).strip():
+        note = f"模型 {model_id} 未匹配到版本 '{version_req}'，已降级默认版本 ({default_vid})"
+    else:
+        note = f"模型 {model_id} 未指定版本，已降级默认版本 ({default_vid})"
+
+    return default_vid, note
+
+
 def resolve_civitai_channel(
     channel_config: Optional[str],
     resources: Any,
-    api_key: Optional[str]
+    api_key: Optional[str],
+    session: Optional[requests.Session] = None,
+    models_api_url: Optional[str] = None
 ) -> Tuple[str, Optional[str], Optional[int]]:
     """
     Civitai 混合通道路由决策核心:
@@ -207,13 +299,13 @@ def resolve_civitai_channel(
     2. channel == "api":
        - 若无 API Key: 报错中止，禁止静默回退
        - 若有 API Key: 走 API 通道；
-         若有有效资源且 ≥1，取首个资源作为 modelVersionId；
+         若有有效资源且 ≥1，取首个资源解析 modelVersionId；
          若资源 ≥2，附加提示 API 仅能携带首个资源
     3. channel == "auto" (默认):
        - 生效资源数 ≥ 2: 回退浏览器通道，注明 "已回退浏览器通道（资源 N 个）"
        - 生效资源数 ≤ 1:
          - 若无 API Key: 回退浏览器通道，注明 "已回退浏览器通道（未配置 API Key）"
-         - 若有 API Key: 走 API 通道，恰 1 个携带 modelVersionId，解析失败按未配处理并在结果注明
+         - 若有 API Key: 走 API 通道，恰 1 个解析 modelVersionId，解析失败按未配处理并在结果注明
 
     返回: (selected_channel, note, model_version_id)
     """
@@ -229,15 +321,30 @@ def resolve_civitai_channel(
     if ch == "browser":
         return "browser", None, None
 
+    models_url = models_api_url or CIVITAI_MODELS_API_URL
+
     if ch == "api":
         if not has_key:
             raise CivitaiApiError("未配置 Civitai API Key，无法使用 API 通道发布（请在 Civitai 卡片录入 Key 或设置 CIVITAI_API_KEY 环境变量）")
         if len(parsed_res) >= 2:
             mid = parsed_res[0]["id"]
-            return "api", f"API 通道仅支持绑定 1 个模型版本，已携带首个资源 ({mid})", mid
+            ver_id, ver_note = resolve_civitai_model_version(
+                parsed_res[0],
+                api_key=api_key,
+                session=session,
+                models_api_url=models_url
+            )
+            base_note = f"API 通道仅支持绑定 1 个模型版本，已携带首个资源 ({mid})"
+            final_note = f"{base_note}；{ver_note}" if ver_note else base_note
+            return "api", final_note, ver_id
         elif len(parsed_res) == 1:
-            mid = parsed_res[0]["id"]
-            return "api", None, mid
+            ver_id, ver_note = resolve_civitai_model_version(
+                parsed_res[0],
+                api_key=api_key,
+                session=session,
+                models_api_url=models_url
+            )
+            return "api", ver_note, ver_id
         else:
             note = "资源配置解析失败，已按未绑定模型版本处理" if parse_failed else None
             return "api", note, None
@@ -251,10 +358,17 @@ def resolve_civitai_channel(
 
     # len(parsed_res) <= 1 且 has_key
     if len(parsed_res) == 1:
-        return "api", None, parsed_res[0]["id"]
+        ver_id, ver_note = resolve_civitai_model_version(
+            parsed_res[0],
+            api_key=api_key,
+            session=session,
+            models_api_url=models_url
+        )
+        return "api", ver_note, ver_id
     else:
         note = "资源配置解析失败，已按未绑定模型版本处理" if parse_failed else None
         return "api", note, None
+
 
 
 class CivitaiApiClient:
@@ -517,11 +631,25 @@ class CivitaiApiClient:
         return int(post_id)
 
     def get_post(self, post_id: int) -> dict:
-        """调用 get_post 工具回读帖子状态"""
+        """调用 get_post 工具回读帖子状态 (并通过 tRPC 补充 modelVersionId 等高级字段)"""
         res = self._call_mcp("tools/call", {
             "name": "get_post",
             "arguments": {"id": int(post_id)}
         })
+        try:
+            trpc_url = f"https://civitai.com/api/trpc/post.get?input={json.dumps({'json': {'id': int(post_id)}})}"
+            r = self.session.get(
+                trpc_url,
+                headers={"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                t_json = r.json().get("result", {}).get("data", {}).get("json", {})
+                m_vid = t_json.get("modelVersionId")
+                if m_vid:
+                    res.setdefault("result", {}).setdefault("structuredContent", {})["modelVersionId"] = m_vid
+        except Exception as e:
+            logger.debug(f"[Civitai API] tRPC 补充 modelVersionId 略过: {e}")
         return res
 
     def delete_post(self, post_id: int) -> dict:
@@ -622,10 +750,12 @@ def publish_via_api(
     if skipped_notes:
         notes.extend(skipped_notes)
 
-    # 工具标注说明: API 通道不带工具标注，但结果面板必须明示
+    # 工具标注说明: API 通道不带工具标注，仅在用户配置了 tool 时明示未携带标注
     tool_val = payload.get("civitai_tool") or payload.get("platform_options", {}).get("civitai_tool")
-    tool_note = "Civitai（API）：未携带工具标注"
-    notes.append(tool_note)
+    has_tool = bool(tool_val and str(tool_val).strip())
+    tool_note = "Civitai（API）：未携带工具标注" if has_tool else None
+    if tool_note:
+        notes.append(tool_note)
 
     # 2. 描述转换为 HTML
     detail_html = render_description_to_html(desc)
@@ -716,9 +846,10 @@ def publish_via_api(
 
         if video_media:
             created_ids = getattr(client, "last_created_image_ids", [])
-            if created_ids and len(created_ids) < len(uploaded_images):
+            if not created_ids or len(created_ids) != len(uploaded_images):
+                actual_cnt = len(created_ids) if created_ids else 0
                 raise CivitaiAssertionError(
-                    f"视频素材未在建帖时成功绑定 imageIds (预期 {len(uploaded_images)}, 实际 {len(created_ids)})"
+                    f"含视频帖子素材未在建帖时完整绑定 imageIds (预期 {len(uploaded_images)}, 实际 {actual_cnt})"
                 )
             notes.append("视频转码已在后台排队处理")
 
@@ -747,13 +878,23 @@ def publish_via_api(
         return False, f"Civitai（API）：成功断言未通过: {clean_assert_err} {cleanup_note}", []
 
     # 全部断言通过，组装成功结果
-    verified_count = len(rest_items) + len(video_media)
+    rest_video_count = sum(
+        1 for item in rest_items
+        if isinstance(item, dict) and (
+            item.get("type") == "video"
+            or str(item.get("mimeType", "")).startswith("video/")
+        )
+    )
+    unindexed_video_count = max(0, len(video_media) - rest_video_count)
+    verified_count = len(rest_items) + unindexed_video_count
+
     compliance: List[Dict[str, Any]] = [
         {"category": "channel", "channel": "api", "detail": "API 官方通道"},
         {"category": "post_id", "post_id": post_id, "url": post_url},
         {"category": "media_count", "uploaded": len(uploaded_images), "verified": verified_count},
-        {"category": "tool_annotation", "status": "omitted", "detail": tool_note}
     ]
+    if tool_note:
+        compliance.append({"category": "tool_annotation", "status": "omitted", "detail": tool_note})
     if video_media:
         compliance.append({"category": "video_status", "status": "queued_transcoding", "video_count": len(video_media)})
     if model_version_id:
