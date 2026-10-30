@@ -18,6 +18,8 @@ for d in [DATA_DIR, COOKIES_DIR, CACHE_DIR]:
 
 import copy
 
+from signature_utils import CANONICAL_SIGNATURE_TEMPLATE
+
 DEFAULT_CONFIG = {
     # 1. 界面外观配置
     "ui_theme": "pure_dark",         # "pure_dark"(极黑), "deep_navy"(深蓝), "charcoal"(炭灰)
@@ -26,7 +28,7 @@ DEFAULT_CONFIG = {
     # 2. 常用内容与固定标签偏好
     "default_tags": "original, oc, anime, illustration",  # 常驻固定标签
     "auto_fill_default_tags": True,                       # 新建作品/清空时是否自动预填
-    "signature_template": "---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname",
+    "signature_template": CANONICAL_SIGNATURE_TEMPLATE,
 
     # 3. 打码与水印保护设置
     "censor": {

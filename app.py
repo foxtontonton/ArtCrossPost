@@ -57,6 +57,7 @@ from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_te
 from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
 from schedule_dialogs import ScheduledPublishDialog, ExpiredTasksDialog
 from history_manager import PublishHistoryManager
+from signature_utils import CANONICAL_SIGNATURE_TEMPLATE, render_description_to_plain_text
 
 
 class NoWheelEventFilter(QObject):
@@ -3227,7 +3228,7 @@ class SettingsDialog(QDialog):
         sig_vbox.addWidget(sc_desc)
 
         self.sig_edit = QTextEdit()
-        default_sig = "---\nSupport my work:\nPatreon: https://patreon.com/yourname\nKo-fi: https://ko-fi.com/yourname"
+        default_sig = CANONICAL_SIGNATURE_TEMPLATE
         saved_sig = self.config.get("signature_template", default_sig)
         if saved_sig.startswith("\n\n"):
             saved_sig = saved_sig.strip()
@@ -6240,7 +6241,7 @@ class MainWindow(QMainWindow):
         self._open_settings_dialog(target_tab=1)
 
     def _append_signature(self):
-        sig = self.config.get("signature_template", "").strip()
+        sig = (self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE).strip()
         if not sig:
             self.notify("尚未在系统设置中配置赞助引流签名模版！", level="warning")
             return

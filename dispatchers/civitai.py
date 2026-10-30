@@ -27,6 +27,21 @@ except ImportError:
     from ..config import load_config
 
 try:
+    from signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+except ImportError:
+    from ..signature_utils import (
+        render_description_to_html,
+        render_description_to_plain_text,
+        verify_signature_links_in_html,
+        has_signature,
+    )
+
+try:
     from video_engine import probe_video_info, get_ffmpeg_path
 except ImportError:
     try:
@@ -988,6 +1003,7 @@ class CivitaiDispatcher(BaseDispatcher):
         )
 
         detected_draft_id: Optional[str] = None
+        compliance: List[Dict[str, Any]] = []
 
         try:
             from playwright.sync_api import sync_playwright
@@ -1055,15 +1071,65 @@ class CivitaiDispatcher(BaseDispatcher):
                         title_box.fill(title)
                         time.sleep(0.5)
 
-                # 9.2 描述 (ProseMirror 富文本)
+                # 9.2 描述 (ProseMirror 富文本与真超链接注入)
                 if desc:
                     logger.info("[Civitai] 填写富文本描述...")
                     desc_box = page.query_selector("div.ProseMirror")
                     if desc_box:
-                        desc_box.click()
+                        try:
+                            desc_box.click()
+                        except Exception:
+                            pass
                         time.sleep(0.3)
-                        desc_box.fill(desc)
-                        time.sleep(0.5)
+
+                        if has_signature(desc):
+                            html_content = render_description_to_html(desc)
+                            try:
+                                desc_box.evaluate("""(el, html) => {
+                                    el.focus();
+                                    const sel = window.getSelection();
+                                    sel.selectAllChildren(el);
+                                    const ok = document.execCommand('insertHTML', false, html);
+                                    if (!ok) {
+                                        el.innerHTML = html;
+                                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }
+                                }""", html_content)
+                            except Exception as e_rich:
+                                logger.warning(f"[Civitai] ProseMirror 富文本真超链接注入提示: {e_rich}，回退 fill")
+                                desc_box.fill(desc)
+
+                            time.sleep(0.5)
+
+                            # 提交前回读断言: 回读编辑器 HTML，断言 5 个签名链接全部存在
+                            readback_html = ""
+                            try:
+                                val = desc_box.evaluate("el => el.innerHTML || ''")
+                                if isinstance(val, str):
+                                    readback_html = val
+                            except Exception:
+                                if hasattr(desc_box, "inner_html"):
+                                    try:
+                                        ib = desc_box.inner_html()
+                                        if isinstance(ib, str):
+                                            readback_html = ib
+                                    except Exception:
+                                        pass
+
+                            sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
+                            if not sig_ok:
+                                missing_str = ", ".join(sig_missing)
+                                logger.error(f"[Civitai] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                                if detected_draft_id:
+                                    self.delete_orphan_draft(page, detected_draft_id)
+                                context.close()
+                                return False, f"Civitai 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
+                            logger.info("[Civitai] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
+                            compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "5/5 真超链接已生效"))
+                        else:
+                            desc_box.fill(desc)
+                            time.sleep(0.5)
 
                 # 9.3 标签注入 (Bug 修复 fix/civitai-tag-flow: 点击前置、输入、下拉候选/回车、徽章断言、首败即停)
                 if tags:
@@ -1155,9 +1221,9 @@ class CivitaiDispatcher(BaseDispatcher):
                 if skipped_notes:
                     success_msg += f"；注: {'；'.join(skipped_notes)}"
 
-                compliance = [
+                compliance.append(
                     {"item": "post_url", "verified": True, "detail": published_url, "expected": True}
-                ]
+                )
                 if res_ok_cnt > 0 or res_fail_cnt > 0:
                     compliance.append({
                         "item": "resources_attached",
