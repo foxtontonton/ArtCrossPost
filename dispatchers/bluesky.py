@@ -486,8 +486,12 @@ class BlueskyDispatcher(BaseDispatcher):
                     timeout=10
                 )
                 if resp.status_code == 200:
+                    data = resp.json()
                     self.handle = handle
                     self.did = did
+                    if "didDoc" in data:
+                        creds["didDoc"] = data["didDoc"]
+                        self._save_credentials(creds)
                     return True, "会话有效", creds
             except Exception as e:
                 logger.debug(f"[Bluesky] getSession 测试异常: {e}")
@@ -506,6 +510,8 @@ class BlueskyDispatcher(BaseDispatcher):
                     creds["refreshJwt"] = data["refreshJwt"]
                     creds["did"] = data.get("did", did)
                     creds["handle"] = data.get("handle", handle)
+                    if "didDoc" in data:
+                        creds["didDoc"] = data["didDoc"]
                     self._save_credentials(creds)
                     self.handle = creds["handle"]
                     self.did = creds["did"]
@@ -530,6 +536,8 @@ class BlueskyDispatcher(BaseDispatcher):
                 creds["refreshJwt"] = data["refreshJwt"]
                 creds["did"] = data["did"]
                 creds["handle"] = data.get("handle", handle)
+                if "didDoc" in data:
+                    creds["didDoc"] = data["didDoc"]
                 self._save_credentials(creds)
                 self.handle = creds["handle"]
                 self.did = creds["did"]
@@ -703,18 +711,74 @@ class BlueskyDispatcher(BaseDispatcher):
             return True, login_result["msg"]
         return False, login_result["msg"]
 
+    def resolve_pds_did(self, did: str, force_refresh: bool = False) -> Optional[str]:
+        """
+        从 DID 文档解析用户所属 PDS 的 DID (did:web:<host>)
+        支持 did:plc:* (通过 https://plc.directory/{did}) 与 did:web:* (通过 https://{domain}/.well-known/did.json)
+        """
+        if not did:
+            return None
+
+        did_doc = None
+        if not force_refresh:
+            creds = self._load_credentials()
+            if creds and creds.get("did") == did:
+                did_doc = creds.get("didDoc")
+
+        if not did_doc:
+            try:
+                if did.startswith("did:plc:"):
+                    r = requests.get(f"https://plc.directory/{did}", timeout=10)
+                    if r.status_code == 200:
+                        did_doc = r.json()
+                elif did.startswith("did:web:"):
+                    domain = did[8:]
+                    r = requests.get(f"https://{domain}/.well-known/did.json", timeout=10)
+                    if r.status_code == 200:
+                        did_doc = r.json()
+            except Exception as e:
+                logger.warning(f"[Bluesky] 请求 DID 文档异常 ({did}): {e}")
+
+        if isinstance(did_doc, dict):
+            services = did_doc.get("service", [])
+            for s in services:
+                if isinstance(s, dict) and (
+                    s.get("type") == "AtprotoPersonalDataServer"
+                    or str(s.get("id", "")).endswith("#atproto_pds")
+                ):
+                    endpoint = s.get("serviceEndpoint", "")
+                    if endpoint:
+                        from urllib.parse import urlparse
+                        p = urlparse(endpoint)
+                        host = p.netloc or p.path
+                        if host:
+                            return f"did:web:{host}"
+
+        return None
+
     def get_service_auth(
         self,
         access_jwt: str,
-        aud: str = BSKY_VIDEO_SERVICE_DID,
+        aud: Optional[str] = None,
         lxm: str = "com.atproto.repo.uploadBlob",
-        exp_seconds: int = 1800
+        exp_seconds: int = 1800,
+        did: Optional[str] = None
     ) -> Tuple[Optional[str], str]:
         """获取视频服务的短效服务授权 Token (com.atproto.server.getServiceAuth)"""
         headers = {"Authorization": f"Bearer {access_jwt}"}
         exp_timestamp = int(datetime.now(timezone.utc).timestamp()) + exp_seconds
+
+        target_aud = aud
+        if not target_aud:
+            user_did = did or self.did
+            if user_did:
+                target_aud = self.resolve_pds_did(user_did)
+            if not target_aud:
+                from urllib.parse import urlparse
+                target_aud = f"did:web:{urlparse(XRPC_BASE).netloc}"
+
         params = {
-            "aud": aud,
+            "aud": target_aud,
             "lxm": lxm,
             "exp": exp_timestamp
         }
@@ -792,8 +856,8 @@ class BlueskyDispatcher(BaseDispatcher):
         """
         调用 Bluesky 官方 video.bsky.app 微服务上传视频 (P0-1 ~ P0-3):
         1. 门禁检查 (体积 <= 300MB, 时长 <= 600s)
-        2. 获取 service auth token
-        3. POST video.bsky.app/xrpc/app.bsky.video.uploadVideo 上传二进制
+        2. 获取 service auth token (优先从 DID 文档解析用户所属 PDS DID)
+        3. POST video.bsky.app/xrpc/app.bsky.video.uploadVideo 上传二进制 (遇 401 受众错误自愈重试一次)
         4. 轮询 getJobStatus 获取最终 processed BlobRef，超时/失败报错
         """
         from video_engine import validate_bluesky_video_constraints
@@ -805,10 +869,16 @@ class BlueskyDispatcher(BaseDispatcher):
         if not valid_ok:
             return None, f"视频门禁拦截: {valid_msg}"
 
+        # 从 DID 文档解析 PDS DID 作为初始 aud
+        pds_did = self.resolve_pds_did(did)
+        from urllib.parse import urlparse
+        target_aud = pds_did or f"did:web:{urlparse(XRPC_BASE).netloc}"
+
         service_token, auth_err = self.get_service_auth(
             access_jwt,
-            aud=BSKY_VIDEO_SERVICE_DID,
-            lxm="com.atproto.repo.uploadBlob"
+            aud=target_aud,
+            lxm="com.atproto.repo.uploadBlob",
+            did=did
         )
         if not service_token:
             return None, f"获取视频服务授权失败: {auth_err}"
@@ -834,6 +904,43 @@ class BlueskyDispatcher(BaseDispatcher):
                 data=video_bytes,
                 timeout=60
             )
+
+            # 401 受众错误自愈重试一次
+            if resp.status_code == 401:
+                logger.warning(f"[Bluesky] 视频上传返回 401 认证/受众错误 ({resp.text})，启动自愈机制...")
+                m = re.search(r"should be (?:the user's PDS DID )?[\"'\\]*[\"']?(did:[a-zA-Z0-9_.:-]+)", resp.text, re.IGNORECASE)
+                if not m:
+                    m = re.search(r"(?:expected|pds did)[:\s]+[\"'\\]*[\"']?(did:[a-zA-Z0-9_.:-]+)", resp.text, re.IGNORECASE)
+
+                retry_aud = m.group(1) if m else None
+                if not retry_aud:
+                    fresh_pds = self.resolve_pds_did(did, force_refresh=True)
+                    if fresh_pds and fresh_pds != target_aud:
+                        retry_aud = fresh_pds
+                    elif target_aud != BSKY_VIDEO_SERVICE_DID:
+                        retry_aud = BSKY_VIDEO_SERVICE_DID
+
+                if retry_aud:
+                    logger.info(f"[Bluesky] 401 自愈使用 aud='{retry_aud}' 重新请求 ServiceAuth 并重试上传...")
+                    new_token, new_auth_err = self.get_service_auth(
+                        access_jwt,
+                        aud=retry_aud,
+                        lxm="com.atproto.repo.uploadBlob",
+                        did=did
+                    )
+                    if new_token:
+                        upload_headers["Authorization"] = f"Bearer {new_token}"
+                        resp = requests.post(
+                            upload_url,
+                            params=upload_params,
+                            headers=upload_headers,
+                            data=video_bytes,
+                            timeout=60
+                        )
+                        if resp.status_code in (200, 202):
+                            service_token = new_token
+                            logger.info("[Bluesky] 401 受众错误自愈重试成功！")
+
             if resp.status_code not in (200, 202):
                 return None, f"视频上传至 video.bsky.app 失败 (HTTP {resp.status_code}): {resp.text}"
 
