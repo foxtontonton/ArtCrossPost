@@ -260,3 +260,54 @@ def verify_signature_links_in_html(
     if missing:
         return False, missing
     return True, []
+
+
+def convert_signature_links_for_bluesky(sig_text: str) -> str:
+    """
+    将签名段中的 [显示文字](URL) 转换为纯文本形式，保证 URL 以裸文本出现：
+    [Display](URL) -> Display URL (若 Display 为空或与 URL 相同则仅输出 URL)
+    帖子中不得出现 [ ]( ) 标记残留。
+    """
+    if not sig_text:
+        return ""
+
+    def _replace_link(m: re.Match) -> str:
+        disp = m.group(1).strip()
+        url = m.group(2).strip()
+        if not disp or disp == url:
+            return url
+        return f"{disp} {url}"
+
+    return MARKDOWN_LINK_REGEX.sub(_replace_link, sig_text)
+
+
+def render_description_for_bluesky(desc: str, sig_template: Optional[str] = None) -> str:
+    """
+    为 Bluesky 组装描述文本：
+    若含签名段，将签名段中的 [显示文字](URL) 转换为纯文本形式并保证 URL 以裸文本出现；
+    帖子中签名部分不得出现 [ ]( ) 标记残留；正文部分的普通文本与方括号严格不受影响。
+    """
+    if not desc:
+        return ""
+
+    body_text, sig_text = split_body_and_signature(desc, sig_template)
+
+    if not sig_text:
+        # 兜底防御：若未匹配到签名头部标记，但检测到包含规范引流链接的 Markdown 链接，切分签名段
+        for m in MARKDOWN_LINK_REGEX.finditer(desc):
+            if any(target_url in m.group(2) for _, target_url in CANONICAL_SIGNATURE_LINKS):
+                idx = m.start()
+                line_start = desc.rfind("\n", 0, idx)
+                split_pos = 0 if line_start == -1 else line_start + 1
+                body_text = desc[:split_pos].rstrip()
+                sig_text = desc[split_pos:].strip()
+                break
+
+    if not sig_text:
+        return desc
+
+    converted_sig = convert_signature_links_for_bluesky(sig_text)
+    if body_text:
+        return f"{body_text}\n\n{converted_sig}".strip()
+    return converted_sig
+
