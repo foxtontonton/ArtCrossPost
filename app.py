@@ -51,6 +51,8 @@ from video_engine import (
     find_matching_video_for_gif,
     pair_gifs_with_videos,
     validate_x_video_constraints,
+    validate_bluesky_video_constraints,
+    convert_gif_to_mp4,
 )
 from dispatchers import get_all_dispatchers
 from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_teaser_post
@@ -2128,7 +2130,9 @@ class PublishThread(QThread):
             elif disp.name == "civitai":
                 disp_images = self.payload.get("civitai_images") or raw_images
             elif disp.name == "bluesky":
-                disp_images = self.payload.get("bluesky_images") or images
+                disp_images = self.payload.get("bluesky_images")
+                if disp_images is None:
+                    disp_images = images if not self.payload.get("bluesky_video") else []
             else:
                 disp_images = images
 
@@ -2183,7 +2187,16 @@ class PublishThread(QThread):
                 if src_vid and not Path(src_vid).exists():
                     asset_err = f"X (Twitter) 配对视频不存在: {Path(src_vid).name}"
 
-            if not asset_err and not disp_images:
+            bsky_vid = self.payload.get("bluesky_video")
+            if disp.name == "bluesky" and bsky_vid:
+                if not Path(bsky_vid).exists():
+                    asset_err = f"Bluesky 视频不存在: {Path(bsky_vid).name}"
+                else:
+                    v_ok, v_err = validate_bluesky_video_constraints(bsky_vid)
+                    if not v_ok:
+                        asset_err = v_err
+
+            if not asset_err and not disp_images and not (disp.name == "bluesky" and bsky_vid):
                 asset_err = "未选择任何作品图片素材"
             elif not asset_err:
                 for img_p in disp_images:
@@ -2219,6 +2232,15 @@ class PublishThread(QThread):
                         if p_obj.suffix.lower() == ".gif" and f_size > 200 * 1024 * 1024:
                             asset_err = f"DeviantArt 限制 GIF ≤ 200MB (当前 {f_size / 1024 / 1024:.2f}MB)"
                             break
+                    elif disp.name == "bluesky":
+                        if p_obj.suffix.lower() == ".gif":
+                            asset_err = f"Bluesky 不支持 GIF 动图通过图片通道上传，须转为 MP4 走视频管线: {p_obj.name}"
+                            break
+                        elif p_obj.suffix.lower() in (".mp4", ".mov", ".webm"):
+                            v_ok, v_err = validate_bluesky_video_constraints(p_obj)
+                            if not v_ok:
+                                asset_err = v_err
+                                break
                     elif disp.name == "civitai":
                         c_max = self.payload.get("civitai_max_images_per_post") or self.payload.get("platform_options", {}).get("civitai_max_images_per_post", 20)
                         c_max = min(20, max(1, int(c_max)))
@@ -7005,6 +7027,8 @@ class MainWindow(QMainWindow):
         kofi_images = []
         civitai_images = []
         bluesky_images = []
+        bsky_video_final_path = None
+        discarded_for_bsky = 0
 
         if scheduled_snapshot and "censor_enabled" in scheduled_snapshot:
             censor_enabled = scheduled_snapshot["censor_enabled"]
@@ -7181,6 +7205,9 @@ class MainWindow(QMainWindow):
 
                         x_video_final_path = str(out_mp4)
                         x_images_map[p] = x_video_final_path
+                        if is_bsky_selected and is_single_gif_post and (is_bsky_censor == is_x_censor):
+                            bsky_video_final_path = x_video_final_path
+                            logger.info(f"[VideoEngine] Bluesky 复用 X 配对视频渲染结果: {x_video_final_path}")
                     else:
                         # Rule 12: 无配对视频（或多图帖）时动图分支：检查跨平台复用
                         reused_x_gif = None
@@ -7210,6 +7237,58 @@ class MainWindow(QMainWindow):
                             x_images_map[p] = str(x_out_path)
                 else:
                     x_images_map[p] = da_images[-1]
+
+                if is_bsky_selected and is_single_gif_post and paired_video_for_x and not bsky_video_final_path:
+                    if not is_ffmpeg_available():
+                        err_msg = "发布前门禁拦截: 未检测到 imageio-ffmpeg 组件，无法处理 Bluesky 配对视频"
+                        self.notify(f"⚠️ {err_msg}", level="error")
+                        logger.error(f"[Pre-publish Gate] {err_msg}")
+                        return
+
+                    src_ok, src_err = validate_bluesky_video_constraints(
+                        paired_video_for_x, max_size_mb=300.0, max_duration_sec=600.0
+                    )
+                    if not src_ok:
+                        self.notify(f"⚠️ 发布前门禁拦截: {src_err}", level="error")
+                        logger.error(f"[Pre-publish Gate] {src_err}")
+                        return
+
+                    bsky_c = c_params if is_bsky_censor else None
+                    vid_res = {"ok": False, "out": "", "cached": False}
+                    loop_ev = QEventLoop(self)
+                    v_thread = VideoProcessThread(
+                        self.video_engine,
+                        paired_video_for_x,
+                        censor_params=bsky_c,
+                        wm_params=wm_info,
+                    )
+                    v_thread.progress_signal.connect(self._on_progress)
+
+                    def _on_bsky_v_done(ok_flag, out_or_err, cached_flag):
+                        vid_res["ok"] = ok_flag
+                        vid_res["out"] = out_or_err
+                        vid_res["cached"] = cached_flag
+                        loop_ev.quit()
+
+                    v_thread.finished_signal.connect(_on_bsky_v_done)
+                    v_thread.start()
+                    loop_ev.exec_()
+
+                    if not vid_res["ok"]:
+                        self.notify(f"Bluesky 配对视频处理失败: {vid_res['out']}", level="error")
+                        logger.error(f"[发布准备] Bluesky 配对视频处理失败: {vid_res['out']}")
+                        return
+
+                    out_mp4 = vid_res["out"]
+                    out_ok, out_err = validate_bluesky_video_constraints(
+                        out_mp4, max_size_mb=300.0, max_duration_sec=600.0
+                    )
+                    if not out_ok:
+                        self.notify(f"⚠️ 发布前门禁拦截: {out_err}", level="error")
+                        logger.error(f"[Pre-publish Gate] {out_err}")
+                        return
+
+                    bsky_video_final_path = str(out_mp4)
 
                 # 3. Patreon 动图
                 if is_pat_censor:
@@ -7301,30 +7380,54 @@ class MainWindow(QMainWindow):
                     kofi_images.append(str(p))
                 civitai_images.append(str(p))
 
-                # 5. Bluesky 动图 (与 Patreon 相同：打码/水印参数一致且无额外体积限制时直接复用 DA 渲染产物)
-                if is_bsky_censor:
-                    if da_out_path and is_da_censor and Path(da_out_path).exists():
-                        bluesky_images.append(str(da_out_path))
-                    else:
-                        bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_censor.gif"
-                        try:
-                            self._generate_composite_gif(p, bsky_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
-                            bluesky_images.append(str(bsky_out_path))
-                        except Exception:
-                            bluesky_images.append(str(p))
-                else:
-                    if wm_info:
-                        if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
-                            bluesky_images.append(str(da_out_path))
+                # 5. Bluesky 动图 (打码/水印参数一致时优先复用 DA 渲染产物，严禁降级为无码原图)
+                if is_bsky_selected:
+                    bsky_gif_rendered = None
+                    if is_bsky_censor:
+                        if da_out_path and is_da_censor and Path(da_out_path).exists():
+                            bsky_gif_rendered = str(da_out_path)
                         else:
-                            bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_wm.gif"
+                            bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_censor.gif"
                             try:
-                                self._generate_composite_gif(p, bsky_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
-                                bluesky_images.append(str(bsky_out_path))
-                            except Exception:
-                                bluesky_images.append(str(p))
+                                self._generate_composite_gif(p, bsky_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
+                                bsky_gif_rendered = str(bsky_out_path)
+                            except Exception as e:
+                                self.notify(f"Bluesky 打码 GIF 合成失败: {e}", level="error")
+                                logger.error(f"[发布准备] Bluesky 打码 GIF 合成失败: {e}")
+                                return
                     else:
-                        bluesky_images.append(str(p))
+                        if wm_info:
+                            if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
+                                bsky_gif_rendered = str(da_out_path)
+                            else:
+                                bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_wm.gif"
+                                try:
+                                    self._generate_composite_gif(p, bsky_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                                    bsky_gif_rendered = str(bsky_out_path)
+                                except Exception as e:
+                                    self.notify(f"Bluesky 水印 GIF 合成失败: {e}", level="error")
+                                    logger.error(f"[发布准备] Bluesky 水印 GIF 合成失败: {e}")
+                                    return
+                        else:
+                            bsky_gif_rendered = str(p)
+
+                    # 若尚未设定配对视频，则将首个动图转码为 MP4 走视频管线
+                    if not bsky_video_final_path and bsky_gif_rendered:
+                        mp4_out = CACHE_DIR / f"{safe_title}_{idx}_bsky.mp4"
+                        try:
+                            convert_gif_to_mp4(bsky_gif_rendered, mp4_out)
+                            v_ok, v_err = validate_bluesky_video_constraints(mp4_out)
+                            if not v_ok:
+                                self.notify(f"⚠️ 发布前门禁拦截: {v_err}", level="error")
+                                logger.error(f"[Pre-publish Gate] {v_err}")
+                                return
+                            bsky_video_final_path = str(mp4_out)
+                        except Exception as e:
+                            self.notify(f"Bluesky GIF 转码视频失败: {e}", level="error")
+                            logger.error(f"[发布准备] Bluesky GIF 转码视频失败: {e}")
+                            return
+                else:
+                    bluesky_images.append(str(p))
             else:
                 # 静态图片处理
                 any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor, is_bsky_censor])
@@ -7631,10 +7734,23 @@ class MainWindow(QMainWindow):
             if bsky_action:
                 platform_options["bluesky_over_limit_action"] = bsky_action
 
-            # P0-5 多图上限 4 张提示
-            if len(bluesky_images) > 4:
-                discarded_c = len(bluesky_images) - 4
-                self.notify(f"Bluesky 单帖上限 4 张图片，已选取前 4 张发布 (后 {discarded_c} 张已舍弃)", level="info")
+            # 单帖单 embed 规范与多图上限 4 张提示
+            if bsky_video_final_path:
+                discarded_for_bsky = max(0, len(images_to_use) - 1)
+                if discarded_for_bsky > 0:
+                    logger.warning(
+                        f"[Bluesky] 检测到动图/视频，根据单帖单 embed 规范，仅发布视频，舍弃其余 {discarded_for_bsky} 张素材"
+                    )
+                    self.notify(
+                        f"Bluesky 单帖单 embed 限制：仅发布动图视频，其余 {discarded_for_bsky} 张素材已舍弃",
+                        level="info"
+                    )
+                bluesky_images = []
+            else:
+                if len(bluesky_images) > 4:
+                    discarded_for_bsky = len(bluesky_images) - 4
+                    self.notify(f"Bluesky 单帖上限 4 张图片，已选取前 4 张发布 (后 {discarded_for_bsky} 张已舍弃)", level="info")
+                    bluesky_images = bluesky_images[:4]
 
         payload = {
             "title": self.title_input.text().strip(),
@@ -7650,6 +7766,8 @@ class MainWindow(QMainWindow):
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
             "civitai_images": civitai_images,   # Civitai 专属图 (按 Civitai 打码选项)
             "bluesky_images": bluesky_images,
+            "bluesky_video": bsky_video_final_path,
+            "bluesky_discarded_images_count": discarded_for_bsky,
             "civitai_max_images_per_post": civitai_limit_val,
             "civitai_resources": civitai_res_val,
             "civitai_resources_scope": civitai_scope_val,

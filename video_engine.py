@@ -391,12 +391,13 @@ def validate_x_video_constraints(
         return False, f"{label}文件大小为 0: {vp.name}"
 
     size_mb = f_size / (1024 * 1024)
+    platform_name = "Bluesky" if "bluesky" in label.lower() else "X (Twitter)"
     if check_size and size_mb > max_size_mb:
-        return False, f"X (Twitter) 限制视频体积 ≤ {max_size_mb:.0f}MB (当前 {vp.name}: {size_mb:.2f}MB)"
+        return False, f"{platform_name} 限制视频体积 ≤ {max_size_mb:.0f}MB (当前 {vp.name}: {size_mb:.2f}MB)"
 
     exe = ffmpeg_exe or get_ffmpeg_path()
     if not exe:
-        return False, "未检测到 imageio-ffmpeg / ffmpeg 组件，无法校验与处理 X 视频"
+        return False, f"未检测到 imageio-ffmpeg / ffmpeg 组件，无法校验与处理 {label}"
 
     try:
         dur = probe_video_duration(vp, ffmpeg_exe=exe)
@@ -407,9 +408,90 @@ def validate_x_video_constraints(
         return False, f"无法从 ffmpeg -i 解析 {label}时长: {vp.name}"
 
     if dur > max_duration_sec:
-        return False, f"X (Twitter) 限制视频时长 ≤ {max_duration_sec:.0f}s (当前 {vp.name}: {dur:.1f}s)"
+        return False, f"{platform_name} 限制视频时长 ≤ {max_duration_sec:.0f}s (当前 {vp.name}: {dur:.1f}s)"
 
     return True, f"{label}校验通过 ({size_mb:.2f}MB, {dur:.1f}s)"
+
+
+def validate_bluesky_video_constraints(
+    video_path: Union[str, Path],
+    max_size_mb: float = 300.0,
+    max_duration_sec: float = 600.0,
+    ffmpeg_exe: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    Bluesky 视频门禁校验 (P0-1):
+    - 视频文件存在且非空
+    - 体积 ≤ 300MB
+    - 时长 ≤ 600s (通过 ffmpeg -i 解析)
+    """
+    return validate_x_video_constraints(
+        video_path=video_path,
+        max_size_mb=max_size_mb,
+        max_duration_sec=max_duration_sec,
+        ffmpeg_exe=ffmpeg_exe,
+        label="Bluesky 视频",
+        check_size=True,
+    )
+
+
+def convert_gif_to_mp4(
+    gif_path: Union[str, Path],
+    output_mp4_path: Union[str, Path],
+    ffmpeg_exe: Optional[str] = None,
+) -> Path:
+    """
+    将渲染完成的 GIF 动图转换为 H.264 格式的 MP4 视频 (P0-2):
+    - 编码: libx264
+    - 像素格式: yuv420p
+    - 偶数宽高对齐: scale=trunc(iw/2)*2:trunc(ih/2)*2
+    - 流式播放支持: +faststart
+    - 静音: -an
+    """
+    exe = ffmpeg_exe or get_ffmpeg_path()
+    if not exe:
+        raise RuntimeError("未检测到 imageio-ffmpeg / ffmpeg 二进制组件，无法执行 GIF 转视频")
+
+    in_gif = Path(gif_path)
+    if not in_gif.is_file():
+        raise FileNotFoundError(f"待转码 GIF 文件不存在: {gif_path}")
+
+    out_mp4 = Path(output_mp4_path)
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = out_mp4.parent / f"{out_mp4.stem}.tmp_{os.getpid()}.mp4"
+
+    cmd = [
+        exe, "-y", "-hide_banner",
+        "-i", str(in_gif),
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        "-c:v", "libx264",
+        "-crf", "19",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-an",
+        str(tmp_out)
+    ]
+
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        creationflags=creationflags,
+    )
+    if proc.returncode != 0 or not tmp_out.exists() or tmp_out.stat().st_size == 0:
+        err = proc.stderr or proc.stdout
+        raise RuntimeError(f"GIF 转 MP4 视频失败 (exit={proc.returncode}): {err}")
+
+    if out_mp4.exists():
+        out_mp4.unlink(missing_ok=True)
+    tmp_out.replace(out_mp4)
+    logger.info(f"[VideoEngine] GIF 转码 MP4 成功: '{in_gif.name}' -> '{out_mp4.name}' ({out_mp4.stat().st_size / 1024:.1f} KB)")
+    return out_mp4
 
 
 class VideoEngine:
