@@ -463,6 +463,43 @@ def test_x_dispatcher_video_transcode_wait_and_timeout(tmp_path, monkeypatch):
     assert "视频转码超时" in msg_t
 
 
+def test_is_x_video_transcode_completed_fixtures():
+    """使用实机状态文本做单测夹具，严格验证 is_x_video_transcode_completed 纯函数判定"""
+    from dispatchers.x_twitter import is_x_video_transcode_completed
+
+    # 1. 英语实机就绪与字幕证据 (通过)
+    assert is_x_video_transcode_completed("Ready · Upload subtitles (.srt) · Edit media") is True
+    assert is_x_video_transcode_completed("Ready") is True
+    assert is_x_video_transcode_completed("Upload subtitles (.srt)") is True
+    assert is_x_video_transcode_completed("Uploaded (100%)") is True
+    assert is_x_video_transcode_completed("Processing complete") is True
+
+    # 2. 中文实机就绪与字幕证据 (通过)
+    assert is_x_video_transcode_completed("就绪 · 上传字幕 (.srt) · 编辑媒体") is True
+    assert is_x_video_transcode_completed("就绪") is True
+    assert is_x_video_transcode_completed("已就绪") is True
+    assert is_x_video_transcode_completed("视频就绪") is True
+    assert is_x_video_transcode_completed("上传字幕") is True
+    assert is_x_video_transcode_completed("处理完成") is True
+    assert is_x_video_transcode_completed("已上传 (100%)") is True
+
+    # 3. 独立字幕 UI 证据 (通过)
+    assert is_x_video_transcode_completed("Video 0:15", has_subtitle_ui=True) is True
+
+    # 4. 正在处理/上传状态 (拒绝)
+    assert is_x_video_transcode_completed("正在处理 (45%)") is False
+    assert is_x_video_transcode_completed("Processing video...") is False
+    assert is_x_video_transcode_completed("正在上传 (78%)") is False
+    assert is_x_video_transcode_completed("Uploading...") is False
+    assert is_x_video_transcode_completed("Preparing video...") is False
+    assert is_x_video_transcode_completed("Ready", progressbar_visible=True) is False
+    assert is_x_video_transcode_completed("上传字幕", progressbar_visible=True) is False
+
+    # 5. DOM 静默就绪兜底
+    assert is_x_video_transcode_completed("", has_video_dom=True, elapsed_seconds=2.5) is True
+    assert is_x_video_transcode_completed("", has_video_dom=True, elapsed_seconds=0.5) is False
+
+
 def test_x_dispatcher_video_ai_and_sensitive_compliance(tmp_path, monkeypatch):
     """
     验证 X (Twitter) 在视频模式下的 AI 内容披露与敏感警告 (Nudity + AI) 自动化打标与合规审计通过

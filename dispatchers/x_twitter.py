@@ -27,6 +27,92 @@ except ImportError:
 
 logger = get_logger("XTwitter")
 
+X_VIDEO_PROCESSING_KEYWORDS = [
+    "正在处理",
+    "processing",
+    "正在上传",
+    "uploading",
+    "上传 (",
+    "上传(",
+    "处理中",
+    "preparing",
+]
+
+X_VIDEO_COMPLETION_KEYWORDS = [
+    "处理完成",
+    "已上传 (100%)",
+    "已上传(100%)",
+    "uploaded (100%)",
+    "processing complete",
+    "就绪",
+    "已就绪",
+    "视频就绪",
+    "ready",
+    "video is ready",
+    "ready to post",
+]
+
+X_VIDEO_SUBTITLE_KEYWORDS = [
+    "上传字幕",
+    "upload subtitles",
+    "添加字幕",
+    "add subtitles",
+    "subtitles",
+    "字幕",
+]
+
+
+def is_x_video_transcode_completed(
+    att_text: str = "",
+    progressbar_visible: bool = False,
+    has_video_dom: bool = True,
+    has_subtitle_ui: bool = False,
+    elapsed_seconds: float = 0.0,
+) -> bool:
+    """
+    纯函数判定 X (Twitter) 视频转码是否进入就绪/完成态:
+    1. progressbar 可见 → 绝对未完成 (False)
+    2. 命中显式就绪/完成词 (「处理完成」、「就绪」、「已就绪」、「Ready」、「Processing complete」等) → 判定已就绪 (True)
+    3. 检测到「上传字幕」/「Upload subtitles」等字幕 UI 证据 → 判定已就绪 (True)
+    4. 存在活跃处理关键词 (正在处理/Processing/Uploading/正在上传 等) → 判定未完成 (False)
+    5. DOM 结构就绪 (已渲染 video 元素或附件框) 且已静默等待超过安全阈值 (≥2.0s) 且无任何转码中特征 → 判定已完成 (True)
+    """
+    if progressbar_visible:
+        return False
+
+    text_lower = (att_text or "").lower()
+
+    # 1. 检查显式完成/就绪标记 (如 Processing complete / 就绪 / Ready / 处理完成)
+    for kw in X_VIDEO_COMPLETION_KEYWORDS:
+        if kw.lower() in text_lower:
+            return True
+
+    # 2. 检查字幕 UI 证据 (如 上传字幕 / Upload subtitles / 字幕按钮)
+    if has_subtitle_ui:
+        return True
+    for kw in X_VIDEO_SUBTITLE_KEYWORDS:
+        if kw.lower() in text_lower:
+            return True
+
+    # 3. 检查是否存在活跃转码/上传标记 (如 正在处理 / Processing video / Uploading)
+    for kw in X_VIDEO_PROCESSING_KEYWORDS:
+        if kw.lower() in text_lower:
+            return False
+
+    # 4. 兜底 DOM 结构就绪 + 超过安全静默时间阈值
+    if has_video_dom and elapsed_seconds >= 2.0:
+        if (
+            "上传" not in att_text
+            and "处理" not in att_text
+            and "upload" not in text_lower
+            and "process" not in text_lower
+            and "prepar" not in text_lower
+        ):
+            return True
+
+    return False
+
+
 class XTwitterDispatcher(BaseDispatcher):
     def __init__(self, cookies_dir):
         super().__init__(
@@ -478,32 +564,34 @@ class XTwitterDispatcher(BaseDispatcher):
                                 except Exception:
                                     pass
 
-                                actively_processing = prog_visible or any(
-                                    kw in att_text for kw in [
-                                        "正在处理", "Processing", "正在上传", "Uploading",
-                                        "上传 (", "上传(", "处理中", "Preparing"
-                                    ]
-                                )
-                                explicitly_completed = any(
-                                    kw in att_text for kw in ["处理完成", "已上传 (100%)", "Uploaded (100%)", "Processing complete"]
-                                )
-                                has_video_dom = page.query_selector(
-                                    "div[data-testid='attachments'] video, div[data-testid='videoPlayer']"
-                                ) is not None
-                                has_attachment_box = att_box is not None
+                                has_video_dom = (
+                                    page.query_selector(
+                                        "div[data-testid='attachments'] video, div[data-testid='videoPlayer']"
+                                    )
+                                    is not None
+                                ) or (att_box is not None)
+
+                                # 探测「上传字幕」/「Upload subtitles」等字幕 UI 元素证据
+                                has_subtitle_ui = False
+                                try:
+                                    sub_el = page.query_selector(
+                                        "button[aria-label*='字幕'], button[aria-label*='Subtitle'], button[aria-label*='subtitle'], button[aria-label*='caption'], button:has-text('上传字幕'), button:has-text('Upload subtitles'), div[role='button']:has-text('上传字幕')"
+                                    )
+                                    if sub_el and (sub_el.is_visible() is True):
+                                        has_subtitle_ui = True
+                                except Exception:
+                                    pass
 
                                 elapsed_t = time.time() - transcode_start
-                                is_done_by_status = explicitly_completed and not prog_visible
-                                is_done_by_dom = (
-                                    (has_video_dom or has_attachment_box)
-                                    and not actively_processing
-                                    and elapsed_t >= 2.0
-                                    and ("上传" not in att_text and "处理" not in att_text and "upload" not in att_text.lower() and "process" not in att_text.lower())
-                                )
-
-                                if is_done_by_status or is_done_by_dom:
+                                if is_x_video_transcode_completed(
+                                    att_text=att_text,
+                                    progressbar_visible=prog_visible,
+                                    has_video_dom=has_video_dom,
+                                    has_subtitle_ui=has_subtitle_ui,
+                                    elapsed_seconds=elapsed_t,
+                                ):
                                     transcode_done = True
-                                    logger.info(f"[X] 视频转码已完成（处理完成态，耗时 {elapsed_t:.1f}s）")
+                                    logger.info(f"[X] 视频转码已完成（就绪/完成态，耗时 {elapsed_t:.1f}s）")
                                     break
 
                                 now_t = time.time()
