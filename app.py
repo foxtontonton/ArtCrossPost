@@ -2532,6 +2532,41 @@ def make_responsive_combo(combo: QComboBox):
     combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
 
+def wrap_flow_field(label_or_text, widget, spacing=4, extra_widget=None):
+    """将标签与输入/下拉控件包装为不可分割的流式单元，避免换行时标签与控件分离"""
+    container = QWidget()
+    container.setStyleSheet("background: transparent; border: none;")
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(spacing)
+    if isinstance(label_or_text, str):
+        lbl = QLabel(label_or_text)
+    else:
+        lbl = label_or_text
+    layout.addWidget(lbl)
+    layout.addWidget(widget)
+    if extra_widget is not None:
+        layout.addWidget(extra_widget)
+    return container
+
+
+def wrap_flow_slider(label_or_text, slider, val_label, spacing=4):
+    """将标签、滑杆与数值读数包装为单一流式单元"""
+    container = QWidget()
+    container.setStyleSheet("background: transparent; border: none;")
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(spacing)
+    if isinstance(label_or_text, str):
+        lbl = QLabel(label_or_text)
+    else:
+        lbl = label_or_text
+    layout.addWidget(lbl)
+    layout.addWidget(slider)
+    layout.addWidget(val_label)
+    return container
+
+
 class ThemeOptionCard(QFrame):
     """主题快速切换视觉卡片控件"""
     clicked = pyqtSignal(str)
@@ -3346,15 +3381,18 @@ class SettingsDialog(QDialog):
         dg_desc.setStyleSheet("color: #9ca3af;")
         da_vbox.addWidget(dg_desc)
 
-        da_combo_row = QHBoxLayout()
-        da_combo_row.setSpacing(8)
+        da_combo_row = FlowLayout(spacing=8)
+        da_combo_row.setContentsMargins(0, 0, 0, 0)
 
         self.def_da_gallery_combo = QComboBox()
         make_responsive_combo(self.def_da_gallery_combo)
+        self.def_da_gallery_combo.setMinimumContentsLength(16)
+        self.def_da_gallery_combo.setMinimumWidth(170)
+        self.def_da_gallery_combo.setMaximumWidth(260)
         self.def_da_gallery_combo.setEditable(True)
         self._populate_gallery_combo()
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
-        da_combo_row.addWidget(self.def_da_gallery_combo, 1)
+        da_combo_row.addWidget(self.def_da_gallery_combo)
 
         self.btn_refresh_da_galleries = create_ui_icon_button(
             icon_name="refresh.svg",
@@ -4512,7 +4550,8 @@ class MainWindow(QMainWindow):
         media_layout.setContentsMargins(6, 6, 6, 6)
         media_layout.setSpacing(6)
 
-        btn_row = QHBoxLayout()
+        btn_row = FlowLayout(spacing=6)
+        btn_row.setContentsMargins(0, 0, 0, 0)
         add_img_btn = QPushButton("🖼️ 导入作品图片")
         add_img_btn.setObjectName("accentBtn")
         add_img_btn.clicked.connect(self._select_images)
@@ -4553,9 +4592,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "censor_engine") and self.censor_engine.is_available():
             self.censor_ai_status_lbl.hide()
 
-        # 第 1 行 (水平并排): 启用打码 + 套用到所有平台 + 弹簧 + 清除 + 恢复AI
-        c_row1 = QHBoxLayout()
-        c_row1.setSpacing(4)
+        # 第 1 行 (水平并排): 启用打码 + 套用到所有平台 + 清除 + 恢复AI (自然流式排列)
+        c_row1 = FlowLayout(spacing=6)
+        c_row1.setContentsMargins(0, 0, 0, 0)
         censor_cfg = self.config.get("censor", {})
         self.auto_censor_cb = QCheckBox("🛡️ 启用打码")
         self.auto_censor_cb.setChecked(censor_cfg.get("enabled", True))
@@ -4570,8 +4609,6 @@ class MainWindow(QMainWindow):
         self.apply_all_censor_btn.clicked.connect(self._apply_censor_to_all_platforms)
         c_row1.addWidget(self.apply_all_censor_btn)
 
-        c_row1.addStretch()
-
         self.clear_censor_btn = QPushButton("🧹 清除")
         self.clear_censor_btn.setObjectName("secondaryBtn")
         self.clear_censor_btn.clicked.connect(self._clear_current_censor_boxes)
@@ -4583,23 +4620,27 @@ class MainWindow(QMainWindow):
         c_row1.addWidget(self.reset_censor_btn)
         censor_vlayout.addLayout(c_row1)
 
-        # 第 2 行 (水平并排): 样式 (50%) + 模式 (50%)
-        c_row2 = QHBoxLayout()
-        c_row2.setSpacing(4)
-        c_row2.addWidget(QLabel("样式:"))
+        # 第 2 行 (水平并排): 样式 + 模式 (流式排布)
+        c_row2 = FlowLayout(spacing=6)
+        c_row2.setContentsMargins(0, 0, 0, 0)
         self.censor_style_combo = QComboBox()
         make_responsive_combo(self.censor_style_combo)
+        self.censor_style_combo.setMinimumContentsLength(16)
+        self.censor_style_combo.setMinimumWidth(150)
+        self.censor_style_combo.setMaximumWidth(220)
         self.censor_style_combo.addItems(["纯黑条 (Black Bar)", "经典马赛克 (Mosaic)", "高斯模糊 (Blur)"])
         c_style = censor_cfg.get("style", "black_bar")
         style_map = {"black_bar": 0, "mosaic": 1, "blur": 2}
         self.censor_style_combo.setCurrentIndex(style_map.get(c_style, 0))
         self.censor_style_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
         self.censor_style_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        c_row2.addWidget(self.censor_style_combo, 1)
+        c_row2.addWidget(wrap_flow_field("样式:", self.censor_style_combo))
 
-        c_row2.addWidget(QLabel("模式:"))
         self.censor_mode_combo = QComboBox()
         make_responsive_combo(self.censor_mode_combo)
+        self.censor_mode_combo.setMinimumContentsLength(16)
+        self.censor_mode_combo.setMinimumWidth(160)
+        self.censor_mode_combo.setMaximumWidth(220)
         self.censor_mode_combo.addItems([
             "适中局部 (标准推荐)",
             "轻量细条 (极简保留90%)",
@@ -4610,25 +4651,25 @@ class MainWindow(QMainWindow):
         self.censor_mode_combo.setCurrentIndex(mode_map.get(c_mode, 0))
         self.censor_mode_combo.currentIndexChanged.connect(self._on_censor_mode_changed)
         self.censor_mode_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        c_row2.addWidget(self.censor_mode_combo, 1)
+        c_row2.addWidget(wrap_flow_field("模式:", self.censor_mode_combo))
         censor_vlayout.addLayout(c_row2)
 
         # 第 3 行 (水平并排): 尺寸滑块 + 数值
-        c_row3 = QHBoxLayout()
-        c_row3.setSpacing(4)
-        c_row3.addWidget(QLabel("尺寸:"))
+        c_row3 = FlowLayout(spacing=6)
+        c_row3.setContentsMargins(0, 0, 0, 0)
         self.censor_slider = QSlider(Qt.Horizontal)
         self.censor_slider.setRange(20, 120)
+        self.censor_slider.setMinimumWidth(120)
+        self.censor_slider.setMaximumWidth(260)
         init_scale = int(censor_cfg.get("coverage_scale", 0.55) * 100)
         self.censor_slider.setValue(max(20, min(120, init_scale)))
         self.censor_slider.valueChanged.connect(self._on_censor_slider_changed)
         self.censor_slider.valueChanged.connect(lambda: self._schedule_config_save())
-        c_row3.addWidget(self.censor_slider, 1)
 
         self.censor_ratio_label = QLabel(f"{self.censor_slider.value()}%")
         self.censor_ratio_label.setMinimumWidth(36)
         self.censor_ratio_label.setStyleSheet("color: #818cf8; font-weight: bold;")
-        c_row3.addWidget(self.censor_ratio_label)
+        c_row3.addWidget(wrap_flow_slider("尺寸:", self.censor_slider, self.censor_ratio_label))
         censor_vlayout.addLayout(c_row3)
 
         media_layout.addWidget(censor_box)
@@ -4642,8 +4683,8 @@ class MainWindow(QMainWindow):
         wm_vlayout.setSpacing(4)
 
         # 第 1 行: 开关行 (启用水印 + 发布自动应用 + 防混色描边)
-        w_row1 = QHBoxLayout()
-        w_row1.setSpacing(4)
+        w_row1 = FlowLayout(spacing=6)
+        w_row1.setContentsMargins(0, 0, 0, 0)
         self.watermark_enabled_cb = QCheckBox("💧 启用水印")
         self.watermark_enabled_cb.setChecked(wm_config.get("enabled", False))
         self.watermark_enabled_cb.stateChanged.connect(self._schedule_preview_refresh)
@@ -4660,7 +4701,6 @@ class MainWindow(QMainWindow):
         self.watermark_stroke_cb.stateChanged.connect(self._schedule_preview_refresh)
         self.watermark_stroke_cb.stateChanged.connect(lambda: self._schedule_config_save())
         w_row1.addWidget(self.watermark_stroke_cb)
-        w_row1.addStretch()
         wm_vlayout.addLayout(w_row1)
 
         # 第 2 行: 文字输入行 (充满全宽)
@@ -4675,12 +4715,14 @@ class MainWindow(QMainWindow):
         w_row2.addWidget(self.watermark_text_input, 1)
         wm_vlayout.addLayout(w_row2)
 
-        # 第 3 行: 字体 (50%) + 位置 (50%)
-        w_row3 = QHBoxLayout()
-        w_row3.setSpacing(4)
-        w_row3.addWidget(QLabel("字体:"))
+        # 第 3 行: 字体 + 位置 (流式排布)
+        w_row3 = FlowLayout(spacing=6)
+        w_row3.setContentsMargins(0, 0, 0, 0)
         self.watermark_font_combo = QComboBox()
         make_responsive_combo(self.watermark_font_combo)
+        self.watermark_font_combo.setMinimumContentsLength(16)
+        self.watermark_font_combo.setMinimumWidth(150)
+        self.watermark_font_combo.setMaximumWidth(240)
         available_fonts = self.watermark_engine.get_available_font_names()
         self.watermark_font_combo.addItems(available_fonts)
         default_font = wm_config.get("font_family", "微软雅黑 (Microsoft YaHei)")
@@ -4689,11 +4731,13 @@ class MainWindow(QMainWindow):
             self.watermark_font_combo.setCurrentIndex(font_idx)
         self.watermark_font_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
         self.watermark_font_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        w_row3.addWidget(self.watermark_font_combo, 1)
+        w_row3.addWidget(wrap_flow_field("字体:", self.watermark_font_combo))
 
-        w_row3.addWidget(QLabel("位置:"))
         self.watermark_pos_combo = QComboBox()
         make_responsive_combo(self.watermark_pos_combo)
+        self.watermark_pos_combo.setMinimumContentsLength(10)
+        self.watermark_pos_combo.setMinimumWidth(110)
+        self.watermark_pos_combo.setMaximumWidth(180)
         self.watermark_pos_combo.addItem("右下角", "bottom_right")
         self.watermark_pos_combo.addItem("左下角", "bottom_left")
         self.watermark_pos_combo.addItem("右上角", "top_right")
@@ -4708,43 +4752,45 @@ class MainWindow(QMainWindow):
                 break
         self.watermark_pos_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
         self.watermark_pos_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        w_row3.addWidget(self.watermark_pos_combo, 1)
+        w_row3.addWidget(wrap_flow_field("位置:", self.watermark_pos_combo))
         wm_vlayout.addLayout(w_row3)
 
-        # 第 4 行: 参数行 (字号 + 透明度 + 颜色)
-        w_row4 = QHBoxLayout()
-        w_row4.setSpacing(4)
-        w_row4.addWidget(QLabel("字号:"))
+        # 第 4 行: 参数行 (字号 + 透明度 + 颜色，流式排布)
+        w_row4 = FlowLayout(spacing=6)
+        w_row4.setContentsMargins(0, 0, 0, 0)
         self.watermark_size_slider = QSlider(Qt.Horizontal)
         self.watermark_size_slider.setRange(10, 80)
         self.watermark_size_slider.setSingleStep(1)
+        self.watermark_size_slider.setMinimumWidth(120)
+        self.watermark_size_slider.setMaximumWidth(260)
         init_wm_pct = float(wm_config.get("size_pct", 3.0))
         self.watermark_size_slider.setValue(max(10, min(80, int(round(init_wm_pct * 10)))))
         self.watermark_size_slider.valueChanged.connect(self._on_watermark_size_changed)
         self.watermark_size_slider.valueChanged.connect(lambda: self._schedule_config_save())
-        w_row4.addWidget(self.watermark_size_slider, 1)
 
         self.watermark_size_lbl = QLabel(f"{self.watermark_size_slider.value() / 10.0:.1f}%")
         self.watermark_size_lbl.setMinimumWidth(34)
         self.watermark_size_lbl.setStyleSheet("color: #06b6d4; font-weight: bold;")
-        w_row4.addWidget(self.watermark_size_lbl)
+        w_row4.addWidget(wrap_flow_slider("字号:", self.watermark_size_slider, self.watermark_size_lbl))
 
-        w_row4.addWidget(QLabel("透明:"))
         self.watermark_opacity_slider = QSlider(Qt.Horizontal)
         self.watermark_opacity_slider.setRange(10, 100)
+        self.watermark_opacity_slider.setMinimumWidth(120)
+        self.watermark_opacity_slider.setMaximumWidth(260)
         self.watermark_opacity_slider.setValue(int(wm_config.get("opacity", 0.65) * 100))
         self.watermark_opacity_slider.valueChanged.connect(self._on_watermark_opacity_changed)
         self.watermark_opacity_slider.valueChanged.connect(lambda: self._schedule_config_save())
-        w_row4.addWidget(self.watermark_opacity_slider, 1)
 
         self.watermark_opacity_lbl = QLabel(f"{self.watermark_opacity_slider.value()}%")
         self.watermark_opacity_lbl.setMinimumWidth(34)
         self.watermark_opacity_lbl.setStyleSheet("color: #06b6d4; font-weight: bold;")
-        w_row4.addWidget(self.watermark_opacity_lbl)
+        w_row4.addWidget(wrap_flow_slider("透明:", self.watermark_opacity_slider, self.watermark_opacity_lbl))
 
-        w_row4.addWidget(QLabel("颜色:"))
         self.watermark_color_combo = QComboBox()
         make_responsive_combo(self.watermark_color_combo)
+        self.watermark_color_combo.setMinimumContentsLength(14)
+        self.watermark_color_combo.setMinimumWidth(140)
+        self.watermark_color_combo.setMaximumWidth(200)
         self.watermark_color_combo.addItem("纯白 (#FFFFFF)", "#ffffff")
         self.watermark_color_combo.addItem("暖金 (#F59E0B)", "#f59e0b")
         self.watermark_color_combo.addItem("科技青 (#06B6D4)", "#06b6d4")
@@ -4757,7 +4803,7 @@ class MainWindow(QMainWindow):
                 break
         self.watermark_color_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
         self.watermark_color_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-        w_row4.addWidget(self.watermark_color_combo)
+        w_row4.addWidget(wrap_flow_field("颜色:", self.watermark_color_combo))
         wm_vlayout.addLayout(w_row4)
 
         media_layout.addWidget(wm_box)
@@ -5374,49 +5420,43 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(header)
 
-        # 平台专有选项行
-        if disp.name == "deviantart":
-            opts_layout = FlowLayout()
-            opts_layout.setContentsMargins(0, 2, 0, 0)
-            opts_layout.setSpacing(8)
-        else:
-            opts_layout = QHBoxLayout()
+        # 平台专有选项行 (全平台统一 FlowLayout 流式排布)
+        opts_layout = FlowLayout(spacing=8)
+        opts_layout.setContentsMargins(0, 2, 0, 0)
         opts = {}
 
         if disp.name == "x_twitter":
-            x_box = QVBoxLayout()
-            x_box.setSpacing(4)
-            x_row1 = QHBoxLayout()
-            x_row2 = QHBoxLayout()
-
             x_censor = QCheckBox("打码保护")
             x_censor.setChecked(self.config.get("defaults", {}).get("x_censor", True))
             x_censor.stateChanged.connect(self._on_platform_censor_toggled)
             x_censor.stateChanged.connect(lambda: self._schedule_config_save())
-            x_row1.addWidget(x_censor)
+            opts_layout.addWidget(x_censor)
             opts["censor"] = x_censor
 
             x_sens = QCheckBox("原生敏感警告 (Nudity 打标)")
             x_sens.setChecked(self.config["defaults"].get("x_sensitive", True))
             x_sens.stateChanged.connect(lambda: self._schedule_config_save())
-            x_row1.addWidget(x_sens)
+            opts_layout.addWidget(x_sens)
             opts["sensitive"] = x_sens
 
             x_ai = QCheckBox("官方「Made with AI」披露勾选")
             x_ai.setChecked(self.config["defaults"].get("is_ai_generated", True))
             x_ai.stateChanged.connect(lambda: self._schedule_config_save())
-            x_row1.addWidget(x_ai)
+            opts_layout.addWidget(x_ai)
             opts["ai"] = x_ai
 
             x_prem = QCheckBox("✨ X Premium 账号 (上限 25,000 字符)")
             x_prem.setChecked(self.config["defaults"].get("x_premium", False))
             x_prem.stateChanged.connect(self._on_x_premium_toggled)
             x_prem.stateChanged.connect(lambda: self._schedule_config_save())
-            x_row2.addWidget(x_prem)
+            opts_layout.addWidget(x_prem)
             opts["premium"] = x_prem
 
             x_policy_combo = QComboBox()
             make_responsive_combo(x_policy_combo)
+            x_policy_combo.setMinimumContentsLength(12)
+            x_policy_combo.setMinimumWidth(140)
+            x_policy_combo.setMaximumWidth(200)
             x_policy_combo.addItem("超限: 每次询问", "ask")
             x_policy_combo.addItem("超限: 自动截断", "truncate")
             x_policy_combo.addItem("超限: 自动串推", "thread")
@@ -5427,12 +5467,8 @@ class MainWindow(QMainWindow):
                     break
             x_policy_combo.currentIndexChanged.connect(self._on_x_policy_changed)
             x_policy_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-            x_row2.addWidget(x_policy_combo)
+            opts_layout.addWidget(x_policy_combo)
             opts["policy"] = x_policy_combo
-
-            x_box.addLayout(x_row1)
-            x_box.addLayout(x_row2)
-            opts_layout.addLayout(x_box)
 
         elif disp.name == "deviantart":
             da_censor = QCheckBox("打码保护")
@@ -5443,39 +5479,30 @@ class MainWindow(QMainWindow):
             opts["censor"] = da_censor
 
             # Mature 选项容器 (标签与下拉框成组，避免跨行错位)
-            mature_box = QWidget()
-            mature_box.setStyleSheet("background: transparent; border: none;")
-            mature_layout = QHBoxLayout(mature_box)
-            mature_layout.setContentsMargins(0, 0, 0, 0)
-            mature_layout.setSpacing(4)
-            mature_layout.addWidget(QLabel("Mature:"))
             da_combo = QComboBox()
             make_responsive_combo(da_combo)
+            da_combo.setMinimumContentsLength(16)
+            da_combo.setMinimumWidth(180)
+            da_combo.setMaximumWidth(240)
             da_combo.addItems(["Strict (严格成人)", "Moderate (轻度)", "None (全年龄)"])
             da_mature = self.config["defaults"].get("deviantart_mature", "strict")
             da_map = {"strict": 0, "moderate": 1, "none": 2}
             da_combo.setCurrentIndex(da_map.get(da_mature, 0))
             da_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-            mature_layout.addWidget(da_combo)
+            mature_box = wrap_flow_field("Mature:", da_combo)
             opts_layout.addWidget(mature_box)
             opts["mature"] = da_combo
 
             # 发布相册 (Gallery: 包含真实相册列表，支持下拉选择或直接输入)
-            gal_box = QWidget()
-            gal_box.setStyleSheet("background: transparent; border: none;")
-            gal_layout = QHBoxLayout(gal_box)
-            gal_layout.setContentsMargins(0, 0, 0, 0)
-            gal_layout.setSpacing(4)
-            gal_layout.addWidget(QLabel("相册 (Gallery):"))
-
             da_gallery_combo = QComboBox()
             make_responsive_combo(da_gallery_combo)
             da_gallery_combo.setEditable(True)
-            da_gallery_combo.setMinimumWidth(110)
+            da_gallery_combo.setMinimumContentsLength(16)
+            da_gallery_combo.setMinimumWidth(170)
+            da_gallery_combo.setMaximumWidth(260)
             self.da_gallery_combo = da_gallery_combo
             self._populate_da_gallery_combo(da_gallery_combo)
             da_gallery_combo.currentTextChanged.connect(lambda: self._schedule_config_save())
-            gal_layout.addWidget(da_gallery_combo)
 
             btn_refresh_da = create_ui_icon_button(
                 icon_name="refresh.svg",
@@ -5485,8 +5512,8 @@ class MainWindow(QMainWindow):
                 object_name="iconBtn"
             )
             btn_refresh_da.clicked.connect(lambda: self.sync_da_galleries(sender_btn=btn_refresh_da))
-            gal_layout.addWidget(btn_refresh_da)
 
+            gal_box = wrap_flow_field("相册 (Gallery):", da_gallery_combo, extra_widget=btn_refresh_da)
             opts_layout.addWidget(gal_box)
             opts["gallery"] = da_gallery_combo
             opts["refresh_btn"] = btn_refresh_da
@@ -5512,15 +5539,18 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(pat_censor)
             opts["censor"] = pat_censor
 
-            opts_layout.addWidget(QLabel("可见范围:"))
             pat_combo = QComboBox()
             make_responsive_combo(pat_combo)
+            pat_combo.setMinimumContentsLength(18)
+            pat_combo.setMinimumWidth(190)
+            pat_combo.setMaximumWidth(260)
             pat_combo.addItems(["仅赞助者 (Patrons Only)", "公开 (Public)", "指定档位 (Tiers)"])
             pat_vis = self.config["defaults"].get("patreon_visibility", "patrons")
             pat_map = {"patrons": 0, "public": 1, "tiers": 2}
             pat_combo.setCurrentIndex(pat_map.get(pat_vis, 0))
             pat_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-            opts_layout.addWidget(pat_combo)
+            pat_vis_box = wrap_flow_field("可见范围:", pat_combo)
+            opts_layout.addWidget(pat_vis_box)
             opts["visibility"] = pat_combo
 
             pat_ai = QCheckBox("AI 内容披露")
@@ -5537,15 +5567,18 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(kofi_censor)
             opts["censor"] = kofi_censor
 
-            opts_layout.addWidget(QLabel("可见范围:"))
             kofi_combo = QComboBox()
             make_responsive_combo(kofi_combo)
+            kofi_combo.setMinimumContentsLength(18)
+            kofi_combo.setMinimumWidth(190)
+            kofi_combo.setMaximumWidth(260)
             kofi_combo.addItems(["仅打赏/会员 (Supporters)", "所有人公开 (Everyone)", "会员专属档位"])
             kofi_vis = self.config["defaults"].get("kofi_visibility", "supporters")
             kofi_map = {"supporters": 0, "everyone": 1, "tier": 2}
             kofi_combo.setCurrentIndex(kofi_map.get(kofi_vis, 0))
             kofi_combo.currentIndexChanged.connect(lambda: self._schedule_config_save())
-            opts_layout.addWidget(kofi_combo)
+            kofi_vis_box = wrap_flow_field("可见范围:", kofi_combo)
+            opts_layout.addWidget(kofi_vis_box)
             opts["visibility"] = kofi_combo
 
             kofi_ai = QCheckBox("AI 创作成品说明")
@@ -5563,19 +5596,18 @@ class MainWindow(QMainWindow):
             opts["censor"] = civitai_censor
 
         elif disp.name == "bluesky":
-            bsky_box = QHBoxLayout()
-            bsky_box.setSpacing(8)
-
             bsky_censor = QCheckBox("打码保护")
             bsky_censor.setChecked(self.config.get("defaults", {}).get("bluesky_censor", True))
             bsky_censor.stateChanged.connect(self._on_platform_censor_toggled)
             bsky_censor.stateChanged.connect(lambda: self._schedule_config_save())
-            bsky_box.addWidget(bsky_censor)
+            opts_layout.addWidget(bsky_censor)
             opts["censor"] = bsky_censor
 
-            bsky_box.addWidget(QLabel("成人分级:"))
             bsky_label_combo = QComboBox()
             make_responsive_combo(bsky_label_combo)
+            bsky_label_combo.setMinimumContentsLength(16)
+            bsky_label_combo.setMinimumWidth(160)
+            bsky_label_combo.setMaximumWidth(220)
             bsky_label_combo.addItem("Porn (色情/露骨)", "porn")
             bsky_label_combo.addItem("Sexual (性暗示/轻度)", "sexual")
             bsky_label_combo.addItem("Nudity (艺术裸体)", "nudity")
@@ -5585,17 +5617,21 @@ class MainWindow(QMainWindow):
                     bsky_label_combo.setCurrentIndex(l_idx)
                     break
             bsky_label_combo.currentIndexChanged.connect(lambda: self._on_bsky_label_changed(bsky_label_combo))
-            bsky_box.addWidget(bsky_label_combo)
+            bsky_label_box = wrap_flow_field("成人分级:", bsky_label_combo)
+            opts_layout.addWidget(bsky_label_box)
             opts["label"] = bsky_label_combo
 
             bsky_ai = QCheckBox("追加 AI 话题标签 (#AIArt #GenerativeArt)")
             bsky_ai.setChecked(self.config.get("defaults", {}).get("bluesky_ai_hashtags", True))
             bsky_ai.stateChanged.connect(lambda: self._on_bsky_ai_toggled(bsky_ai))
-            bsky_box.addWidget(bsky_ai)
+            opts_layout.addWidget(bsky_ai)
             opts["ai_hashtags"] = bsky_ai
 
             bsky_policy_combo = QComboBox()
             make_responsive_combo(bsky_policy_combo)
+            bsky_policy_combo.setMinimumContentsLength(12)
+            bsky_policy_combo.setMinimumWidth(140)
+            bsky_policy_combo.setMaximumWidth(200)
             bsky_policy_combo.addItem("超限: 每次询问", "ask")
             bsky_policy_combo.addItem("超限: 自动截断", "truncate")
             bsky_policy_combo.addItem("超限: 自动串推", "thread")
@@ -5605,10 +5641,8 @@ class MainWindow(QMainWindow):
                     bsky_policy_combo.setCurrentIndex(p_idx)
                     break
             bsky_policy_combo.currentIndexChanged.connect(lambda: self._on_bsky_policy_changed(bsky_policy_combo))
-            bsky_box.addWidget(bsky_policy_combo)
+            opts_layout.addWidget(bsky_policy_combo)
             opts["policy"] = bsky_policy_combo
-
-            opts_layout.addLayout(bsky_box)
 
         layout.addLayout(opts_layout)
 

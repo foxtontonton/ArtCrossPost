@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtCore import QRect, QSize, Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QMessageBox, QPushButton, QWidget
 
@@ -175,3 +175,119 @@ class TestUIIconsAndLayout:
             assert widget.isVisible(), f"最小宽度下控件不可见: {key}"
             assert widget.isEnabled(), f"最小宽度下控件不可用: {key}"
             assert widget.width() > 0 and widget.height() > 0, f"最小宽度下控件尺寸为 0: {key}"
+
+    def test_flow_layout_effective_minimum_width(self):
+        """测试 9: 验证 FlowLayout 当 item 的 minimumWidth 大于 sizeHint 时按 minimumWidth 排布并据此换行"""
+        parent = QWidget()
+        flow = FlowLayout(parent, margin=0, spacing=8)
+
+        class FixedMinWidget(QWidget):
+            def __init__(self, min_w, hint_w, h):
+                super().__init__()
+                self.setMinimumWidth(min_w)
+                self._hint = QSize(hint_w, h)
+
+            def sizeHint(self):
+                return self._hint
+
+        w1 = FixedMinWidget(min_w=200, hint_w=50, h=30)
+        w2 = FixedMinWidget(min_w=200, hint_w=50, h=30)
+        flow.addWidget(w1)
+        flow.addWidget(w2)
+
+        # 350px 容器下: 200 + 8 + 200 = 408 > 350，必须依据 effective minimumWidth 换行为两行
+        h_350 = flow.heightForWidth(350)
+        # 500px 容器下: 408 <= 500，可容纳为单行
+        h_500 = flow.heightForWidth(500)
+        assert h_350 > h_500, f"350px 应换行为多行 (h_350={h_350} vs h_500={h_500})"
+        assert h_350 >= 60, f"两行高度至少为 60px，实际: {h_350}"
+
+    def test_deviantart_panel_responsive_wrapping_at_380px(self):
+        """测试 10: 验证 DA 面板组装：380px 下相册组换行至独立行、两下拉实际宽度不小于各自最小宽度"""
+        win = MainWindow()
+        da_ctrl = win.platform_controls["deviantart"]
+        opts = da_ctrl["options"]
+        mature_combo = opts["mature"]
+        gallery_combo = opts["gallery"]
+
+        mature_box = mature_combo.parentWidget()
+        gal_box = gallery_combo.parentWidget()
+        opts_layout = mature_box.parentWidget().layout().itemAt(1).layout()
+
+        # 验证在 380px 宽度约束下布局执行
+        opts_layout.setGeometry(QRect(0, 0, 380, 260))
+
+        # 相册组必须换行至独立行 (Y 坐标大于 Mature 组)
+        assert gal_box.y() > mature_box.y(), f"380px 下相册组应换行至独立行，实际: gal_y={gal_box.y()}, mature_y={mature_box.y()}"
+
+        # 两下拉实际宽度不小于各自设定的最小宽度 (Mature >= 180, Gallery >= 170)
+        assert mature_combo.width() >= 180, f"Mature 下拉宽度 {mature_combo.width()} < 180"
+        assert gallery_combo.width() >= 170, f"相册下拉宽度 {gallery_combo.width()} < 170"
+
+    def test_patreon_and_bluesky_responsive_wrapping_and_flow(self):
+        """测试 11: 验证 Patreon、Bluesky 组装：380px 换行、900px 回流一行；超宽容器下拉宽度不超上限"""
+        win = MainWindow()
+
+        # 1. Patreon 卡片测试
+        pat_ctrl = win.platform_controls["patreon"]
+        pat_combo = pat_ctrl["options"]["visibility"]
+        pat_box = pat_combo.parentWidget()
+        pat_opts_layout = pat_box.parentWidget().layout().itemAt(1).layout()
+
+        assert pat_opts_layout.heightForWidth(380) > pat_opts_layout.heightForWidth(900), "Patreon 在 380px 换行高度应大于 900px"
+        pat_opts_layout.setGeometry(QRect(0, 0, 1500, 200))
+        assert pat_combo.width() <= 260, f"超宽容器下 Patreon 下拉不应超过上限 260px，实际: {pat_combo.width()}"
+
+        # 2. Bluesky 卡片测试
+        bsky_ctrl = win.platform_controls["bluesky"]
+        bsky_label_combo = bsky_ctrl["options"]["label"]
+        bsky_policy_combo = bsky_ctrl["options"]["policy"]
+        bsky_label_box = bsky_label_combo.parentWidget()
+        bsky_opts_layout = bsky_label_box.parentWidget().layout().itemAt(1).layout()
+
+        assert bsky_opts_layout.heightForWidth(380) > bsky_opts_layout.heightForWidth(900), "Bluesky 在 380px 换行高度应大于 900px"
+        bsky_opts_layout.setGeometry(QRect(0, 0, 1500, 200))
+        assert bsky_label_combo.width() <= 220, f"超宽容器下 Bluesky 分级下拉不应超过上限 220px，实际: {bsky_label_combo.width()}"
+        assert bsky_policy_combo.width() <= 200, f"超宽容器下 Bluesky 策略下拉不应超过上限 200px，实际: {bsky_policy_combo.width()}"
+
+    def test_left_panel_zone3_responsive_wrapping_and_bounds(self):
+        """测试 12: 验证左栏 3 号区组装：340px 下 c_row2 两下拉上下分行且文字完整、w_row4 三组分行；800px 下回流同行且滑杆/下拉不超上限"""
+        win = MainWindow()
+
+        # 1. c_row2 (打码样式与模式)
+        style_box = win.censor_style_combo.parentWidget()
+        mode_box = win.censor_mode_combo.parentWidget()
+        c_row2 = style_box.parentWidget().layout().itemAt(2).layout()
+
+        # 340px 下分行
+        c_row2.setGeometry(QRect(0, 0, 340, 120))
+        assert mode_box.y() > style_box.y(), f"340px 下 c_row2 样式与模式应上下分行，实际: style_y={style_box.y()}, mode_y={mode_box.y()}"
+        assert win.censor_style_combo.width() >= 150, "样式下拉宽度不低于 150"
+        assert win.censor_mode_combo.width() >= 160, "模式下拉宽度不低于 160"
+
+        # 800px 下回流同行
+        c_row2.setGeometry(QRect(0, 0, 800, 120))
+        assert mode_box.y() == style_box.y(), f"800px 下 c_row2 应回流同行，实际: style_y={style_box.y()}, mode_y={mode_box.y()}"
+        assert win.censor_style_combo.width() <= 220, f"样式下拉不超上限 220，实际: {win.censor_style_combo.width()}"
+        assert win.censor_mode_combo.width() <= 220, f"模式下拉不超上限 220，实际: {win.censor_mode_combo.width()}"
+
+        # 2. w_row4 (水印字号、透明、颜色)
+        size_box = win.watermark_size_slider.parentWidget()
+        op_box = win.watermark_opacity_slider.parentWidget()
+        col_box = win.watermark_color_combo.parentWidget()
+        w_row4 = size_box.parentWidget().layout().itemAt(3).layout()
+
+        # 340px 下三组分行
+        w_row4.setGeometry(QRect(0, 0, 340, 160))
+        assert size_box.y() < op_box.y() < col_box.y(), (
+            f"340px 下 w_row4 应三组分行，实际: size_y={size_box.y()}, op_y={op_box.y()}, col_y={col_box.y()}"
+        )
+
+        # 800px 下回流同行
+        w_row4.setGeometry(QRect(0, 0, 800, 160))
+        assert abs(size_box.y() - op_box.y()) <= 4 and abs(op_box.y() - col_box.y()) <= 4, (
+            f"800px 下 w_row4 应回流同行，实际: size_y={size_box.y()}, op_y={op_box.y()}, col_y={col_box.y()}"
+        )
+        assert win.watermark_size_slider.width() <= 260, f"字号滑杆不超上限 260，实际: {win.watermark_size_slider.width()}"
+        assert win.watermark_opacity_slider.width() <= 260, f"透明滑杆不超上限 260，实际: {win.watermark_opacity_slider.width()}"
+        assert win.watermark_color_combo.width() <= 200, f"颜色下拉不超上限 200，实际: {win.watermark_color_combo.width()}"
