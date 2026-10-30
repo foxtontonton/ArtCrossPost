@@ -90,6 +90,48 @@ def test_media_filter_gif_with_paired_video_replaced(dummy_files):
     assert len(skipped) == 0
 
 
+def test_media_filter_gif_pairing_slash_and_case_insensitive_normalization(dummy_files):
+    """测试 prepare_civitai_media 配对查找支持正反斜杠混用与大小写不敏感归一化"""
+    gif_file = dummy_files["gif_paired"]
+    mp4_file = dummy_files["paired_mp4"]
+
+    # 1. 反斜杠 key vs 正斜杠查找，且大写拓展名
+    gif_str_forward = str(gif_file).replace("\\", "/")
+    gif_str_backward = str(gif_file).replace("/", "\\")
+    gif_str_mixed_case = gif_str_forward.replace("anim_paired.gif", "ANIM_PAIRED.GIF")
+
+    x_video_paths = {
+        gif_str_backward.upper(): str(mp4_file)
+    }
+
+    with patch("dispatchers.civitai.validate_civitai_video_constraints", return_value=(True, "合规")):
+        # 传入包含不同斜杠和大小写的路径字符串及 Path 对象
+        accepted, skipped = prepare_civitai_media(
+            [gif_str_mixed_case],
+            x_video_paths=x_video_paths,
+            max_limit=20
+        )
+
+    assert str(mp4_file) in accepted
+    assert len(accepted) == 1
+    assert len(skipped) == 0
+
+    # 2. 纯文件名大小写与斜杠混用匹配
+    x_video_paths_name = {
+        "Anim_Paired.GIF": str(mp4_file)
+    }
+    with patch("dispatchers.civitai.validate_civitai_video_constraints", return_value=(True, "合规")):
+        accepted2, skipped2 = prepare_civitai_media(
+            [gif_str_backward.lower()],
+            x_video_paths=x_video_paths_name,
+            max_limit=20
+        )
+
+    assert str(mp4_file) in accepted2
+    assert len(accepted2) == 1
+    assert len(skipped2) == 0
+
+
 def test_media_filter_gif_without_paired_video_skipped(dummy_files):
     """12.2 帖中 GIF 无配对视频时，该张跳过并附带指定注明文案"""
     media_items = [dummy_files["png"], dummy_files["gif_no_pair"]]

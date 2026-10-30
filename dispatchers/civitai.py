@@ -217,13 +217,38 @@ def prepare_civitai_media(
     """
     Civitai 专属媒体预检与筛选过滤规则:
     1. 只收 png/jpg/webp 图片与 mp4/webm 视频
-    2. 帖中 GIF → 自动替换为其配对视频 (复用 x_video_path)；无配对 → 该张跳过并在注明原因
+    2. 帖中 GIF → 自动替换为其配对视频 (复用 x_video_path，斜杠/大小写不敏感查找)；无配对 → 该张跳过并在注明原因
     3. 配对视频必须符合 Civitai 限制 (≤750MB, ≤245s, ≤4K)，否则跳过并注明
     4. 媒体数超上限 (min(max_limit, 20)) → 抛出异常阻断发布 (不静默截断)
     返回: (accepted_media_paths, skipped_notes)
     """
     effective_limit = min(CIVITAI_MAX_MEDIA_LIMIT, max(1, int(max_limit or CIVITAI_MAX_MEDIA_LIMIT)))
     x_vids = x_video_paths or {}
+
+    def _norm_path_key(path_val: Any) -> str:
+        """归一化路径键: 统一正斜杠、消除连续重复斜杠、小写化"""
+        if not path_val:
+            return ""
+        s = str(path_val).strip().replace("\\", "/")
+        s = re.sub(r"/+", "/", s)
+        return s.lower()
+
+    # 构建斜杠与大小写不敏感的归一化映射表
+    norm_x_vids: Dict[str, Any] = {}
+    for k, v in x_vids.items():
+        if k is None:
+            continue
+        norm_x_vids[k] = v
+        k_str = str(k).strip()
+        norm_x_vids[_norm_path_key(k_str)] = v
+        try:
+            resolved_k = Path(k_str).resolve()
+            norm_x_vids[_norm_path_key(resolved_k)] = v
+        except Exception:
+            pass
+        kp = Path(k_str)
+        norm_x_vids[kp.name.lower()] = v
+        norm_x_vids[kp.stem.lower()] = v
 
     accepted: List[str] = []
     skipped_notes: List[str] = []
@@ -248,13 +273,26 @@ def prepare_civitai_media(
             else:
                 skipped_notes.append(f"视频 '{p.name}' 未通过 Civitai 限制 ({v_msg})，已跳过")
 
-        # 3. 动图 GIF: 尝试配对视频替换
+        # 3. 动图 GIF: 尝试配对视频替换 (斜杠与大小写不敏感归一化)
         elif ext == ".gif":
+            norm_p_key = _norm_path_key(p)
+            norm_name = p.name.lower()
+            norm_stem = p.stem.lower()
+            norm_resolved = ""
+            try:
+                norm_resolved = _norm_path_key(p.resolve())
+            except Exception:
+                pass
+
             paired = (
                 x_vids.get(p)
                 or x_vids.get(str(p))
+                or norm_x_vids.get(norm_p_key)
+                or (norm_x_vids.get(norm_resolved) if norm_resolved else None)
                 or x_vids.get(p.name)
+                or norm_x_vids.get(norm_name)
                 or x_vids.get(p.stem)
+                or norm_x_vids.get(norm_stem)
             )
             if paired and Path(paired).is_file():
                 paired_path = Path(paired)
