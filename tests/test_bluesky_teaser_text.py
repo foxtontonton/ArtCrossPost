@@ -145,6 +145,36 @@ class TestBlueskyTeaserPost:
         # 但前面的标签至少保留了一部分
         assert "#conceptart_scifi_galaxy_fleet_ship_0" in res
 
+    def test_tight_budget_pops_normal_tags_while_ai_tags_survive(self):
+        """补修测试: 紧预算下断言普通标签被砍、AI 标签 (#AIArt / #GenerativeArt) 恒保留存活"""
+        # 第一句话约 40 字素
+        first_sentence = "星际巡洋舰在穿过超空间跃迁通道的瞬间遭遇了引力坍缩，导致防御护盾彻底瓦解。"
+        second_sentence = "控制台的警告红光闪烁不定，所有主副推进器进入过载倒计时状态。"
+        body = f"{first_sentence}\n\n{second_sentence}"
+
+        # 构造较长普通标签，使预算受紧迫挤压，必须砍掉普通标签才能容纳第一句
+        normal_tags = [f"scifi_illustration_fleet_{i}" for i in range(10)]
+
+        res = format_bluesky_teaser_post(
+            title="",
+            desc=body,
+            tags=normal_tags,
+            da_link=DEFAULT_BLUESKY_DA_LINK,
+            nsfw_notice=DEFAULT_BLUESKY_NSFW_NOTICE,
+            limit=MAX_GRAPHEMES,
+            is_ai=True,
+            add_ai_tags=True
+        )
+
+        assert count_graphemes(res) <= MAX_GRAPHEMES
+        # 验证第一句预告成功保住
+        assert first_sentence in res
+        # 验证普通标签被砍掉 (未全部保留)
+        assert not all(f"#{t}" in res for t in normal_tags)
+        # 关键断言: AI 标签不进入可砍队列，恒保留存活！
+        assert "#AIArt" in res
+        assert "#GenerativeArt" in res
+
     def test_case_4_extreme_over_limit_only_notice_and_link(self):
         """情形 4: 极端超限，首句极其冗长即使全砍标签也无法容纳时，只保提示句+链接"""
         # 一句超长单句 (无标点断点)，长度达 260 字素

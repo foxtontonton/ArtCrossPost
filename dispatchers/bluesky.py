@@ -298,16 +298,11 @@ def format_bluesky_teaser_post(
         cleaned_body_lines.append(line)
     body = "\n".join(cleaned_body_lines).strip()
 
-    # 规范化标签并计入 AI 标签
-    raw_tags = list(tags)
-    if is_ai and add_ai_tags:
-        for ai_t in ("AIArt", "GenerativeArt"):
-            if not any(str(t).lstrip("#").lower() == ai_t.lower() for t in raw_tags):
-                raw_tags.append(ai_t)
-
-    hashtags = []
+    # 规范化标签，严格分离普通标签与 AI 标签 (AI 标签恒保留至普通标签全部砍尽后才参与裁剪)
+    ai_tag_names = {"aiart", "generativeart"}
+    normal_tags = []
     seen = set()
-    for t in raw_tags:
+    for t in tags:
         clean = re.sub(r"^[#＃]+", "", str(t).strip())
         clean = re.sub(r"\s+", "_", clean).strip()
         if not clean:
@@ -318,18 +313,43 @@ def format_bluesky_teaser_post(
         if f"#{tag_lower}" in body.lower() or f"#{clean}" in body:
             continue
         seen.add(tag_lower)
-        hashtags.append(f"#{clean}")
+        if (is_ai and add_ai_tags) and tag_lower in ai_tag_names:
+            continue
+        normal_tags.append(f"#{clean}")
 
-    # 步骤 1: 预算必保提示句 + 尽量全保标签
-    current_tags = list(hashtags)
-    while current_tags:
-        tag_str = " ".join(current_tags)
+    ai_tags = []
+    if is_ai and add_ai_tags:
+        for ai_t in ("AIArt", "GenerativeArt"):
+            ai_lower = ai_t.lower()
+            if f"#{ai_lower}" in body.lower():
+                continue
+            ai_tags.append(f"#{ai_t}")
+
+    current_normal_tags = list(normal_tags)
+    current_ai_tags = list(ai_tags)
+
+    def _get_tag_str() -> str:
+        all_t = current_normal_tags + current_ai_tags
+        return " ".join(all_t)
+
+    def _pop_tag() -> bool:
+        if current_normal_tags:
+            current_normal_tags.pop()
+            return True
+        elif current_ai_tags:
+            current_ai_tags.pop()
+            return True
+        return False
+
+    # 步骤 1: 预算必保提示句 + 尽量全保标签 (优先砍普通标签，普通标签砍尽后才砍 AI 标签)
+    while current_normal_tags or current_ai_tags:
+        tag_str = _get_tag_str()
         cand_base = f"{notice_line}\n\n{tag_str}" if notice_line else tag_str
         if count_graphemes(cand_base) <= limit:
             break
-        current_tags.pop()
+        _pop_tag()
 
-    tag_str = " ".join(current_tags)
+    tag_str = _get_tag_str()
     base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
 
     if not body:
@@ -345,10 +365,10 @@ def format_bluesky_teaser_post(
     body_budget = limit - count_graphemes(base_without_body) - sep_overhead
     teaser = truncate_at_sentence_boundary_bsky(body, body_budget)
 
-    # 步骤 4: 可用长度 <= 0 或连第一句也放不下时，先砍标签尾部腾出预算
-    while not teaser and current_tags:
-        current_tags.pop()
-        tag_str = " ".join(current_tags)
+    # 步骤 4: 可用长度 <= 0 或连第一句也放不下时，先砍普通标签腾出预算；普通标签砍尽后才砍 AI 标签
+    while not teaser and (current_normal_tags or current_ai_tags):
+        _pop_tag()
+        tag_str = _get_tag_str()
         base_without_body = f"{notice_line}\n\n{tag_str}" if (notice_line and tag_str) else (notice_line or tag_str)
         sep_overhead = 2 if base_without_body else 0
         body_budget = limit - count_graphemes(base_without_body) - sep_overhead
