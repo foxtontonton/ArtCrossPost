@@ -112,6 +112,7 @@ def test_da_success_propagates_post_url_to_x_and_patreon(tmp_path):
 
     x_disp = DummyDispatcher("x_twitter", "X (Twitter)", tmp_path)
     pat_disp = DummyDispatcher("patreon", "Patreon", tmp_path)
+    bsky_disp = DummyDispatcher("bluesky", "Bluesky", tmp_path)
 
     dummy_img = tmp_path / "img1.png"
     dummy_img.write_bytes(b"dummy")
@@ -123,25 +124,32 @@ def test_da_success_propagates_post_url_to_x_and_patreon(tmp_path):
         "images": [str(dummy_img)],
         "use_da_post_link_for_traffic": True,
         "x_da_link": homepage_url,
-        "platform_options": {"x_da_link": homepage_url}
+        "bluesky_da_link": homepage_url,
+        "platform_options": {"x_da_link": homepage_url, "bluesky_da_link": homepage_url}
     }
 
-    thread = PublishThread([da_disp, x_disp, pat_disp], payload)
+    thread = PublishThread([da_disp, x_disp, pat_disp, bsky_disp], payload)
 
     captured_results = {}
     thread.completed_signal.connect(lambda res: captured_results.update(res))
 
     thread.run()
 
-    # 1. 验证 DA 成功，且 X 和 Patreon 均收到当帖 URL
+    # 1. 验证 DA 成功，且 X、Patreon 与 Bluesky 均收到当帖 URL
     assert len(da_disp.published_payloads) == 1
     assert len(x_disp.published_payloads) == 1
     assert len(pat_disp.published_payloads) == 1
+    assert len(bsky_disp.published_payloads) == 1
 
     x_received = x_disp.published_payloads[0]
     assert x_received.get("x_da_link") == post_url
     assert x_received.get("da_post_url") == post_url
     assert x_received.get("actual_traffic_link") == post_url
+
+    bsky_received = bsky_disp.published_payloads[0]
+    assert bsky_received.get("bluesky_da_link") == post_url
+    assert bsky_received.get("da_post_url") == post_url
+    assert bsky_received.get("actual_traffic_link") == post_url
 
     pat_received = pat_disp.published_payloads[0]
     pat_desc = pat_received.get("patreon_description") or pat_received.get("description", "")
@@ -171,6 +179,7 @@ def test_da_failure_falls_back_to_homepage_link_with_notice(tmp_path):
 
     x_disp = DummyDispatcher("x_twitter", "X (Twitter)", tmp_path)
     pat_disp = DummyDispatcher("patreon", "Patreon", tmp_path)
+    bsky_disp = DummyDispatcher("bluesky", "Bluesky", tmp_path)
 
     dummy_img = tmp_path / "img1.png"
     dummy_img.write_bytes(b"dummy")
@@ -182,25 +191,31 @@ def test_da_failure_falls_back_to_homepage_link_with_notice(tmp_path):
         "images": [str(dummy_img)],
         "use_da_post_link_for_traffic": True,
         "x_da_link": homepage_url,
-        "platform_options": {"x_da_link": homepage_url}
+        "bluesky_da_link": homepage_url,
+        "platform_options": {"x_da_link": homepage_url, "bluesky_da_link": homepage_url}
     }
 
-    thread = PublishThread([da_disp, x_disp, pat_disp], payload)
+    thread = PublishThread([da_disp, x_disp, pat_disp, bsky_disp], payload)
 
     captured_results = {}
     thread.completed_signal.connect(lambda res: captured_results.update(res))
 
     thread.run()
 
-    # 1. DA 失败，但 X 和 Patreon 照常发
+    # 1. DA 失败，但 X、Patreon 与 Bluesky 照常发
     assert len(da_disp.published_payloads) == 1
     assert len(x_disp.published_payloads) == 1
     assert len(pat_disp.published_payloads) == 1
+    assert len(bsky_disp.published_payloads) == 1
 
-    # 2. X 与 Patreon 链接回退为主页
+    # 2. X、Patreon 与 Bluesky 链接回退为主页
     x_received = x_disp.published_payloads[0]
     assert x_received.get("x_da_link") == homepage_url
     assert x_received.get("actual_traffic_link") == homepage_url
+
+    bsky_received = bsky_disp.published_payloads[0]
+    assert bsky_received.get("bluesky_da_link") == homepage_url
+    assert bsky_received.get("actual_traffic_link") == homepage_url
 
     pat_received = pat_disp.published_payloads[0]
     pat_desc = pat_received.get("patreon_description") or pat_received.get("description", "")
