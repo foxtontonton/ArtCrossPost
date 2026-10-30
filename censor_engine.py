@@ -24,6 +24,40 @@ import cv2
 import numpy as np
 from pathlib import Path
 
+def map_strength_to_mosaic_size(strength: int) -> int:
+    """
+    将强度 (0-100) 映射为马赛克方块边长 (4-64px)。
+    公式：
+      - strength <= 50: 4 + round((strength / 50.0) * 16)  -> [4, 20]px (默认 50 对应现行 20px)
+      - strength > 50:  20 + round(((strength - 50) / 50.0) * 44) -> [20, 64]px
+    """
+    s = max(0, min(100, int(strength)))
+    if s <= 50:
+        val = 4 + round((s / 50.0) * (20 - 4))
+    else:
+        val = 20 + round(((s - 50) / 50.0) * (64 - 20))
+    return int(max(4, min(64, val)))
+
+
+def map_strength_to_blur_ksize(strength: int) -> int:
+    """
+    将强度 (0-100) 映射为高斯模糊核大小 (5-99, 严格奇数)。
+    公式：
+      - strength <= 50: 5 + round((strength / 50.0) * 40)  -> [5, 45] (默认 50 对应现行 45)
+      - strength > 50:  45 + round(((strength - 50) / 50.0) * 54) -> [45, 99]
+      若为偶数则自动 +1 确保为合法奇数。
+    """
+    s = max(0, min(100, int(strength)))
+    if s <= 50:
+        val = 5 + round((s / 50.0) * (45 - 5))
+    else:
+        val = 45 + round(((s - 50) / 50.0) * (99 - 45))
+    val = int(max(5, min(99, val)))
+    if val % 2 == 0:
+        val += 1
+    return int(min(99, val))
+
+
 TARGET_CLASSES = [
     "FEMALE_GENITALIA_EXPOSED",
     "MALE_GENITALIA_EXPOSED",
@@ -210,6 +244,8 @@ class CensorEngine:
         captured_ratio=None,
         resolved_boxes=None,
         mosaic_size=20,
+        blur_ksize=45,
+        opacity=1.0,
     ):
         """
         执行图像打码
@@ -246,22 +282,31 @@ class CensorEngine:
             )
 
         for x1, y1, x2, y2 in processed_boxes:
-            roi = censored[y1:y2, x1:x2]
+            orig_roi = censored[y1:y2, x1:x2].copy()
 
             if style == "black_bar":
-                censored[y1:y2, x1:x2] = (0, 0, 0)
+                censor_roi = np.zeros_like(orig_roi)
             elif style == "mosaic":
                 rw, rh = max(1, x2 - x1), max(1, y2 - y1)
-                cell = max(4, mosaic_size)
+                cell = max(4, int(mosaic_size))
                 small_w = max(1, rw // cell)
                 small_h = max(1, rh // cell)
-                small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-                pixelated = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
-                censored[y1:y2, x1:x2] = pixelated
+                small = cv2.resize(orig_roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                censor_roi = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
             elif style == "blur":
-                ksize = 45 if (45 % 2 == 1) else 47
-                blurred = cv2.GaussianBlur(roi, (ksize, ksize), 30)
-                censored[y1:y2, x1:x2] = blurred
+                k = int(blur_ksize)
+                if k % 2 == 0:
+                    k += 1
+                k = max(3, min(99, k))
+                censor_roi = cv2.GaussianBlur(orig_roi, (k, k), 30)
+            else:
+                censor_roi = np.zeros_like(orig_roi)
+
+            if opacity >= 0.999:
+                censored[y1:y2, x1:x2] = censor_roi
+            else:
+                alpha = max(0.0, min(1.0, float(opacity)))
+                censored[y1:y2, x1:x2] = cv2.addWeighted(censor_roi, alpha, orig_roi, 1.0 - alpha, 0)
 
         if output_path:
             out_p = Path(output_path)
@@ -270,7 +315,7 @@ class CensorEngine:
 
         return censored, processed_boxes
 
-    def apply_censor_gif(self, gif_path, output_path=None, style=None, mode=None, custom_ratio=None, custom_boxes=None, captured_ratio=None, mosaic_size=20):
+    def apply_censor_gif(self, gif_path, output_path=None, style=None, mode=None, custom_ratio=None, custom_boxes=None, captured_ratio=None, resolved_boxes=None, mosaic_size=20, blur_ksize=45, opacity=1.0):
         """
         为多帧动态 GIF 图片执行敏感部位打码，并保持动态帧率
         """
@@ -281,13 +326,17 @@ class CensorEngine:
         duration = im.info.get("duration", 100)
         loop = im.info.get("loop", 0)
 
-        # 确定打码框：优先使用手动微调框，否则以第一帧为基准运行 AI 检测
-        if custom_boxes and len(custom_boxes) > 0:
+        # 确定打码框：优先使用已计算的 resolved_boxes 或手动微调框，否则以第一帧为基准运行 AI 检测
+        if resolved_boxes is not None:
+            boxes = [list(b) for b in resolved_boxes]
+            use_resolved = True
+        elif custom_boxes and len(custom_boxes) > 0:
             boxes = custom_boxes
+            use_resolved = False
         else:
-            first_frame_bgr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+            first_frame_bgr = cv2.cvtColor(np.array(im.convert('RGB')), cv2.COLOR_RGB2BGR)
             boxes = self.detect_sensitive_regions(None, img_bgr=first_frame_bgr)
-
+            use_resolved = False
         out_frames = []
         processed_boxes = []
         user_customized = bool(custom_boxes)
@@ -296,29 +345,43 @@ class CensorEngine:
             h, w = frame_bgr.shape[:2]
             censored = frame_bgr.copy()
 
-            # 用户手调框按锚定比例绕中心缩放并钳制越界，禁止回写源列表
-            frame_boxes = self.resolve_final_boxes(
-                boxes, w, h, mode=mode, custom_ratio=custom_ratio,
-                user_customized=user_customized,
-                captured_ratio=captured_ratio,
-            )
+            if use_resolved:
+                frame_boxes = [list(b) for b in boxes]
+            else:
+                # 用户手调框按锚定比例绕中心缩放并钳制越界，禁止回写源列表
+                frame_boxes = self.resolve_final_boxes(
+                    boxes, w, h, mode=mode, custom_ratio=custom_ratio,
+                    user_customized=user_customized,
+                    captured_ratio=captured_ratio,
+                )
             if not processed_boxes:
                 processed_boxes.extend(frame_boxes)
 
             for x1, y1, x2, y2 in frame_boxes:
-                roi = censored[y1:y2, x1:x2]
+                orig_roi = censored[y1:y2, x1:x2].copy()
                 if style == "black_bar":
-                    censored[y1:y2, x1:x2] = (0, 0, 0)
+                    censor_roi = np.zeros_like(orig_roi)
                 elif style == "mosaic":
                     rw, rh = max(1, x2 - x1), max(1, y2 - y1)
-                    cell = max(4, mosaic_size)
+                    cell = max(4, int(mosaic_size))
                     small_w = max(1, rw // cell)
                     small_h = max(1, rh // cell)
-                    small = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-                    censored[y1:y2, x1:x2] = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+                    small = cv2.resize(orig_roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                    censor_roi = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
                 elif style == "blur":
-                    ksize = 45 if (45 % 2 == 1) else 47
-                    censored[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (ksize, ksize), 30)
+                    k = int(blur_ksize)
+                    if k % 2 == 0:
+                        k += 1
+                    k = max(3, min(99, k))
+                    censor_roi = cv2.GaussianBlur(orig_roi, (k, k), 30)
+                else:
+                    censor_roi = np.zeros_like(orig_roi)
+
+                if opacity >= 0.999:
+                    censored[y1:y2, x1:x2] = censor_roi
+                else:
+                    alpha = max(0.0, min(1.0, float(opacity)))
+                    censored[y1:y2, x1:x2] = cv2.addWeighted(censor_roi, alpha, orig_roi, 1.0 - alpha, 0)
 
             frame_rgb = cv2.cvtColor(censored, cv2.COLOR_BGR2RGB)
             out_frames.append(Image.fromarray(frame_rgb))
