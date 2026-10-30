@@ -29,6 +29,8 @@ from signature_utils import (
     verify_signature_links_in_html,
     has_signature,
     normalize_url,
+    convert_signature_links_for_bluesky,
+    render_description_for_bluesky,
 )
 
 
@@ -666,4 +668,45 @@ def test_patreon_dispatcher_signature_missing_link_aborts(tmp_path, monkeypatch)
     assert "签名超链接断言失败" in msg
     assert "Ko-fi" in msg
     mock_pub_btn.click.assert_not_called()
+
+
+def test_bluesky_signature_markdown_link_conversion():
+    """验证 Bluesky 签名转换为裸 URL 纯文本且无 []() 语法标记残留"""
+    from dispatchers.bluesky import extract_facets
+
+    converted = convert_signature_links_for_bluesky(CANONICAL_SIGNATURE_TEMPLATE)
+    assert "[" not in converted and "]" not in converted
+    for _, u in CANONICAL_SIGNATURE_LINKS:
+        assert u in converted
+
+    facets = extract_facets(converted)
+    link_facets = [f for f in facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
+    assert len(link_facets) == 5
+    uris = [f["features"][0]["uri"] for f in link_facets]
+    for _, u in CANONICAL_SIGNATURE_LINKS:
+        assert u in uris
+
+
+def test_bluesky_description_rendering_preserves_body_brackets():
+    """验证 Bluesky 描述组装时正文普通文本/方括号严格不受影响"""
+    from dispatchers.bluesky import extract_facets
+
+    body = "Brand new art piece [OC] [Chapter 2/3] created by [Artist]"
+    full_text = f"{body}\n\n{CANONICAL_SIGNATURE_TEMPLATE}"
+
+    rendered = render_description_for_bluesky(full_text)
+    assert "[OC]" in rendered
+    assert "[Chapter 2/3]" in rendered
+    assert "[Artist]" in rendered
+
+    body_res, sig_res = split_body_and_signature(rendered)
+    assert "[" in body_res and "]" in body_res
+    assert "[" not in sig_res and "]" not in sig_res
+
+    facets = extract_facets(rendered)
+    link_uris = [f["features"][0]["uri"] for f in facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
+    assert len(link_uris) == 5
+    for _, u in CANONICAL_SIGNATURE_LINKS:
+        assert u in link_uris
+
 

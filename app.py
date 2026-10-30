@@ -59,7 +59,7 @@ from x_text_utils import calculate_x_char_count, format_x_full_text, format_x_te
 from schedule_manager import ScheduleManager, ScheduledTask, ISO_FORMAT
 from schedule_dialogs import ScheduledPublishDialog, ExpiredTasksDialog
 from history_manager import PublishHistoryManager
-from signature_utils import CANONICAL_SIGNATURE_TEMPLATE, render_description_to_plain_text
+from signature_utils import CANONICAL_SIGNATURE_TEMPLATE, render_description_to_plain_text, render_description_for_bluesky
 from platform_icons import (
     platform_icon,
     ClickablePlatformIcon,
@@ -275,6 +275,16 @@ QComboBox {{
 }}
 QComboBox:hover {{
     border-color: {accent_hover};
+}}
+QComboBox:editable {{
+    background-color: {card};
+}}
+QComboBox:editable QLineEdit, QComboBox QLineEdit {{
+    background: transparent;
+    border: none;
+    color: #e2e8f0;
+    padding: 0px;
+    font-size: {fs}px;
 }}
 QComboBox QAbstractItemView {{
     background-color: {card};
@@ -2535,7 +2545,8 @@ def make_responsive_combo(combo: QComboBox):
 def wrap_flow_field(label_or_text, widget, spacing=4, extra_widget=None):
     """将标签与输入/下拉控件包装为不可分割的流式单元，避免换行时标签与控件分离"""
     container = QWidget()
-    container.setStyleSheet("background: transparent; border: none;")
+    container.setObjectName("flowFieldContainer")
+    container.setStyleSheet("QWidget#flowFieldContainer { background: transparent; border: none; }")
     layout = QHBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(spacing)
@@ -2553,7 +2564,8 @@ def wrap_flow_field(label_or_text, widget, spacing=4, extra_widget=None):
 def wrap_flow_slider(label_or_text, slider, val_label, spacing=4):
     """将标签、滑杆与数值读数包装为单一流式单元"""
     container = QWidget()
-    container.setStyleSheet("background: transparent; border: none;")
+    container.setObjectName("flowSliderContainer")
+    container.setStyleSheet("QWidget#flowSliderContainer { background: transparent; border: none; }")
     layout = QHBoxLayout(container)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(spacing)
@@ -3390,6 +3402,10 @@ class SettingsDialog(QDialog):
         self.def_da_gallery_combo.setMinimumWidth(170)
         self.def_da_gallery_combo.setMaximumWidth(260)
         self.def_da_gallery_combo.setEditable(True)
+        if self.def_da_gallery_combo.lineEdit():
+            self.def_da_gallery_combo.lineEdit().setStyleSheet(
+                "QLineEdit { background: transparent; border: none; color: #e2e8f0; padding: 0px; }"
+            )
         self._populate_gallery_combo()
         self.def_da_gallery_combo.currentTextChanged.connect(self._on_def_da_gallery_changed)
         da_combo_row.addWidget(self.def_da_gallery_combo)
@@ -4282,6 +4298,18 @@ class MainWindow(QMainWindow):
                     if "censor" in civitai_opts:
                         self.config["defaults"]["civitai_censor"] = civitai_opts["censor"].isChecked()
 
+                # Bluesky
+                if "bluesky" in self.platform_controls:
+                    bsky_opts = self.platform_controls["bluesky"]["options"]
+                    if "censor" in bsky_opts:
+                        self.config["defaults"]["bluesky_censor"] = bsky_opts["censor"].isChecked()
+                    if "label" in bsky_opts:
+                        self.config["defaults"]["bluesky_label"] = bsky_opts["label"].currentData() or "porn"
+                    if "ai_hashtags" in bsky_opts:
+                        self.config["defaults"]["bluesky_ai_hashtags"] = bsky_opts["ai_hashtags"].isChecked()
+                    if "policy" in bsky_opts:
+                        self.config["defaults"]["bluesky_over_limit_policy"] = bsky_opts["policy"].currentData() or "ask"
+
             save_config(self.config)
             logger.debug("[Config] 界面配置已成功持久化至 presets.json")
         except Exception as e:
@@ -4426,6 +4454,7 @@ class MainWindow(QMainWindow):
         left_content = QWidget()
         left_content.setStyleSheet("background-color: #121218;")
         left_layout = QVBoxLayout(left_content)
+        self.left_layout = left_layout
         left_layout.setContentsMargins(4, 4, 10, 4)
         left_layout.setSpacing(6)
 
@@ -4496,7 +4525,8 @@ class MainWindow(QMainWindow):
         toggle_row.addWidget(self.ai_checkbox)
         toggle_row.addStretch()
         meta_layout.addLayout(toggle_row)
-        left_layout.addWidget(meta_group)
+        self.meta_group = meta_group
+        left_layout.addWidget(meta_group, 0)
 
         # 2. 正文描述
         desc_group = QGroupBox("2. 正文描述与赞助引流")
@@ -4509,7 +4539,7 @@ class MainWindow(QMainWindow):
             self.desc_input.viewport().setObjectName("desc_input_viewport")
         self.desc_input.setPlaceholderText("输入作品描述、剧情背景、世界观或想对粉丝说的话...")
         self.desc_input.setMinimumHeight(85)
-        desc_layout.addWidget(self.desc_input)
+        desc_layout.addWidget(self.desc_input, 1)
 
         sig_layout = QHBoxLayout()
         append_sig_btn = QPushButton("一键追加赞助引流尾巴 (Patreon/Ko-fi)")
@@ -4528,7 +4558,8 @@ class MainWindow(QMainWindow):
         self.bsky_char_counter_lbl.hide()
 
         desc_layout.addLayout(sig_layout)
-        left_layout.addWidget(desc_group)
+        self.desc_group = desc_group
+        left_layout.addWidget(desc_group, 1)
 
         # X (Twitter) 实时字数统计防抖定时器 (80ms，避免输入打字卡顿)
         self.x_counter_timer = QTimer(self)
@@ -4572,7 +4603,7 @@ class MainWindow(QMainWindow):
         self.img_list_widget = QListWidget()
         self.img_list_widget.setMinimumHeight(75)
         self.img_list_widget.currentRowChanged.connect(self._on_image_selection_changed)
-        media_layout.addWidget(self.img_list_widget)
+        media_layout.addWidget(self.img_list_widget, 1)
 
         # 3.1 打码控制卡片 (紧凑 3 行，卡片 ToolTip 承载操作提示)
         censor_box = QFrame()
@@ -4807,7 +4838,8 @@ class MainWindow(QMainWindow):
         wm_vlayout.addLayout(w_row4)
 
         media_layout.addWidget(wm_box)
-        left_layout.addWidget(media_group)
+        self.media_group = media_group
+        left_layout.addWidget(media_group, 1)
 
         left_scroll.setWidget(left_content)
         left_scroll.setMinimumWidth(330)
@@ -5500,6 +5532,10 @@ class MainWindow(QMainWindow):
             da_gallery_combo.setMinimumContentsLength(16)
             da_gallery_combo.setMinimumWidth(170)
             da_gallery_combo.setMaximumWidth(260)
+            if da_gallery_combo.lineEdit():
+                da_gallery_combo.lineEdit().setStyleSheet(
+                    "QLineEdit { background: transparent; border: none; color: #e2e8f0; padding: 0px; }"
+                )
             self.da_gallery_combo = da_gallery_combo
             self._populate_da_gallery_combo(da_gallery_combo)
             da_gallery_combo.currentTextChanged.connect(lambda: self._schedule_config_save())
@@ -5961,7 +5997,7 @@ class MainWindow(QMainWindow):
                 if title:
                     bsky_text_parts.append(title)
                 if desc:
-                    bsky_text_parts.append(desc)
+                    bsky_text_parts.append(render_description_for_bluesky(desc, self.config.get("signature_template")))
                 bsky_text = "\n\n".join(bsky_text_parts).strip()
                 if tags:
                     tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags])
@@ -7795,7 +7831,7 @@ class MainWindow(QMainWindow):
             if title_val:
                 bsky_tp.append(title_val)
             if desc_val:
-                bsky_tp.append(desc_val)
+                bsky_tp.append(render_description_for_bluesky(desc_val, self.config.get("signature_template")))
             bsky_full_text = "\n\n".join(bsky_tp).strip()
             if tags_val:
                 tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags_val])

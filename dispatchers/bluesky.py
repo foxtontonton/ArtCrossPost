@@ -16,6 +16,7 @@ import requests
 from PIL import Image
 
 from .base import BaseDispatcher
+from signature_utils import render_description_for_bluesky
 
 try:
     from logger import get_logger
@@ -766,9 +767,11 @@ class BlueskyDispatcher(BaseDispatcher):
             "Content-Type": "application/json"
         }
 
-        # 2. 正文组织与话题标签拼接
+        # 2. 正文组织与话题标签拼接 (含签名 Markdown 链接 -> 裸 URL 转换)
         title = payload.get("title", "").strip()
         desc = payload.get("description", "").strip()
+        sig_template = payload.get("signature_template")
+        desc = render_description_for_bluesky(desc, sig_template)
         tags = payload.get("tags", [])
 
         text_parts = []
