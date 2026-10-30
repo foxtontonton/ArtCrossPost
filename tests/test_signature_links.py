@@ -34,10 +34,10 @@ from signature_utils import (
 )
 
 
-def test_canonical_signature_contains_exact_five_links():
-    """验证规范签名模板中准确包含全部 5 个目标链接与定版文案"""
+def test_canonical_signature_contains_exact_six_links():
+    """验证规范签名模板中准确包含全部 6 个目标链接与定版文案"""
     links = extract_markdown_links(CANONICAL_SIGNATURE_TEMPLATE)
-    assert len(links) == 5
+    assert len(links) == 6
 
     extracted_urls = [url for _, url in links]
     assert "https://x.com/FOXTONTONTON" in extracted_urls
@@ -45,6 +45,7 @@ def test_canonical_signature_contains_exact_five_links():
     assert "https://patreon.com/foxtontonton" in extracted_urls
     assert "https://ko-fi.com/foxtontonton" in extracted_urls
     assert "https://civitai.red/user/FOXTONTONTON" in extracted_urls
+    assert "https://bsky.app/profile/foxtontonton.bsky.social" in extracted_urls
 
     # 验证末句定版: "...support my work, you can buy me a coffee on Ko-fi..."
     assert "support my work, you can buy me a coffee on Ko-fi" in CANONICAL_SIGNATURE_TEMPLATE
@@ -108,10 +109,11 @@ def test_body_brackets_strictly_kept_as_plain_text():
     html_out = render_description_to_html(full_desc)
     # 正文中的方括号绝不能有 <a> 标签
     assert "<p>Artwork title: [OC] Demon King [Part 1/3]<br>Artist: [Self-taught &amp; proud]<br>Check &lt;brackets&gt; &amp; symbols.</p>" in html_out
-    # 签名中的 5 个链接必须有 <a> 标签
+    # 签名中的 6 个链接必须有 <a> 标签
     assert '<a href="https://x.com/FOXTONTONTON"' in html_out
     assert '<a href="https://www.deviantart.com/foxtontonton"' in html_out
     assert '<a href="https://civitai.red/user/FOXTONTONTON"' in html_out
+    assert '<a href="https://bsky.app/profile/foxtontonton.bsky.social"' in html_out
 
 
 def test_render_description_to_plain_text():
@@ -122,10 +124,12 @@ def test_render_description_to_plain_text():
     assert "(https://x.com/FOXTONTONTON)" not in plain
     assert "(https://civitai.red/user/FOXTONTONTON)" not in plain
     assert "💎Civitai: FOXTONTONTON" in plain
+    assert "🦋Bluesky: FOXTONTONTON" in plain
+    assert "(https://bsky.app/profile/foxtontonton.bsky.social)" not in plain
 
 
-def test_verify_signature_links_all_five_present():
-    """测试 5 链接全齐通过断言"""
+def test_verify_signature_links_all_six_present():
+    """测试 6 链接全齐通过断言"""
     html_sample = (
         '<p>Body text</p>'
         '<p>🎬X: <a href="https://x.com/FOXTONTONTON">@FOXTONTONTON</a></p>'
@@ -133,6 +137,7 @@ def test_verify_signature_links_all_five_present():
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     ok, missing = verify_signature_links_in_html(html_sample)
     assert ok is True
@@ -147,6 +152,7 @@ def test_verify_signature_links_missing_one_fails():
         '<p>🖼️DeviantArt: <a href="https://www.deviantart.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
         # Civitai omitted
     )
     ok, missing = verify_signature_links_in_html(html_sample)
@@ -165,10 +171,11 @@ def test_verify_signature_links_plain_text_rejected():
         "<p>💜Patreon：[FOXTONTONTON](https://patreon.com/foxtontonton)</p>"
         "<p>☕Ko-fi: [FOXTONTONTON](https://ko-fi.com/foxtontonton)</p>"
         "<p>💎Civitai: [FOXTONTONTON](https://civitai.red/user/FOXTONTONTON)</p>"
+        "<p>🦋Bluesky: [FOXTONTONTON](https://bsky.app/profile/foxtontonton.bsky.social)</p>"
     )
     ok, missing = verify_signature_links_in_html(plain_text_html)
     assert ok is False
-    assert len(missing) == 5
+    assert len(missing) == 6
 
 
 def test_verify_signature_links_da_post_url_propagation():
@@ -181,6 +188,7 @@ def test_verify_signature_links_da_post_url_propagation():
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     # 不传 da_post_url 时 DA 会因为不匹配主页而报错
     ok_no_prop, missing_no_prop = verify_signature_links_in_html(html_sample)
@@ -236,6 +244,7 @@ def test_deviantart_dispatcher_signature_readback_success(tmp_path, monkeypatch)
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     mock_desc_area = _create_mock_da_desc_area(valid_html)
 
@@ -285,7 +294,7 @@ def test_deviantart_dispatcher_signature_readback_success(tmp_path, monkeypatch)
 
     assert ok is True
     assert msg == ""
-    assert any(c.get("item") == "signature_links" and "5/5 真超链接已生效" in c.get("detail", "") for c in comp_list)
+    assert any(c.get("item") == "signature_links" and "6/6 真超链接已生效" in c.get("detail", "") for c in comp_list)
 
 
 def test_deviantart_dispatcher_signature_readback_missing_link_aborts(tmp_path, monkeypatch):
@@ -365,6 +374,7 @@ def test_deviantart_keep_preset_with_signature_links(tmp_path, monkeypatch):
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
         '<p>Existing Preset Artist Bio</p>'
     )
     mock_desc_area = _create_mock_da_desc_area(valid_html, preset_text="Existing Preset Artist Bio")
@@ -411,7 +421,7 @@ def test_deviantart_keep_preset_with_signature_links(tmp_path, monkeypatch):
     assert msg == ""
     assert getattr(disp, "_last_desc_source", None) == "拼接"
     assert any(c.get("item") == "description_source" and c.get("detail") == "拼接" for c in comp_list)
-    assert any(c.get("item") == "signature_links" and "5/5 真超链接已生效" in c.get("detail", "") for c in comp_list)
+    assert any(c.get("item") == "signature_links" and "6/6 真超链接已生效" in c.get("detail", "") for c in comp_list)
 
 
 def test_civitai_dispatcher_signature_readback_success(tmp_path, monkeypatch):
@@ -432,6 +442,7 @@ def test_civitai_dispatcher_signature_readback_success(tmp_path, monkeypatch):
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     mock_desc_box = MagicMock()
     mock_desc_box.evaluate.side_effect = lambda script, *args: valid_html if "innerHTML" in str(script) else "execCommand"
@@ -476,7 +487,7 @@ def test_civitai_dispatcher_signature_readback_success(tmp_path, monkeypatch):
 
     assert ok is True
     assert "https://civitai.com/posts/31951550" in msg
-    assert any(c.get("item") == "signature_links" and "5/5 真超链接已生效" in c.get("detail", "") for c in comp)
+    assert any(c.get("item") == "signature_links" and "6/6 真超链接已生效" in c.get("detail", "") for c in comp)
     mock_delete.assert_not_called()
 
 
@@ -559,6 +570,7 @@ def test_patreon_dispatcher_signature_readback_success(tmp_path, monkeypatch):
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>☕Ko-fi: <a href="https://ko-fi.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     mock_desc_box = MagicMock()
     mock_desc_box.evaluate.side_effect = lambda script, *args: valid_html if "innerHTML" in str(script) else "execCommand"
@@ -602,7 +614,7 @@ def test_patreon_dispatcher_signature_readback_success(tmp_path, monkeypatch):
 
     ok, msg, comp = disp.publish(payload)
     assert ok is True
-    assert any(c.get("item") == "signature_links" and "5/5 真超链接已生效" in c.get("detail", "") for c in comp)
+    assert any(c.get("item") == "signature_links" and "6/6 真超链接已生效" in c.get("detail", "") for c in comp)
 
 
 def test_patreon_dispatcher_signature_missing_link_aborts(tmp_path, monkeypatch):
@@ -624,6 +636,7 @@ def test_patreon_dispatcher_signature_missing_link_aborts(tmp_path, monkeypatch)
         '<p>🖼️DeviantArt: <a href="https://www.deviantart.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
         '<p>💎Civitai: <a href="https://civitai.red/user/FOXTONTONTON">FOXTONTONTON</a></p>'
+        '<p>🦋Bluesky: <a href="https://bsky.app/profile/foxtontonton.bsky.social">FOXTONTONTON</a></p>'
     )
     mock_desc_box = MagicMock()
     mock_desc_box.evaluate.side_effect = lambda script, *args: incomplete_html if "innerHTML" in str(script) else "execCommand"
@@ -681,7 +694,7 @@ def test_bluesky_signature_markdown_link_conversion():
 
     facets = extract_facets(converted)
     link_facets = [f for f in facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
-    assert len(link_facets) == 5
+    assert len(link_facets) == 6
     uris = [f["features"][0]["uri"] for f in link_facets]
     for _, u in CANONICAL_SIGNATURE_LINKS:
         assert u in uris
@@ -705,7 +718,7 @@ def test_bluesky_description_rendering_preserves_body_brackets():
 
     facets = extract_facets(rendered)
     link_uris = [f["features"][0]["uri"] for f in facets if f["features"][0].get("$type") == "app.bsky.richtext.facet#link"]
-    assert len(link_uris) == 5
+    assert len(link_uris) == 6
     for _, u in CANONICAL_SIGNATURE_LINKS:
         assert u in link_uris
 

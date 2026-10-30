@@ -77,7 +77,8 @@ DEFAULT_CONFIG = {
         "deviantart": "https://www.deviantart.com/foxtontonton",
         "patreon": "https://patreon.com/foxtontonton",
         "civitai": "https://civitai.red/user/FOXTONTONTON",
-        "kofi": "https://ko-fi.com/foxtontonton"
+        "kofi": "https://ko-fi.com/foxtontonton",
+        "bluesky": "https://bsky.app/profile/foxtontonton.bsky.social"
     },
     # 4. 压缩优化与并发控制策略
     "compression": {

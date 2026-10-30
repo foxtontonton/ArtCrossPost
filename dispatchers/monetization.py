@@ -630,8 +630,8 @@ class PatreonDispatcher(BaseDispatcher):
                             logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
                             self.close_login_session(browser, context)
                             return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
-                        logger.info("[Patreon] 描述签名 5 个真超链接回读断言全部通过 (5/5 链接已生效)")
-                        compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "5/5 真超链接已生效"))
+                        logger.info("[Patreon] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
+                        compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "6/6 真超链接已生效"))
                     else:
                         desc_area.fill(full_desc)
                         time.sleep(0.5)

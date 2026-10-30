@@ -28,6 +28,8 @@ ICON_FILENAME_MAP = {
     "civit": "civitai.png",
     "kofi": "kofi.png",
     "ko-fi": "kofi.png",
+    "bluesky": "bluesky.png",
+    "bsky": "bluesky.png",
 }
 
 # 个人主页默认映射字典 (已核验，供 config 及回退使用)
@@ -37,6 +39,7 @@ DEFAULT_PLATFORM_PROFILE_URLS = {
     "patreon": "https://patreon.com/foxtontonton",
     "civitai": "https://civitai.red/user/FOXTONTONTON",
     "kofi": "https://ko-fi.com/foxtontonton",
+    "bluesky": "https://bsky.app/profile/foxtontonton.bsky.social",
 }
 
 # 记录缺失告警的集合，满足“日志记一次即可”的要求
@@ -58,6 +61,8 @@ def get_platform_clean_key(platform_key: str) -> str:
         return "civitai"
     if k in ("kofi", "ko-fi"):
         return "kofi"
+    if k in ("bluesky", "bsky"):
+        return "bluesky"
     return k
 
 
@@ -70,6 +75,7 @@ def get_platform_display_name(platform_key: str, fallback: Optional[str] = None)
         "patreon": "Patreon",
         "civitai": "Civitai",
         "kofi": "Ko-fi",
+        "bluesky": "Bluesky",
     }
     return names.get(clean_k, fallback or str(platform_key))
 
