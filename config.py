@@ -104,7 +104,11 @@ DEFAULT_CONFIG = {
         "x_wait_button_timeout": 120,     # X (Twitter) 发帖按钮等待就绪超时 (秒，应对服务端转码延迟)
         "x_da_link": "https://www.deviantart.com/foxtontonton", # X 推文预告引流 DA 链接
         "x_nsfw_notice": "🔞 NSFW full set on DeviantArt 👇",     # X 推文 NSFW 引流提示文案
-        "use_da_post_link_for_traffic": True              # DA 帖子 URL 透传引流到 X/Patreon (默认开启，失败回退主页)
+        "use_da_post_link_for_traffic": True,             # DA 帖子 URL 透传引流到 X/Patreon (默认开启，失败回退主页)
+        "bluesky_label": "porn",                          # Bluesky 成人分级 self-labels ("porn", "sexual", "nudity")
+        "bluesky_ai_hashtags": True,                      # Bluesky AI 话题标签 (#AIArt #GenerativeArt)
+        "bluesky_censor": True,                           # Bluesky 专属打码保护开关
+        "bluesky_over_limit_policy": "ask"                # Bluesky 超限策略 ("ask", "truncate", "thread")
     }
 }
 

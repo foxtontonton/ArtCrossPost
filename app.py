@@ -2127,6 +2127,8 @@ class PublishThread(QThread):
                 disp_images = self.payload.get("da_images") or images
             elif disp.name == "civitai":
                 disp_images = self.payload.get("civitai_images") or raw_images
+            elif disp.name == "bluesky":
+                disp_images = self.payload.get("bluesky_images") or images
             else:
                 disp_images = images
 
@@ -3163,6 +3165,19 @@ class SettingsDialog(QDialog):
         return self._wrap_in_scroll(content)
 
     def _start_login(self, disp, s_badge, u_lbl, login_btn=None):
+        if disp.name == "bluesky":
+            if login_btn:
+                login_btn.setEnabled(False)
+            s_badge.setText("● 正在录入凭据...")
+            s_badge.setStyleSheet("color: #fbbf24; font-weight: 500;")
+            try:
+                success, msg = disp.login_interactive(parent_window=self)
+                profile = disp.get_profile()
+                self._on_login_finished(disp, s_badge, u_lbl, success, msg, profile, login_btn)
+            except Exception as e:
+                self._on_login_finished(disp, s_badge, u_lbl, False, str(e), {}, login_btn)
+            return
+
         s_badge.setText("● 正在打开浏览器...")
         s_badge.setStyleSheet("color: #fbbf24; font-weight: 500;")
         if login_btn:
@@ -3793,6 +3808,8 @@ class MainWindow(QMainWindow):
 
     def _save_draft(self):
         """P1-6: 自动将当前草稿保存至 data/draft.json"""
+        if os.environ.get("PYTEST_CURRENT_TEST") and self.data_dir == Path(__file__).resolve().parent / "data":
+            return
         draft_file = self.data_dir / "draft.json"
         if not hasattr(self, "title_input") or not hasattr(self, "tags_input") or not hasattr(self, "desc_input"):
             return
@@ -3823,6 +3840,8 @@ class MainWindow(QMainWindow):
 
     def _load_draft(self):
         """P1-6 / P0-2: 启动时自动恢复上次草稿，自动忽略已禁用的平台 (如 Ko-fi)"""
+        if os.environ.get("PYTEST_CURRENT_TEST") and self.data_dir == Path(__file__).resolve().parent / "data":
+            return
         draft_file = self.data_dir / "draft.json"
         if not draft_file.exists():
             return
@@ -4409,6 +4428,11 @@ class MainWindow(QMainWindow):
         self.x_char_counter_lbl.setStyleSheet("color: #9ca3af; font-weight: bold;")
         sig_layout.addWidget(self.x_char_counter_lbl)
 
+        self.bsky_char_counter_lbl = QLabel("Bluesky: 0 / 300")
+        self.bsky_char_counter_lbl.setStyleSheet("color: #9ca3af; font-weight: bold; margin-left: 8px;")
+        sig_layout.addWidget(self.bsky_char_counter_lbl)
+        self.bsky_char_counter_lbl.hide()
+
         desc_layout.addLayout(sig_layout)
         left_layout.addWidget(desc_group)
 
@@ -4866,6 +4890,46 @@ class MainWindow(QMainWindow):
         self.x_limit_confirm_widget.hide()
         exec_layout.addWidget(self.x_limit_confirm_widget)
 
+        # 内嵌式 Bluesky 字数超限确认条 (与 X 同款流程)
+        self.bsky_limit_confirm_widget = QFrame()
+        self.bsky_limit_confirm_widget.setStyleSheet(
+            "background-color: #121f2d; border: 1px solid #0284c7; border-radius: 8px; padding: 10px; margin-top: 6px; margin-bottom: 6px;"
+        )
+        bsky_confirm_layout = QVBoxLayout(self.bsky_limit_confirm_widget)
+        bsky_confirm_layout.setContentsMargins(8, 8, 8, 8)
+        bsky_confirm_layout.setSpacing(8)
+
+        bsky_confirm_title = QLabel("⚠️ Bluesky 文本字数超限决策")
+        bsky_confirm_title.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        bsky_confirm_layout.addWidget(bsky_confirm_title)
+
+        self.bsky_limit_msg_lbl = QLabel()
+        self.bsky_limit_msg_lbl.setStyleSheet("color: #e2e8f0; line-height: 1.4;")
+        self.bsky_limit_msg_lbl.setWordWrap(True)
+        bsky_confirm_layout.addWidget(self.bsky_limit_msg_lbl)
+
+        bsky_confirm_btns = QHBoxLayout()
+        bsky_confirm_btns.setSpacing(6)
+
+        btn_bsky_trunc = QPushButton("✂️ 截断发布")
+        btn_bsky_trunc.setStyleSheet("background-color: #d97706; color: #ffffff; font-weight: bold; padding: 6px 10px; border-radius: 6px;")
+        btn_bsky_trunc.clicked.connect(lambda: self._proceed_publishing_with_bsky_action("truncate"))
+        bsky_confirm_btns.addWidget(btn_bsky_trunc)
+
+        btn_bsky_thread = QPushButton("🧵 拆成串推 (Thread)")
+        btn_bsky_thread.setStyleSheet("background-color: #0284c7; color: #ffffff; font-weight: bold; padding: 6px 10px; border-radius: 6px;")
+        btn_bsky_thread.clicked.connect(lambda: self._proceed_publishing_with_bsky_action("thread"))
+        bsky_confirm_btns.addWidget(btn_bsky_thread)
+
+        btn_bsky_cancel = QPushButton("❌ 取消 Bluesky 发布")
+        btn_bsky_cancel.setStyleSheet("background-color: #374151; color: #e2e8f0; padding: 6px 10px; border-radius: 6px;")
+        btn_bsky_cancel.clicked.connect(self._cancel_bsky_publish_and_proceed)
+        bsky_confirm_btns.addWidget(btn_bsky_cancel)
+
+        bsky_confirm_layout.addLayout(bsky_confirm_btns)
+        self.bsky_limit_confirm_widget.hide()
+        exec_layout.addWidget(self.bsky_limit_confirm_widget)
+
         # 发布与体检按钮行
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -5203,6 +5267,7 @@ class MainWindow(QMainWindow):
             cb.setChecked(disp.name in selected_plats)
         cb.setStyleSheet("font-weight: bold;")
         cb.stateChanged.connect(lambda: self._schedule_config_save())
+        cb.stateChanged.connect(self._update_x_char_counter)
         header.addWidget(cb)
 
         profile = disp.get_profile()
@@ -5417,6 +5482,54 @@ class MainWindow(QMainWindow):
             opts_layout.addWidget(civitai_censor)
             opts["censor"] = civitai_censor
 
+        elif disp.name == "bluesky":
+            bsky_box = QHBoxLayout()
+            bsky_box.setSpacing(8)
+
+            bsky_censor = QCheckBox("打码保护")
+            bsky_censor.setChecked(self.config.get("defaults", {}).get("bluesky_censor", True))
+            bsky_censor.stateChanged.connect(self._on_platform_censor_toggled)
+            bsky_censor.stateChanged.connect(lambda: self._schedule_config_save())
+            bsky_box.addWidget(bsky_censor)
+            opts["censor"] = bsky_censor
+
+            bsky_box.addWidget(QLabel("成人分级:"))
+            bsky_label_combo = QComboBox()
+            make_responsive_combo(bsky_label_combo)
+            bsky_label_combo.addItem("Porn (色情/露骨)", "porn")
+            bsky_label_combo.addItem("Sexual (性暗示/轻度)", "sexual")
+            bsky_label_combo.addItem("Nudity (艺术裸体)", "nudity")
+            cur_label = self.config.get("defaults", {}).get("bluesky_label", "porn")
+            for l_idx in range(bsky_label_combo.count()):
+                if bsky_label_combo.itemData(l_idx) == cur_label:
+                    bsky_label_combo.setCurrentIndex(l_idx)
+                    break
+            bsky_label_combo.currentIndexChanged.connect(lambda: self._on_bsky_label_changed(bsky_label_combo))
+            bsky_box.addWidget(bsky_label_combo)
+            opts["label"] = bsky_label_combo
+
+            bsky_ai = QCheckBox("追加 AI 话题标签 (#AIArt #GenerativeArt)")
+            bsky_ai.setChecked(self.config.get("defaults", {}).get("bluesky_ai_hashtags", True))
+            bsky_ai.stateChanged.connect(lambda: self._on_bsky_ai_toggled(bsky_ai))
+            bsky_box.addWidget(bsky_ai)
+            opts["ai_hashtags"] = bsky_ai
+
+            bsky_policy_combo = QComboBox()
+            make_responsive_combo(bsky_policy_combo)
+            bsky_policy_combo.addItem("超限: 每次询问", "ask")
+            bsky_policy_combo.addItem("超限: 自动截断", "truncate")
+            bsky_policy_combo.addItem("超限: 自动串推", "thread")
+            cur_policy = self.config.get("defaults", {}).get("bluesky_over_limit_policy", "ask")
+            for p_idx in range(bsky_policy_combo.count()):
+                if bsky_policy_combo.itemData(p_idx) == cur_policy:
+                    bsky_policy_combo.setCurrentIndex(p_idx)
+                    break
+            bsky_policy_combo.currentIndexChanged.connect(lambda: self._on_bsky_policy_changed(bsky_policy_combo))
+            bsky_box.addWidget(bsky_policy_combo)
+            opts["policy"] = bsky_policy_combo
+
+            opts_layout.addLayout(bsky_box)
+
         layout.addLayout(opts_layout)
 
         self.platform_controls[disp.name] = {
@@ -5429,6 +5542,18 @@ class MainWindow(QMainWindow):
         return card
 
     def _start_platform_direct_login(self, disp, status_lbl, login_btn):
+        if disp.name == "bluesky":
+            login_btn.setEnabled(False)
+            status_lbl.setText("(● 正在录入凭据...)")
+            status_lbl.setStyleSheet("color: #fbbf24; font-weight: 500;")
+            try:
+                success, msg = disp.login_interactive(parent_window=self)
+                profile = disp.get_profile()
+                self._on_platform_direct_login_finished(disp, status_lbl, login_btn, success, msg, profile)
+            except Exception as e:
+                self._on_platform_direct_login_finished(disp, status_lbl, login_btn, False, str(e), {})
+            return
+
         status_lbl.setText("(● 正在打开浏览器...)")
         status_lbl.setStyleSheet("color: #fbbf24; font-weight: 500;")
         login_btn.setEnabled(False)
@@ -5708,6 +5833,50 @@ class MainWindow(QMainWindow):
 
         self._update_x_text_preview()
 
+        # Bluesky 字数统计与门禁 (P0-2)
+        if hasattr(self, "bsky_char_counter_lbl"):
+            is_bsky_checked = hasattr(self, "platform_controls") and "bluesky" in self.platform_controls and self.platform_controls["bluesky"]["checkbox"].isChecked()
+            if is_bsky_checked:
+                from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
+                bsky_text_parts = []
+                if title:
+                    bsky_text_parts.append(title)
+                if desc:
+                    bsky_text_parts.append(desc)
+                bsky_text = "\n\n".join(bsky_text_parts).strip()
+                if tags:
+                    tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags])
+                    bsky_text = f"{bsky_text}\n\n{tag_str}".strip() if bsky_text else tag_str
+
+                is_ai = self.ai_checkbox.isChecked() if hasattr(self, "ai_checkbox") else True
+                bsky_opts = self.platform_controls.get("bluesky", {}).get("options", {})
+                bsky_ai_cb = bsky_opts.get("ai_hashtags")
+                add_ai_tags = bsky_ai_cb.isChecked() if bsky_ai_cb else self.config.get("defaults", {}).get("bluesky_ai_hashtags", True)
+                if is_ai and add_ai_tags:
+                    ai_tags = "#AIArt #GenerativeArt"
+                    bsky_text = f"{bsky_text}\n\n{ai_tags}".strip() if bsky_text else ai_tags
+
+                bsky_count = count_graphemes(bsky_text)
+                bsky_limit = MAX_GRAPHEMES
+                bsky_ratio = bsky_count / max(1, bsky_limit)
+                if bsky_count > bsky_limit:
+                    b_color = "#ef4444"
+                    b_tip = f" (超限 {bsky_count - bsky_limit} 字)"
+                elif bsky_ratio >= 0.9:
+                    b_color = "#fbbf24"
+                    b_tip = " (接近上限)"
+                else:
+                    b_color = "#9ca3af"
+                    b_tip = ""
+                self.bsky_char_counter_lbl.setText(f"Bluesky: <font color='{b_color}'><b>{bsky_count} / {bsky_limit}</b></font>{b_tip}")
+                self.bsky_char_counter_lbl.show()
+
+                if hasattr(self, "bsky_limit_confirm_widget") and self.bsky_limit_confirm_widget.isVisible() and bsky_count <= bsky_limit:
+                    self.bsky_limit_confirm_widget.hide()
+                    self.publish_btn.setEnabled(True)
+            else:
+                self.bsky_char_counter_lbl.hide()
+
     def _on_x_premium_toggled(self, state):
         if getattr(self, "_is_restoring_config", False):
             return
@@ -5755,6 +5924,58 @@ class MainWindow(QMainWindow):
         else:
             self.publish_btn.setEnabled(True)
             self.notify("已取消本次发布，请在正文框精简文本后再试。", level="info")
+
+    def _proceed_publishing_with_bsky_action(self, action):
+        self.bsky_limit_confirm_widget.hide()
+        self._pending_bsky_action = action
+        self.publish_btn.setEnabled(True)
+        self._start_publishing()
+
+    def _cancel_bsky_publish_and_proceed(self):
+        self.bsky_limit_confirm_widget.hide()
+        if hasattr(self, "_pending_bsky_action"):
+            del self._pending_bsky_action
+
+        # 取消勾选 Bluesky 平台
+        if "bluesky" in self.platform_controls:
+            self.platform_controls["bluesky"]["checkbox"].setChecked(False)
+
+        other_selected = [
+            ctrl["dispatcher"] for name, ctrl in self.platform_controls.items()
+            if ctrl["checkbox"].isChecked() and name != "bluesky"
+        ]
+
+        if other_selected:
+            self.publish_btn.setEnabled(True)
+            self.notify("已取消本次 Bluesky 发布，正在继续分发其余平台...", level="info")
+            self._start_publishing()
+        else:
+            self.publish_btn.setEnabled(True)
+            self.notify("已取消本次发布，请在正文框精简文本后再试。", level="info")
+
+    def _on_bsky_policy_changed(self, combo):
+        if getattr(self, "_is_restoring_config", False):
+            return
+        policy = combo.currentData()
+        self.config["defaults"]["bluesky_over_limit_policy"] = policy
+        self._schedule_config_save()
+        p_map = {"ask": "每次询问", "truncate": "自动截断", "thread": "自动串推"}
+        self.notify(f"已保存 Bluesky 默认超限策略为: {p_map.get(policy, policy)}", level="info")
+
+    def _on_bsky_label_changed(self, combo):
+        if getattr(self, "_is_restoring_config", False):
+            return
+        label_val = combo.currentData()
+        self.config["defaults"]["bluesky_label"] = label_val
+        self._schedule_config_save()
+
+    def _on_bsky_ai_toggled(self, cb):
+        if getattr(self, "_is_restoring_config", False):
+            return
+        is_checked = cb.isChecked()
+        self.config["defaults"]["bluesky_ai_hashtags"] = is_checked
+        self._schedule_config_save()
+        self._update_x_char_counter()
 
     def _on_censor_mode_changed(self, idx):
         if getattr(self, "_is_restoring_config", False):
@@ -6783,6 +7004,7 @@ class MainWindow(QMainWindow):
         patreon_images = []
         kofi_images = []
         civitai_images = []
+        bluesky_images = []
 
         if scheduled_snapshot and "censor_enabled" in scheduled_snapshot:
             censor_enabled = scheduled_snapshot["censor_enabled"]
@@ -6793,12 +7015,14 @@ class MainWindow(QMainWindow):
 
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         is_kofi_selected = any(d.name == "kofi" for d in selected)
+        is_bsky_selected = any(d.name == "bluesky" for d in selected)
 
         is_da_censor = censor_enabled and self._is_platform_censor_checked("deviantart", platform_options)
         is_x_censor = censor_enabled and self._is_platform_censor_checked("x_twitter", platform_options)
         is_pat_censor = censor_enabled and self._is_platform_censor_checked("patreon", platform_options)
         is_kofi_censor = censor_enabled and self._is_platform_censor_checked("kofi", platform_options)
         is_civitai_censor = censor_enabled and self._is_platform_censor_checked("civitai", platform_options)
+        is_bsky_censor = censor_enabled and self._is_platform_censor_checked("bluesky", platform_options)
 
         style, mode, ratio = self._get_current_censor_params()
         wm_text = self.watermark_text_input.text().strip()
@@ -6859,7 +7083,7 @@ class MainWindow(QMainWindow):
             } if (wm_enabled and apply_wm_publish and wm_text) else None
 
             if is_gif:
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor, is_bsky_censor])
                 c_params = None
                 if any_censor:
                     final_boxes = self._get_effective_censor_boxes(
@@ -7076,9 +7300,34 @@ class MainWindow(QMainWindow):
                 else:
                     kofi_images.append(str(p))
                 civitai_images.append(str(p))
+
+                # 5. Bluesky 动图 (与 Patreon 相同：打码/水印参数一致且无额外体积限制时直接复用 DA 渲染产物)
+                if is_bsky_censor:
+                    if da_out_path and is_da_censor and Path(da_out_path).exists():
+                        bluesky_images.append(str(da_out_path))
+                    else:
+                        bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_censor.gif"
+                        try:
+                            self._generate_composite_gif(p, bsky_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
+                            bluesky_images.append(str(bsky_out_path))
+                        except Exception:
+                            bluesky_images.append(str(p))
+                else:
+                    if wm_info:
+                        if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
+                            bluesky_images.append(str(da_out_path))
+                        else:
+                            bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_wm.gif"
+                            try:
+                                self._generate_composite_gif(p, bsky_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
+                                bluesky_images.append(str(bsky_out_path))
+                            except Exception:
+                                bluesky_images.append(str(p))
+                    else:
+                        bluesky_images.append(str(p))
             else:
                 # 静态图片处理
-                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor])
+                any_censor = any([is_da_censor, is_x_censor, is_pat_censor, is_kofi_censor, is_civitai_censor, is_bsky_censor])
                 pub_censor_path = None
 
                 if any_censor:
@@ -7182,6 +7431,10 @@ class MainWindow(QMainWindow):
                 # Civitai 静态图
                 civitai_target = pub_censor_path if is_civitai_censor else pub_raw_path
                 civitai_images.append(str(civitai_target))
+
+                # Bluesky 静态图
+                bsky_target = pub_censor_path if is_bsky_censor else pub_raw_path
+                bluesky_images.append(str(bsky_target))
 
         # X (Twitter) 专属图按选用状态提取：勾选则按缩略图排序取勾选的最多4张；未勾选则回退取前4张
         x_candidate_paths = self.get_x_selected_images()
@@ -7291,6 +7544,17 @@ class MainWindow(QMainWindow):
             if "ai" in opts:
                 platform_options["kofi_ai"] = opts["ai"].isChecked()
 
+        if "bluesky" in self.platform_controls:
+            opts = self.platform_controls["bluesky"]["options"]
+            if "label" in opts:
+                platform_options["bluesky_label"] = opts["label"].currentData()
+            if "ai_hashtags" in opts:
+                platform_options["bluesky_ai_hashtags"] = opts["ai_hashtags"].isChecked()
+            if "censor" in opts:
+                platform_options["bluesky_censor"] = opts["censor"].isChecked()
+            if "policy" in opts:
+                platform_options["bluesky_over_limit_policy"] = opts["policy"].currentData()
+
         # 针对 X (Twitter) 进行字数超限决策检查
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         title_val = self.title_input.text().strip()
@@ -7323,6 +7587,55 @@ class MainWindow(QMainWindow):
         if x_action:
             platform_options["x_over_limit_action"] = x_action
 
+        # 针对 Bluesky 进行字素超限决策检查 (P0-2)
+        is_bsky_selected = any(d.name == "bluesky" for d in selected)
+        if is_bsky_selected:
+            from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
+            bsky_tp = []
+            if title_val:
+                bsky_tp.append(title_val)
+            if desc_val:
+                bsky_tp.append(desc_val)
+            bsky_full_text = "\n\n".join(bsky_tp).strip()
+            if tags_val:
+                tag_str = " ".join([f"#{t}" if not t.startswith("#") else t for t in tags_val])
+                bsky_full_text = f"{bsky_full_text}\n\n{tag_str}".strip() if bsky_full_text else tag_str
+
+            is_ai_val = platform_options.get("is_ai_generated", True)
+            if is_ai_val and platform_options.get("bluesky_ai_hashtags", True):
+                ai_tags = "#AIArt #GenerativeArt"
+                bsky_full_text = f"{bsky_full_text}\n\n{ai_tags}".strip() if bsky_full_text else ai_tags
+
+            bsky_count = count_graphemes(bsky_full_text)
+            bsky_limit = MAX_GRAPHEMES
+
+            bsky_action = getattr(self, "_pending_bsky_action", None)
+            if hasattr(self, "_pending_bsky_action"):
+                del self._pending_bsky_action
+
+            if bsky_count > bsky_limit and not bsky_action:
+                policy = platform_options.get("bluesky_over_limit_policy", "ask")
+                if policy == "truncate":
+                    bsky_action = "truncate"
+                elif policy == "thread":
+                    bsky_action = "thread"
+                else: # "ask"
+                    self.bsky_limit_msg_lbl.setText(
+                        f"Bluesky 文本字素计为 <b>{bsky_count}</b> (限额 <b>{bsky_limit}</b>)，已超限 <b>{bsky_count - bsky_limit}</b> 字。<br>请确认发布方式："
+                    )
+                    self.bsky_limit_confirm_widget.show()
+                    self.publish_btn.setEnabled(False)
+                    self.notify(f"⚠️ Bluesky 文本超限 ({bsky_count}/{bsky_limit})，请在右侧发布控制台确认处理方式", level="warning")
+                    return
+
+            if bsky_action:
+                platform_options["bluesky_over_limit_action"] = bsky_action
+
+            # P0-5 多图上限 4 张提示
+            if len(bluesky_images) > 4:
+                discarded_c = len(bluesky_images) - 4
+                self.notify(f"Bluesky 单帖上限 4 张图片，已选取前 4 张发布 (后 {discarded_c} 张已舍弃)", level="info")
+
         payload = {
             "title": self.title_input.text().strip(),
             "description": self.desc_input.toPlainText().strip(),
@@ -7336,6 +7649,7 @@ class MainWindow(QMainWindow):
             "patreon_images": patreon_images,   # Patreon 专属图 (按 Patreon 打码选项)
             "kofi_images": kofi_images,         # Ko-fi 专属图 (按 Ko-fi 打码选项与 ≤3.8MB 动效限制)
             "civitai_images": civitai_images,   # Civitai 专属图 (按 Civitai 打码选项)
+            "bluesky_images": bluesky_images,
             "civitai_max_images_per_post": civitai_limit_val,
             "civitai_resources": civitai_res_val,
             "civitai_resources_scope": civitai_scope_val,
@@ -7446,10 +7760,12 @@ class MainWindow(QMainWindow):
 
             status_lbl = QLabel()
             status_lbl.setWordWrap(True)
+            status_lbl.setOpenExternalLinks(True)
+            formatted_msg = re.sub(r'(https?://[^\s<>"\']+)', r'<a href="\1" style="color:#60a5fa;">\1</a>', msg)
             if success:
-                status_lbl.setText(f"<font color='#34d399'>● 成功</font> <span style='color:#9ca3af;'>({msg})</span>")
+                status_lbl.setText(f"<font color='#34d399'>● 成功</font> <span style='color:#9ca3af;'>({formatted_msg})</span>")
             else:
-                status_lbl.setText(f"<font color='#f87171'>● 失败</font> <span style='color:#fca5a5;'>({msg})</span>")
+                status_lbl.setText(f"<font color='#f87171'>● 失败</font> <span style='color:#fca5a5;'>({formatted_msg})</span>")
             row_layout.addWidget(status_lbl, stretch=1)
             self._platform_result_labels[disp_name] = status_lbl
 
@@ -7844,6 +8160,17 @@ class MainWindow(QMainWindow):
             opts = self.platform_controls["civitai"]["options"]
             if "censor" in opts:
                 platform_options["civitai_censor"] = opts["censor"].isChecked()
+
+        if "bluesky" in self.platform_controls:
+            opts = self.platform_controls["bluesky"]["options"]
+            if "label" in opts:
+                platform_options["bluesky_label"] = opts["label"].currentData()
+            if "ai_hashtags" in opts:
+                platform_options["bluesky_ai_hashtags"] = opts["ai_hashtags"].isChecked()
+            if "censor" in opts:
+                platform_options["bluesky_censor"] = opts["censor"].isChecked()
+            if "policy" in opts:
+                platform_options["bluesky_over_limit_policy"] = opts["policy"].currentData()
 
         tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
         return {

@@ -184,7 +184,8 @@ class DiagnosticsEngine:
             ("x_twitter", "https://x.com", "X (Twitter)"),
             ("deviantart", "https://www.deviantart.com", "DeviantArt"),
             ("patreon", "https://www.patreon.com", "Patreon"),
-            ("kofi", "https://ko-fi.com", "Ko-fi")
+            ("kofi", "https://ko-fi.com", "Ko-fi"),
+            ("bluesky", "https://bsky.social", "Bluesky")
         ]
 
         for p_name, url, d_name in targets:
