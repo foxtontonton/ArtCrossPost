@@ -141,6 +141,9 @@ def get_theme_stylesheet(theme_name="pure_dark", font_size=13):
     fs = font_size
     fs_lg = font_size + 2
     fs_sm = max(11, font_size - 1)
+    fs_title = font_size + 2
+    fs_small = max(11, font_size - 1)
+    fs_xsmall = max(9, font_size - 3)
     ind_size = max(18, int(font_size * 0.85))
     ind_radius = max(3, int(ind_size * 0.2))
     slider_groove = max(6, int(font_size * 0.35))
@@ -155,6 +158,15 @@ QWidget {{
     color: #e2e8f0;
     font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
     font-size: {fs}px;
+}}
+*[fontRole="title"] {{
+    font-size: {fs_title}px;
+}}
+*[fontRole="small"] {{
+    font-size: {fs_small}px;
+}}
+*[fontRole="xsmall"] {{
+    font-size: {fs_xsmall}px;
 }}
 QGroupBox {{
     border: 1px solid {border};
@@ -636,12 +648,12 @@ class UnifiedPreviewCanvas(QLabel):
         self._censor_enabled = False
         self._selected_box_idx = -1
         self._cached_geometry = None
+        self.setProperty("fontRole", "title")
         self.setStyleSheet("""
             background-color: #0c0c12;
             border: 1px dashed #2e2e3e;
             border-radius: 8px;
             color: #64748b;
-            font-size: 15px;
             line-height: 1.6;
         """)
         self.setText(self._placeholder_text)
@@ -1167,7 +1179,8 @@ class ThumbnailCardWidget(QFrame):
         top_row.setSpacing(2)
 
         order_lbl = QLabel(f"#{idx + 1}")
-        order_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; font-size: 10px; border: none; background: transparent;")
+        order_lbl.setProperty("fontRole", "xsmall")
+        order_lbl.setStyleSheet("color: #a5b4fc; font-weight: bold; border: none; background: transparent;")
         order_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         top_row.addWidget(order_lbl)
         top_row.addStretch()
@@ -1180,7 +1193,6 @@ class ThumbnailCardWidget(QFrame):
                 border: 1px solid #3e3e52;
                 border-radius: 3px;
                 color: #e2e8f0;
-                font-size: 9px;
                 padding: 0px;
                 min-width: 16px;
                 max-width: 16px;
@@ -1199,6 +1211,7 @@ class ThumbnailCardWidget(QFrame):
         """
 
         left_btn = QPushButton("◀")
+        left_btn.setProperty("fontRole", "xsmall")
         left_btn.setStyleSheet(btn_style)
         left_btn.setEnabled(idx > 0)
         left_btn.setToolTip("向左移动 (提前排序)")
@@ -1206,6 +1219,7 @@ class ThumbnailCardWidget(QFrame):
         top_row.addWidget(left_btn)
 
         right_btn = QPushButton("▶")
+        right_btn.setProperty("fontRole", "xsmall")
         right_btn.setStyleSheet(btn_style)
         right_btn.setEnabled(idx < total_count - 1)
         right_btn.setToolTip("向右移动 (后置排序)")
@@ -1213,6 +1227,7 @@ class ThumbnailCardWidget(QFrame):
         top_row.addWidget(right_btn)
 
         del_btn = QPushButton("✕")
+        del_btn.setProperty("fontRole", "xsmall")
         del_btn.setStyleSheet(btn_style.replace("#4338ca", "#b91c1c").replace("#6366f1", "#ef4444"))
         del_btn.setToolTip("从当前图集中移除此张素材")
         del_btn.clicked.connect(lambda chk=False, i=self.idx: self.main_window.remove_image(i))
@@ -1232,7 +1247,8 @@ class ThumbnailCardWidget(QFrame):
             self.img_lbl.setPixmap(pix)
         else:
             self.img_lbl.setText("图片")
-            self.img_lbl.setStyleSheet("color: #64748b; font-size: 10px; border: none; background-color: #0b0b10;")
+            self.img_lbl.setProperty("fontRole", "xsmall")
+            self.img_lbl.setStyleSheet("color: #64748b; border: none; background-color: #0b0b10;")
 
         layout.addWidget(self.img_lbl)
 
@@ -1242,10 +1258,10 @@ class ThumbnailCardWidget(QFrame):
         bot_row.setSpacing(2)
 
         self.x_cb = QCheckBox("X 选用")
+        self.x_cb.setProperty("fontRole", "xsmall")
         self.x_cb.setStyleSheet("""
             QCheckBox {
                 color: #cbd5e1;
-                font-size: 10px;
                 border: none;
                 background: transparent;
             }
@@ -1276,11 +1292,12 @@ class ThumbnailCardWidget(QFrame):
 
         if self.x_video_path:
             v_name = Path(self.x_video_path).name
+            self.video_badge_lbl.setProperty("fontRole", "xsmall")
             if self.x_video_source == "manual":
                 self.video_badge_lbl.setText("🎬 手动指定")
                 self.video_badge_lbl.setStyleSheet(
                     "background-color: #78350f; color: #fde68a; border: 1px solid #d97706; "
-                    "border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0px 3px;"
+                    "border-radius: 3px; font-weight: bold; padding: 0px 3px;"
                 )
                 self.video_badge_lbl.setToolTip(
                     f"已手动绑定 X 视频: {v_name}\n路径: {self.x_video_path}\n(右键可改绑或解绑)"
@@ -1289,7 +1306,7 @@ class ThumbnailCardWidget(QFrame):
                 self.video_badge_lbl.setText("🎬 自动配对")
                 self.video_badge_lbl.setStyleSheet(
                     "background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; "
-                    "border-radius: 3px; font-size: 9px; font-weight: bold; padding: 0px 3px;"
+                    "border-radius: 3px; font-weight: bold; padding: 0px 3px;"
                 )
                 self.video_badge_lbl.setToolTip(
                     f"已自动配对 X 视频: {v_name}\n路径: {self.x_video_path}\n(右键可改绑或解绑)"
@@ -1717,7 +1734,6 @@ class NotificationBar(QFrame):
             color: #9ca3af;
             padding: 3px 8px;
             border-radius: 4px;
-            font-size: 13px;
             font-weight: bold;
         """)
         top_row.addWidget(self.badge_lbl)
@@ -3060,9 +3076,11 @@ class SettingsDialog(QDialog):
         # 范围提示 (仅标注最小与最大数值，无预设档位)
         range_row = QHBoxLayout()
         min_lbl = QLabel("10px")
-        min_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        min_lbl.setProperty("fontRole", "small")
+        min_lbl.setStyleSheet("color: #6b7280;")
         max_lbl = QLabel("60px")
-        max_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        max_lbl.setProperty("fontRole", "small")
+        max_lbl.setStyleSheet("color: #6b7280;")
         range_row.addWidget(min_lbl)
         range_row.addStretch()
         range_row.addWidget(max_lbl)
@@ -3241,7 +3259,6 @@ class SettingsDialog(QDialog):
                     border: 1px solid #3f3f46;
                     border-radius: 6px;
                     color: #9ca3af;
-                    font-size: 12px;
                     padding: 4px 12px;
                 }
                 QPushButton:hover {
@@ -3260,7 +3277,6 @@ class SettingsDialog(QDialog):
                     border: 1px solid #3f3f46;
                     border-radius: 6px;
                     color: #ffffff;
-                    font-size: 12px;
                     font-weight: 500;
                     padding: 4px 14px;
                 }
@@ -3456,7 +3472,8 @@ class SettingsDialog(QDialog):
         dmax_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         da_vbox.addWidget(dmax_label)
         dmax_desc = QLabel("单作品一次投稿允许的最大图片数（普通用户默认 10 张，Core 会员可调至 100 张）。超出此上限时将阻断投稿并提示手动删减。")
-        dmax_desc.setStyleSheet("color: #888888; font-size: 11px; margin-bottom: 4px;")
+        dmax_desc.setProperty("fontRole", "small")
+        dmax_desc.setStyleSheet("color: #888888; margin-bottom: 4px;")
         dmax_desc.setWordWrap(True)
         da_vbox.addWidget(dmax_desc)
 
@@ -3484,7 +3501,8 @@ class SettingsDialog(QDialog):
         civitai_vbox.addWidget(cmax_title)
 
         cmax_desc = QLabel("单帖一次允许上传的最大素材数（平台上限 20 项，配置只许调小）。超出此上限时将阻断投稿并提示手动删减。")
-        cmax_desc.setStyleSheet("color: #888888; font-size: 11px; margin-bottom: 4px;")
+        cmax_desc.setProperty("fontRole", "small")
+        cmax_desc.setStyleSheet("color: #888888; margin-bottom: 4px;")
         cmax_desc.setWordWrap(True)
         civitai_vbox.addWidget(cmax_desc)
 
@@ -3497,7 +3515,7 @@ class SettingsDialog(QDialog):
 
         # 3.4.2 Civitai 资源关联范围 (all / cover) 与标注工具
         cscope_label = QLabel("Civitai 资源关联范围 (Scope):")
-        cscope_label.setStyleSheet("color: #cccccc; font-size: 12px; margin-top: 4px;")
+        cscope_label.setStyleSheet("color: #cccccc; margin-top: 4px;")
         civitai_vbox.addWidget(cscope_label)
 
         self.def_civitai_scope_combo = QComboBox()
@@ -3512,7 +3530,7 @@ class SettingsDialog(QDialog):
         civitai_vbox.addWidget(self.def_civitai_scope_combo)
 
         ctool_label = QLabel("Civitai 图片默认标注工具 (Tool):")
-        ctool_label.setStyleSheet("color: #cccccc; font-size: 12px; margin-top: 4px;")
+        ctool_label.setStyleSheet("color: #cccccc; margin-top: 4px;")
         civitai_vbox.addWidget(ctool_label)
 
         self.def_civitai_tool_edit = QLineEdit()
@@ -3551,10 +3569,12 @@ class SettingsDialog(QDialog):
         ffmpeg_ok = is_ffmpeg_available()
         if ffmpeg_ok:
             ff_lbl = QLabel(f"● FFmpeg 引擎就绪 ({Path(get_ffmpeg_path()).name})")
-            ff_lbl.setStyleSheet("color: #10b981; font-size: 11px;")
+            ff_lbl.setProperty("fontRole", "small")
+            ff_lbl.setStyleSheet("color: #10b981;")
         else:
             ff_lbl = QLabel("⚠️ 未检测到 imageio-ffmpeg 二进制组件，X 视频自动配对与转码功能已禁用（请执行 pip install imageio-ffmpeg）")
-            ff_lbl.setStyleSheet("color: #ef4444; font-size: 11px; font-weight: bold;")
+            ff_lbl.setProperty("fontRole", "small")
+            ff_lbl.setStyleSheet("color: #ef4444; font-weight: bold;")
             self.comfyui_dir_edit.setEnabled(False)
             self.browse_comfy_btn.setEnabled(False)
         comfy_box.addWidget(ff_lbl)
@@ -3618,7 +3638,8 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn_box)
 
         warn_desc = QLabel("⚠️ 注意：导出的压缩包中包含平台登录态凭证，请妥善保管，切勿泄露给他人。导入覆盖前会自动创建时间戳安全备份。")
-        warn_desc.setStyleSheet("color: #fbbf24; font-size: 11px;")
+        warn_desc.setProperty("fontRole", "small")
+        warn_desc.setStyleSheet("color: #fbbf24;")
         warn_desc.setWordWrap(True)
         layout.addWidget(warn_desc)
 
@@ -4449,10 +4470,11 @@ class MainWindow(QMainWindow):
         banner_layout.setSpacing(10)
 
         self.history_warning_banner_lbl = QLabel()
-        self.history_warning_banner_lbl.setStyleSheet("color: #fde68a; font-weight: bold; font-size: 13px;")
+        self.history_warning_banner_lbl.setStyleSheet("color: #fde68a; font-weight: bold;")
         banner_layout.addWidget(self.history_warning_banner_lbl, 1)
 
         banner_close_btn = QPushButton("✕ 忽略")
+        banner_close_btn.setProperty("fontRole", "small")
         banner_close_btn.setStyleSheet("""
             QPushButton {
                 background-color: #78350f;
@@ -4460,7 +4482,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid #b45309;
                 border-radius: 4px;
                 padding: 2px 8px;
-                font-size: 11px;
             }
             QPushButton:hover {
                 background-color: #92400e;
@@ -4651,8 +4672,9 @@ class MainWindow(QMainWindow):
         censor_vlayout.setSpacing(4)
 
         self.censor_ai_status_lbl = QLabel("⚠️ NudeNet AI 引擎未就绪 (依赖组件缺失)，已停用自动框选，请在中央预览框手动框选打码")
+        self.censor_ai_status_lbl.setProperty("fontRole", "small")
         self.censor_ai_status_lbl.setStyleSheet(
-            "color: #ef4444; font-size: 11px; font-weight: bold; padding: 4px 6px; "
+            "color: #ef4444; font-weight: bold; padding: 4px 6px; "
             "background-color: rgba(239, 68, 68, 0.12); border: 1px solid #ef4444; border-radius: 4px;"
         )
         self.censor_ai_status_lbl.setWordWrap(True)
@@ -4940,9 +4962,10 @@ class MainWindow(QMainWindow):
         gallery_header_row = QHBoxLayout()
         gallery_header_row.setContentsMargins(0, 4, 0, 0)
         self.gallery_status_lbl = QLabel("图集总数: <b>0</b> 张  |  X (Twitter) 选用: <b>未选用 (默认发前 4 张)</b>")
-        self.gallery_status_lbl.setStyleSheet("color: #a5b4fc; font-size: 11px;")
-        gallery_header_row.addWidget(self.gallery_status_lbl)
-        gallery_header_row.addStretch()
+        self.gallery_status_lbl.setProperty("fontRole", "small")
+        self.gallery_status_lbl.setStyleSheet("color: #a5b4fc;")
+        self.gallery_status_lbl.setWordWrap(True)
+        gallery_header_row.addWidget(self.gallery_status_lbl, 1)
 
         clear_x_sel_btn = QPushButton("清空 X 选用")
         clear_x_sel_btn.setObjectName("secondaryBtn")
@@ -5115,6 +5138,7 @@ class MainWindow(QMainWindow):
 
         self.schedule_publish_btn = QPushButton("⏱️ 定时发布")
         self.schedule_publish_btn.setObjectName("schedulePublishBtn")
+        self.schedule_publish_btn.setProperty("fontRole", "title")
         self.schedule_publish_btn.setStyleSheet("""
             QPushButton {
                 background-color: #0f766e;
@@ -5122,7 +5146,6 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
                 padding: 10px 12px;
                 border-radius: 6px;
-                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #0d9488;
@@ -5132,6 +5155,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.schedule_publish_btn, stretch=1)
 
         self.diagnose_btn = QPushButton("🔍 一键自检")
+        self.diagnose_btn.setProperty("fontRole", "title")
         self.diagnose_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3b82f6;
@@ -5139,7 +5163,6 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
                 padding: 10px 12px;
                 border-radius: 6px;
-                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #2563eb;
@@ -5293,9 +5316,11 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         header_title = QLabel("🐦 <b>X (Twitter) 实时发帖文案预览</b>")
-        header_title.setStyleSheet("color: #60a5fa; font-size: 14px;")
+        header_title.setProperty("fontRole", "title")
+        header_title.setStyleSheet("color: #60a5fa;")
         header_sub = QLabel("严格按官方加权与方案 B (预告 + DA引流 + 标签) 渲染，与实际发送内容 100% 同步")
-        header_sub.setStyleSheet("color: #9ca3af; font-size: 11px;")
+        header_sub.setProperty("fontRole", "small")
+        header_sub.setStyleSheet("color: #9ca3af;")
         title_box.addWidget(header_title)
         title_box.addWidget(header_sub)
         header_row.addLayout(title_box, 1)
@@ -5308,7 +5333,6 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
                 padding: 6px 12px;
                 border-radius: 6px;
-                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #1d4ed8;
@@ -5326,7 +5350,6 @@ class MainWindow(QMainWindow):
                 background-color: #0b0e14;
                 color: #e2e8f0;
                 font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
-                font-size: 14px;
                 line-height: 1.5;
                 padding: 12px;
                 border: 1px solid #1e293b;
@@ -5342,7 +5365,7 @@ class MainWindow(QMainWindow):
         footer_row.addWidget(self.x_preview_status_lbl, 1)
 
         self.x_preview_counter_lbl = QLabel("加权字数: <b>0/280</b>")
-        self.x_preview_counter_lbl.setStyleSheet("color: #38bdf8; font-size: 13px; font-weight: bold;")
+        self.x_preview_counter_lbl.setStyleSheet("color: #38bdf8; font-weight: bold;")
         footer_row.addWidget(self.x_preview_counter_lbl)
         layout.addLayout(footer_row)
 
@@ -5464,13 +5487,13 @@ class MainWindow(QMainWindow):
 
         login_btn = QPushButton("重新登录" if is_logged_in else "登录")
         login_btn.setMinimumHeight(24)
+        login_btn.setProperty("fontRole", "small")
         login_btn.setStyleSheet("""
             QPushButton {
                 background-color: #272738;
                 border: 1px solid #3f3f46;
                 border-radius: 4px;
                 color: #e2e8f0;
-                font-size: 11px;
                 font-weight: 500;
                 padding: 1px 8px;
             }
@@ -5693,13 +5716,13 @@ class MainWindow(QMainWindow):
             self._update_civitai_key_status_badge(key_status_lbl)
 
             key_btn = QPushButton("录入 Key")
+            key_btn.setProperty("fontRole", "small")
             key_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #272738;
                     border: 1px solid #3f3f46;
                     border-radius: 4px;
                     color: #e2e8f0;
-                    font-size: 11px;
                     padding: 2px 6px;
                 }
                 QPushButton:hover {
@@ -6044,7 +6067,8 @@ class MainWindow(QMainWindow):
                 label.setPixmap(pix.scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 return
         label.setText("👤")
-        label.setStyleSheet("border-radius: 18px; background-color: #374151; font-size: 16px;")
+        label.setProperty("fontRole", "title")
+        label.setStyleSheet("border-radius: 18px; background-color: #374151;")
 
     def _on_master_ai_toggled(self, state):
         if getattr(self, "_is_restoring_config", False):
@@ -7083,7 +7107,8 @@ class MainWindow(QMainWindow):
 
         if not self.image_paths:
             empty_lbl = QLabel("暂未导入图片 (可在左侧导入多张作品图片进行图集编排与 X 选用)")
-            empty_lbl.setStyleSheet("color: #64748b; font-size: 11px; padding: 10px;")
+            empty_lbl.setProperty("fontRole", "small")
+            empty_lbl.setStyleSheet("color: #64748b; padding: 10px;")
             self.thumbnail_gallery.hlayout.addWidget(empty_lbl)
             self._update_gallery_status_label()
             return
@@ -8173,7 +8198,7 @@ class MainWindow(QMainWindow):
         traffic_info = results.pop("_traffic_info", None) if isinstance(results, dict) and "_traffic_info" in results else None
 
         header_lbl = QLabel("<b>📊 分发结果面板</b>")
-        header_lbl.setStyleSheet("color: #e2e8f0; font-size: 13px; margin-bottom: 4px;")
+        header_lbl.setStyleSheet("color: #e2e8f0; margin-bottom: 4px;")
         self.publish_results_layout.addWidget(header_lbl)
 
         if traffic_info and traffic_info.get("link"):
@@ -8246,7 +8271,6 @@ class MainWindow(QMainWindow):
                     font-weight: bold;
                     padding: 4px 10px;
                     border-radius: 4px;
-                    font-size: 12px;
                 }
                 QPushButton:hover {
                     background-color: #b45309;

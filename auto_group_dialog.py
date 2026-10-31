@@ -98,9 +98,10 @@ class AutoGroupReviewDialog(QDialog):
         header = QVBoxLayout()
         header.setSpacing(4)
         title_lbl = QLabel("📂 <b>文件夹导入素材自动分组预览</b>")
-        title_lbl.setStyleSheet("color: #60a5fa; font-size: 15px;")
+        title_lbl.setProperty("fontRole", "title")
+        title_lbl.setStyleSheet("color: #60a5fa;")
         desc_lbl = QLabel("系统已按同前缀、序号与章节规则识别出以下多套作品。您可以合并、拆分或重命名微调后再载入草稿箱：")
-        desc_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        desc_lbl.setStyleSheet("color: #9ca3af;")
         desc_lbl.setWordWrap(True)
         header.addWidget(title_lbl)
         header.addWidget(desc_lbl)
@@ -157,7 +158,7 @@ class AutoGroupReviewDialog(QDialog):
         # 底部确定与统计
         footer = QHBoxLayout()
         self.summary_lbl = QLabel()
-        self.summary_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        self.summary_lbl.setStyleSheet("color: #9ca3af;")
         footer.addWidget(self.summary_lbl)
         footer.addStretch()
 

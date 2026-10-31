@@ -58,9 +58,10 @@ class PublishHistoryDialog(QDialog):
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         h_title = QLabel("📜 <b>发布历史记录</b>")
-        h_title.setStyleSheet("color: #60a5fa; font-size: 15px;")
+        h_title.setProperty("fontRole", "title")
+        h_title.setStyleSheet("color: #60a5fa;")
         h_sub = QLabel("按倒序记录各次发布的时间、素材指纹、平台分发状态与帖子直链 (只读)")
-        h_sub.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        h_sub.setStyleSheet("color: #94a3b8;")
         title_box.addWidget(h_title)
         title_box.addWidget(h_sub)
         header_row.addLayout(title_box, 1)
@@ -99,7 +100,7 @@ class PublishHistoryDialog(QDialog):
         # 底部操作栏
         footer = QHBoxLayout()
         self.count_lbl = QLabel("共 0 条发布记录")
-        self.count_lbl.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        self.count_lbl.setStyleSheet("color: #9ca3af;")
         footer.addWidget(self.count_lbl)
         footer.addStretch()
 

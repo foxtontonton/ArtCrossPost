@@ -597,7 +597,7 @@ class BlueskyDispatcher(BaseDispatcher):
             "1. 打开网页 <a href='https://bsky.app/settings/app-passwords' style='color:#60a5fa;'>bsky.app → Settings → Privacy & Security → App Passwords</a><br>"
             "2. 点击 <b>Add App Password</b>，名称输入 <code>ArtCrossPost</code><br>"
             "3. 复制生成的 16 位密码 (如 <code>xxxx-xxxx-xxxx-xxxx</code>) 填入下方<br>"
-            "<span style='color:#9ca3af; font-size:11px;'>安全提示：App Password 仅保存在本机 data/ 目录，绝不提交至代码仓库。</span>"
+            "<span style='color:#9ca3af;'>安全提示：App Password 仅保存在本机 data/ 目录，绝不提交至代码仓库。</span>"
         )
         guide_lbl.setOpenExternalLinks(True)
         guide_lbl.setWordWrap(True)

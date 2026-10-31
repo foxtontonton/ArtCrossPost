@@ -80,7 +80,8 @@ class ScheduledPublishDialog(QDialog):
         top_layout = QVBoxLayout(top_frame)
 
         title_lbl = QLabel("<b>📅 新建定时任务</b> (将当前素材、标题及平台选项打包存入快照)")
-        title_lbl.setStyleSheet("font-size: 14px; color: #89b4fa;")
+        title_lbl.setProperty("fontRole", "title")
+        title_lbl.setStyleSheet("color: #89b4fa;")
         top_layout.addWidget(title_lbl)
 
         input_row = QHBoxLayout()
@@ -115,7 +116,8 @@ class ScheduledPublishDialog(QDialog):
         # 2. 中部任务列表区域
         list_header_row = QHBoxLayout()
         queue_lbl = QLabel("<b>📋 任务队列清单</b>")
-        queue_lbl.setStyleSheet("font-size: 14px; color: #a6adc8;")
+        queue_lbl.setProperty("fontRole", "title")
+        queue_lbl.setStyleSheet("color: #a6adc8;")
         list_header_row.addWidget(queue_lbl)
         list_header_row.addStretch()
 
@@ -138,7 +140,7 @@ class ScheduledPublishDialog(QDialog):
 
         # 3. 底部关闭与提示
         tip_lbl = QLabel("ℹ️ 提示: 定时发布功能在软件保持开启时生效 (后台 QTimer 每 30 秒自动轮询到期任务)")
-        tip_lbl.setStyleSheet("color: #6c7086; font-size: 12px;")
+        tip_lbl.setStyleSheet("color: #6c7086;")
         layout.addWidget(tip_lbl)
 
         close_btn = QPushButton("关闭")
@@ -257,7 +259,7 @@ class ExpiredTasksDialog(QDialog):
             "<b>⚠️ 软件启动时发现以下定时任务已超过原定计划时间:</b><br>"
             "根据规范，系统不会静默丢弃任务。请为过期任务选择处理方式："
         )
-        alert_lbl.setStyleSheet("color: #f9e2af; font-size: 13px; line-height: 1.4;")
+        alert_lbl.setStyleSheet("color: #f9e2af; line-height: 1.4;")
         layout.addWidget(alert_lbl)
 
         self.table = QTableWidget()
