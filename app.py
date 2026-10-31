@@ -2491,7 +2491,18 @@ class PublishThread(QThread):
                     status_str = "成功" if success else "未完成"
                     self.progress_signal.emit(progress_val, f"[{disp_title}] 发布{status_str} ({completed_count}/{valid_total})")
 
-            if has_followers:
+            if self.payload.get("da_link_source") == "history":
+                history_url = (
+                    self.payload.get("da_post_url")
+                    or self.payload.get("x_da_link")
+                    or default_da_homepage
+                )
+                results["_traffic_info"] = {
+                    "link": history_url,
+                    "notice": "取自发布历史",
+                    "is_post_link": True
+                }
+            elif has_followers:
                 results["_traffic_info"] = {
                     "link": default_da_homepage,
                     "notice": "",
@@ -8132,6 +8143,21 @@ class MainWindow(QMainWindow):
             "platform_options": platform_options
         }
 
+        # 仅当本次未勾选 DeviantArt 时，尝试从发布历史中回填当帖 DA 引流链接 (跨重启补发)
+        is_da_selected = any(d.name == "deviantart" for d in selected)
+        if not is_da_selected:
+            history_mgr = getattr(self, "history_manager", None)
+            if history_mgr and hasattr(history_mgr, "find_published_da_url"):
+                history_da_url = history_mgr.find_published_da_url(images_to_use)
+                if history_da_url:
+                    payload["da_post_url"] = history_da_url
+                    payload["x_da_link"] = history_da_url
+                    payload["bluesky_da_link"] = history_da_url
+                    platform_options["da_post_url"] = history_da_url
+                    platform_options["x_da_link"] = history_da_url
+                    platform_options["bluesky_da_link"] = history_da_url
+                    payload["da_link_source"] = "history"
+
         self.publish_btn.setEnabled(False)
         if hasattr(self, "retry_btn"):
             self.retry_btn.hide()
@@ -8191,8 +8217,12 @@ class MainWindow(QMainWindow):
             t_layout.setContentsMargins(6, 4, 6, 4)
             link_str = traffic_info.get("link", "")
             notice_str = traffic_info.get("notice", "")
+            is_post_link = traffic_info.get("is_post_link", False)
             if notice_str:
-                t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <span style='color:#fca5a5;'>{link_str}</span> <span style='color:#f87171;'>({notice_str})</span>")
+                if is_post_link:
+                    t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <a href='{link_str}' style='color:#60a5fa;'>{link_str}</a> <span style='color:#a5b4fc;'>({notice_str})</span>")
+                else:
+                    t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <span style='color:#fca5a5;'>{link_str}</span> <span style='color:#f87171;'>({notice_str})</span>")
             else:
                 t_lbl = QLabel(f"🔗 <b>本次实际引流链接:</b> <a href='{link_str}' style='color:#60a5fa;'>{link_str}</a>")
             t_lbl.setOpenExternalLinks(True)

@@ -214,3 +214,42 @@ class PublishHistoryManager:
                 }
 
         return None
+
+    def find_published_da_url(self, image_paths: list[str | Path]) -> str | None:
+        """
+        按图集顺序逐张查历史记录，检索首个成功的 DeviantArt 帖子直链:
+        - 仅在 DeviantArt 平台发布成功且 url 非空时命中
+        - 清洗: 剥除 ? 查询参数、# 锚点及尾随斜杠
+        - 正则校验: 必须符合 deviantart.com/.../art/... 形状 (阶段1 同款正则，不区分大小写)
+        - 历史记录缺失/损坏/无命中一律安全返回 None，严禁抛错阻断发布
+        """
+        try:
+            if not image_paths:
+                return None
+
+            import re
+            da_pattern = re.compile(
+                r"^https?://(?:www\.)?deviantart\.com/[^/\s]+/art/[^/\s]+$",
+                re.IGNORECASE
+            )
+
+            for p in image_paths:
+                dup = self.check_duplicate_image(p)
+                if not dup:
+                    continue
+                raw_record = dup.get("raw_record") or {}
+                da_info = raw_record.get("platforms", {}).get("deviantart", {})
+                if not da_info.get("success"):
+                    continue
+                raw_url = str(da_info.get("url") or "").strip()
+                if not raw_url:
+                    continue
+
+                cleaned_url = raw_url.split("?")[0].split("#")[0].rstrip("/")
+                if da_pattern.match(cleaned_url):
+                    return cleaned_url
+                return None
+        except Exception:
+            return None
+        return None
+

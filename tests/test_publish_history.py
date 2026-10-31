@@ -169,3 +169,236 @@ class TestPublishHistory:
         # 第二行是 Art 1
         assert dlg.table.item(1, 1).text() == "Art 1"
         dlg.close()
+
+    def test_find_published_da_url_five_states(self, tmp_path, dummy_image):
+        """
+        验证 find_published_da_url 的回填五态:
+        1. 带查询串/锚点/尾随斜杠 -> 清洗后规范帖子地址
+        2. DA 失败 -> None
+        3. 无命中 -> None
+        4. 双命中 -> 取最新记录
+        5. url 不合形 (非 /art/... 形状) -> None
+        以及缺失/损坏安全容错 -> None
+        """
+        mgr = PublishHistoryManager(tmp_path)
+
+        # 状态 3: 无命中 -> None (历史为空或无匹配)
+        assert mgr.find_published_da_url([dummy_image]) is None
+
+        # 状态 1: 带查询串/# 锚点/尾随斜杠 -> 清洗后规范帖子地址
+        rec_query = {
+            "id": "rec_query",
+            "timestamp": "2026-10-25 10:00:00",
+            "title": "Query Art",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": True,
+                    "url": "https://www.deviantart.com/artist/art/masterpiece-12345?param=value#section/",
+                    "message": "OK"
+                }
+            }
+        }
+        (tmp_path / "publish_history.json").write_text(json.dumps([rec_query]), encoding="utf-8")
+        assert mgr.find_published_da_url([dummy_image]) == "https://www.deviantart.com/artist/art/masterpiece-12345"
+
+        # 状态 2: DA 失败 -> None
+        rec_failed = {
+            "id": "rec_failed",
+            "timestamp": "2026-10-25 11:00:00",
+            "title": "Failed Art",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": False,
+                    "url": "https://www.deviantart.com/artist/art/failed-12345",
+                    "message": "Upload error"
+                }
+            }
+        }
+        (tmp_path / "publish_history.json").write_text(json.dumps([rec_failed]), encoding="utf-8")
+        assert mgr.find_published_da_url([dummy_image]) is None
+
+        # 状态 4: 双命中 -> 取最新记录 (publish_history.json 存储时按时间追加，load_history 倒序取最新在前)
+        rec_old = {
+            "id": "rec_old",
+            "timestamp": "2026-10-20 08:00:00",
+            "title": "Old Post",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": True,
+                    "url": "https://www.deviantart.com/artist/art/old-post-111",
+                    "message": "OK"
+                }
+            }
+        }
+        rec_new = {
+            "id": "rec_new",
+            "timestamp": "2026-10-26 12:00:00",
+            "title": "New Post",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": True,
+                    "url": "https://www.deviantart.com/artist/art/new-post-222",
+                    "message": "OK"
+                }
+            }
+        }
+        (tmp_path / "publish_history.json").write_text(json.dumps([rec_old, rec_new]), encoding="utf-8")
+        assert mgr.find_published_da_url([dummy_image]) == "https://www.deviantart.com/artist/art/new-post-222"
+
+        # 状态 5: url 不合形 -> None (例如缺少 /art/ 的主页链接)
+        rec_bad_shape = {
+            "id": "rec_bad_shape",
+            "timestamp": "2026-10-27 12:00:00",
+            "title": "Bad Shape Art",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": True,
+                    "url": "https://www.deviantart.com/artist",
+                    "message": "OK"
+                }
+            }
+        }
+        (tmp_path / "publish_history.json").write_text(json.dumps([rec_bad_shape]), encoding="utf-8")
+        assert mgr.find_published_da_url([dummy_image]) is None
+
+        # 容错测试: 历史文件损坏 -> 返回 None，严禁抛错
+        (tmp_path / "publish_history.json").write_text("CORRUPTED JSON! {[[", encoding="utf-8")
+        assert mgr.find_published_da_url([dummy_image]) is None
+
+    def test_payload_backfill_conditions(self, mock_main_window, dummy_image):
+        """
+        验证 payload 回填条件两态:
+        1. 未勾 DA 且历史命中 -> 四字段正确 (da_post_url, x_da_link, bluesky_da_link, platform_options 同名字段),
+           且 payload["da_link_source"] == "history"
+        2. 勾选 DA -> 不触碰历史回填逻辑 (find_published_da_url 不被调用)
+        """
+        win = mock_main_window
+        target_da_post = "https://www.deviantart.com/artist/art/sample-piece-999"
+
+        # 关闭打码与水印，纯测 payload 回填与分支
+        win.auto_censor_cb.setChecked(False)
+        win.watermark_enabled_cb.setChecked(False)
+
+        # 写入一条命中记录
+        history_rec = [{
+            "id": "rec_target",
+            "timestamp": "2026-10-28 10:00:00",
+            "title": "Sample Masterpiece",
+            "image_fingerprints": [compute_image_fingerprints(dummy_image)],
+            "platforms": {
+                "deviantart": {
+                    "success": True,
+                    "url": target_da_post,
+                    "message": "OK"
+                }
+            }
+        }]
+        (win.data_dir / "publish_history.json").write_text(json.dumps(history_rec), encoding="utf-8")
+
+        win.image_paths = [str(dummy_image)]
+        win.title_input.setText("Condition Test")
+
+        # 1. 未勾选 DA + 命中: 四字段均设为目标 DA 直链，置 da_link_source = "history"
+        win.platform_controls["deviantart"]["checkbox"].setChecked(False)
+        win.platform_controls["patreon"]["checkbox"].setChecked(True)
+
+        with patch("app.PublishThread") as mock_thread_cls:
+            mock_thread_inst = MagicMock()
+            mock_thread_cls.return_value = mock_thread_inst
+
+            win._start_publishing()
+
+            assert win._last_publish_payload is not None
+            p = win._last_publish_payload
+            assert p.get("da_post_url") == target_da_post
+            assert p.get("x_da_link") == target_da_post
+            assert p.get("bluesky_da_link") == target_da_post
+            assert p.get("platform_options", {}).get("da_post_url") == target_da_post
+            assert p.get("platform_options", {}).get("x_da_link") == target_da_post
+            assert p.get("platform_options", {}).get("bluesky_da_link") == target_da_post
+            assert p.get("da_link_source") == "history"
+
+        # 2. 勾选 DA: 现有两阶段逻辑不变，不调用 find_published_da_url，da_link_source 不为 history
+        win.platform_controls["deviantart"]["checkbox"].setChecked(True)
+
+        with patch.object(win.history_manager, "find_published_da_url", wraps=win.history_manager.find_published_da_url) as spy_find, \
+             patch("app.PublishThread") as mock_thread_cls:
+            mock_thread_inst = MagicMock()
+            mock_thread_cls.return_value = mock_thread_inst
+
+            win._start_publishing()
+
+            spy_find.assert_not_called()
+            p2 = win._last_publish_payload
+            assert p2.get("da_link_source") != "history"
+
+    def test_publish_thread_and_panel_history_traffic_info(self, tmp_path, qapp, monkeypatch):
+        """
+        验证 PublishThread 非两阶段路径下 da_link_source == 'history' 时:
+        - 结果 _traffic_info 包含 post url、notice='取自发布历史'、is_post_link=True
+        - 结果面板渲染出包含该帖直链及 (取自发布历史) 标识
+        """
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+        from app import PublishThread, MainWindow
+        from dispatchers.base import BaseDispatcher
+
+        class SimpleDispatcher(BaseDispatcher):
+            def __init__(self, name, display_name, cookies_dir):
+                super().__init__(name=name, display_name=display_name, login_url="http://test", cookies_dir=cookies_dir)
+            def check_login(self): return True
+            def login_interactive(self): return True, "ok"
+            def probe_login(self): return {"status": "ok"}
+            def publish(self, payload): return True, "ok", []
+
+        disp = SimpleDispatcher(name="patreon", display_name="Patreon", cookies_dir=tmp_path)
+        dummy_file = tmp_path / "art.png"
+        dummy_file.write_bytes(b"fake image bytes")
+        hist_url = "https://www.deviantart.com/artist/art/history-post-777"
+        payload = {
+            "title": "History Test",
+            "da_post_url": hist_url,
+            "x_da_link": hist_url,
+            "da_link_source": "history",
+            "images": [str(dummy_file)],
+        }
+
+        thread = PublishThread([disp], payload)
+        res_captured = {}
+        thread.completed_signal.connect(lambda r: res_captured.update(r))
+        thread.run()
+
+        traffic_info = res_captured.get("_traffic_info")
+        assert traffic_info is not None
+        assert traffic_info.get("link") == hist_url
+        assert traffic_info.get("notice") == "取自发布历史"
+        assert traffic_info.get("is_post_link") is True
+
+        # 面板渲染验证
+        with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
+            win = MainWindow()
+            win.data_dir = tmp_path
+            win._update_publish_results_panel(res_captured)
+
+            found_text = False
+            for i in range(win.publish_results_layout.count()):
+                w = win.publish_results_layout.itemAt(i).widget()
+                if w:
+                    for child in w.children():
+                        txt = getattr(child, "text", lambda: "")()
+                        if "history-post-777" in txt and "取自发布历史" in txt:
+                            found_text = True
+                            break
+            assert found_text is True
+
+            for t_attr in ("_draft_save_timer", "_layout_save_timer", "_config_save_timer", "_preview_timer", "x_counter_timer", "_schedule_poll_timer"):
+                if hasattr(win, t_attr) and getattr(win, t_attr).isActive():
+                    getattr(win, t_attr).stop()
+            if hasattr(win, "thread") and isinstance(win.thread, QThread) and win.thread.isRunning():
+                win.thread.quit()
+
+
