@@ -442,7 +442,7 @@ class CivitaiDispatcher(BaseDispatcher):
             "1. 打开网页 <a href='https://civitai.com/user/account' style='color:#60a5fa;'>civitai.com/user/account</a><br>"
             "2. 滚动至 <b>API Keys</b> 区域，点击 <b>Add API Key</b> 并勾选发帖权限<br>"
             "3. 复制生成的 API Key 填入下方<br>"
-            "<span style='color:#9ca3af; font-size:11px;'>安全提示：API Key 仅保存在本机 data/ 目录或环境变量，绝不提交至代码仓库。</span>"
+            "<span style='color:#9ca3af;'>安全提示：API Key 仅保存在本机 data/ 目录或环境变量，绝不提交至代码仓库。</span>"
         )
         guide_lbl.setOpenExternalLinks(True)
         guide_lbl.setWordWrap(True)
