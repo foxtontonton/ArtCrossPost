@@ -8558,6 +8558,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "publish_results_panel"):
             self._update_publish_results_panel(self._last_publish_results)
 
+        if isinstance(results, dict):
+            results.pop("_traffic_info", None)
+
         # P1-2: 每次发布结束后追加一条记录到 data/publish_history.json
         if hasattr(self, "history_manager"):
             try:

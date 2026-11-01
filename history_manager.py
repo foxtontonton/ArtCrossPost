@@ -14,7 +14,8 @@ PLATFORM_DISPLAY_SHORT = {
     "patreon": "Patreon",
     "kofi": "Ko-fi",
     "reddit": "Reddit",
-    "civitai": "Civitai"
+    "civitai": "Civitai",
+    "bluesky": "Bluesky"
 }
 
 
@@ -118,6 +119,8 @@ class PublishHistoryManager:
         # 整理平台发布结果
         platforms_data = {}
         for plat_name, res in (publish_results or {}).items():
+            if str(plat_name).startswith("_"):
+                continue
             success = res[0] if isinstance(res, (tuple, list)) else bool(res)
             msg = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else str(res)
 
@@ -195,13 +198,18 @@ class PublishHistoryManager:
                     break
 
             if hit:
-                # 提取历史发布的成功平台
+                # 提取历史发布的成功平台 (仅收录规范平台清单，过滤 _traffic_info 等脏键)
                 succ_platforms = []
                 for p_name, p_info in record.get("platforms", {}).items():
-                    if p_info.get("success"):
-                        short_name = PLATFORM_DISPLAY_SHORT.get(p_name, p_name)
-                        if short_name not in succ_platforms:
-                            succ_platforms.append(short_name)
+                    if p_name in PLATFORM_DISPLAY_SHORT:
+                        if isinstance(p_info, dict) and p_info.get("success"):
+                            short_name = PLATFORM_DISPLAY_SHORT[p_name]
+                            if short_name not in succ_platforms:
+                                succ_platforms.append(short_name)
+                        elif p_info is True:
+                            short_name = PLATFORM_DISPLAY_SHORT[p_name]
+                            if short_name not in succ_platforms:
+                                succ_platforms.append(short_name)
 
                 ts = record.get("timestamp", "")
                 date_str = ts[:10] if len(ts) >= 10 else ts
