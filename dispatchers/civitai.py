@@ -1002,6 +1002,21 @@ class CivitaiDispatcher(BaseDispatcher):
         timeout_ms = int(per_tag_timeout_sec * 1000)
         success_count = 0
         failed_count = 0
+        consecutive_failures = 0
+
+        def on_failure(curr_idx: int) -> bool:
+            """记录失败并检查连续失败熔断，触发熔断时累加剩余并返回 True"""
+            nonlocal failed_count, consecutive_failures
+            failed_count += 1
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                remaining = len(clean_tags) - (curr_idx + 1)
+                failed_count += remaining
+                logger.warning(
+                    f"[Civitai] 标签注入连续失败 {consecutive_failures} 次触发熔断，跳过剩余 {remaining} 个标签"
+                )
+                return True
+            return False
 
         for idx, tag_str in enumerate(clean_tags):
             try:
@@ -1031,7 +1046,8 @@ class CivitaiDispatcher(BaseDispatcher):
                             return 0, len(clean_tags)
                         else:
                             logger.warning(f"[Civitai] 未找到 '+ Tag' 按钮，跳过标签 '{tag_str}'")
-                            failed_count += 1
+                            if on_failure(idx):
+                                return success_count, failed_count
                             continue
 
                     try:
@@ -1051,7 +1067,8 @@ class CivitaiDispatcher(BaseDispatcher):
                             return 0, len(clean_tags)
                         else:
                             logger.warning(f"[Civitai] 点击 '+ Tag' 失败，跳过标签 '{tag_str}': {ce}")
-                            failed_count += 1
+                            if on_failure(idx):
+                                return success_count, failed_count
                             continue
 
                     # 轮询等待可见的标签输入框出现 (最多等待 per_tag_timeout_sec 秒)
@@ -1076,7 +1093,8 @@ class CivitaiDispatcher(BaseDispatcher):
                             return 0, len(clean_tags)
                         else:
                             logger.warning(f"[Civitai] 等待标签输入框可见超时 ({per_tag_timeout_sec:.0f}s)，跳过标签 '{tag_str}'")
-                            failed_count += 1
+                            if on_failure(idx):
+                                return success_count, failed_count
                             continue
 
                 # Step 2: 填充标签文本 (限定超时 5s，杜绝 30s 阻塞)
@@ -1130,17 +1148,20 @@ class CivitaiDispatcher(BaseDispatcher):
 
                 if badge_appeared:
                     success_count += 1
+                    consecutive_failures = 0
                     logger.info(f"[Civitai] 成功注入标签: '{tag_str}' (徽章已确认)")
                 else:
                     logger.warning(f"[Civitai] 标签 '{tag_str}' 输入后未检测到徽章出现")
-                    failed_count += 1
+                    if on_failure(idx):
+                        return success_count, failed_count
 
             except Exception as tag_err:
                 if idx == 0 and ("入口" in str(tag_err) or "not found" in str(tag_err).lower()):
                     logger.warning(f"[Civitai] [警告] 标签入口未找到，已跳过全部标签: {tag_err}")
                     return 0, len(clean_tags)
                 logger.warning(f"[Civitai] 注入标签 '{tag_str}' 失败，跳过并不中断主流程: {tag_err}")
-                failed_count += 1
+                if on_failure(idx):
+                    return success_count, failed_count
 
         return success_count, failed_count
 
