@@ -401,7 +401,7 @@ class CivitaiDispatcher(BaseDispatcher):
             "logged_in": False
         }
 
-    def login_interactive(self, parent_window=None) -> Tuple[bool, str]:
+    def prompt_api_key(self, parent_window=None) -> Tuple[bool, str]:
         """弹出 Civitai API Key 录入与校验窗口 (仿 Bluesky 交互)"""
         try:
             from .civitai_api import (
