@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     # 1. 界面外观配置
     "ui_theme": "pure_dark",         # "pure_dark"(极黑), "deep_navy"(深蓝), "charcoal"(炭灰)
     "ui_font_size": 13,              # 界面字体大小 (默认 13px, 支持 10~60px 平滑无档位调节)
+    "thumbnail_card_width": 118,     # 缩略图卡片宽度 (默认 118px, 钳制 84~196px, 步进 2)
 
     # 2. 常用内容与固定标签偏好
     "default_tags": "original, oc, anime, illustration",  # 常驻固定标签

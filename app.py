@@ -1128,6 +1128,50 @@ class UnifiedPreviewCanvas(QLabel):
         painter.end()
 
 
+DEFAULT_THUMBNAIL_CARD_WIDTH = 118
+MIN_THUMBNAIL_CARD_WIDTH = 84
+MAX_THUMBNAIL_CARD_WIDTH = 196
+
+
+def calculate_thumbnail_metrics(width: int | float | None = None) -> dict:
+    """
+    缩略图卡片尺寸纯函数:
+    - 钳制: 84 - 196
+    - 比例: s = W / 118.0
+    - 卡片尺寸: W x round(136 * s)
+    - 图片区高: round(70 * s)
+    - 图集栏高: 卡片高 + 16 (默认 W=118 时恰为 152)
+    - 渲染框: (W - 12) x 图片区高
+    """
+    if width is None:
+        w = DEFAULT_THUMBNAIL_CARD_WIDTH
+    else:
+        try:
+            w = int(round(float(width)))
+        except (ValueError, TypeError):
+            w = DEFAULT_THUMBNAIL_CARD_WIDTH
+
+    clamped_w = max(MIN_THUMBNAIL_CARD_WIDTH, min(MAX_THUMBNAIL_CARD_WIDTH, w))
+    s = clamped_w / 118.0
+    card_width = clamped_w
+    card_height = int(round(136 * s))
+    img_height = int(round(70 * s))
+    gallery_height = card_height + 16
+    render_width = card_width - 12
+    render_height = img_height
+
+    return {
+        "scale": s,
+        "card_width": card_width,
+        "card_height": card_height,
+        "img_height": img_height,
+        "gallery_height": gallery_height,
+        "render_width": render_width,
+        "render_height": render_height,
+        "render_box": (render_width, render_height),
+    }
+
+
 class ThumbnailCardWidget(QFrame):
     """
     中央预览区多图图集缩略图卡片:
@@ -1154,8 +1198,13 @@ class ThumbnailCardWidget(QFrame):
             else getattr(main_window, "x_video_sources", {}).get(self.img_path)
         )
 
-        self.setFixedWidth(118)
-        self.setFixedHeight(136)
+        metrics = (
+            main_window.get_thumbnail_metrics()
+            if hasattr(main_window, "get_thumbnail_metrics")
+            else calculate_thumbnail_metrics(DEFAULT_THUMBNAIL_CARD_WIDTH)
+        )
+        self.setFixedWidth(metrics["card_width"])
+        self.setFixedHeight(metrics["card_height"])
         self.setCursor(Qt.PointingHandCursor)
         self.setAcceptDrops(True)
 
@@ -1238,11 +1287,13 @@ class ThumbnailCardWidget(QFrame):
         # 2. 中间缩略图区域
         self.img_lbl = QLabel()
         self.img_lbl.setAlignment(Qt.AlignCenter)
-        self.img_lbl.setFixedHeight(70)
+        self.img_lbl.setFixedHeight(metrics["img_height"])
         self.img_lbl.setStyleSheet("border: none; background-color: #0b0b10; border-radius: 4px;")
         self.img_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        pix = self.main_window._get_cached_thumbnail(self.img_path)
+        pix = self.main_window._get_cached_thumbnail(
+            self.img_path, metrics["render_width"], metrics["render_height"]
+        )
         if pix and not pix.isNull():
             self.img_lbl.setPixmap(pix)
         else:
@@ -1498,8 +1549,13 @@ class ThumbnailGalleryWidget(QScrollArea):
         super().__init__()
         self.main_window = main_window
         self.cards = []
+        metrics = (
+            main_window.get_thumbnail_metrics()
+            if hasattr(main_window, "get_thumbnail_metrics")
+            else calculate_thumbnail_metrics(DEFAULT_THUMBNAIL_CARD_WIDTH)
+        )
         self.setWidgetResizable(True)
-        self.setFixedHeight(152)
+        self.setFixedHeight(metrics["gallery_height"])
         self.setAcceptDrops(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1546,7 +1602,12 @@ class ThumbnailGalleryWidget(QScrollArea):
     def _get_card_geometry(self, i: int):
         """获取第 i 张卡片的实际或理论几何尺寸 (x, width)"""
         card = self.cards[i]
-        cw = card.width() if card.width() > 0 else 118
+        fallback_w = (
+            self.main_window.get_thumbnail_metrics()["card_width"]
+            if hasattr(self.main_window, "get_thumbnail_metrics")
+            else DEFAULT_THUMBNAIL_CARD_WIDTH
+        )
+        cw = card.width() if card.width() > 0 else fallback_w
         if i > 0 and card.x() == 0:
             cx = 6 + i * (cw + self.hlayout.spacing())
         else:
@@ -3923,6 +3984,11 @@ class MainWindow(QMainWindow):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._do_refresh_live_preview)
 
+        # 缩略图卡片尺寸防抖定时器 (120ms)
+        self._thumb_size_timer = QTimer(self)
+        self._thumb_size_timer.setSingleShot(True)
+        self._thumb_size_timer.timeout.connect(self._do_apply_thumbnail_size)
+
         # 界面布局与尺寸自动持久化防抖定时器 (400ms，拖动调整或分栏变化后自动存储)
         self._layout_save_timer = QTimer(self)
         self._layout_save_timer.setSingleShot(True)
@@ -4227,6 +4293,8 @@ class MainWindow(QMainWindow):
             self._schedule_layout_save()
 
     def closeEvent(self, event):
+        if hasattr(self, "_thumb_size_timer") and self._thumb_size_timer.isActive():
+            self._thumb_size_timer.stop()
         if hasattr(self, "_config_save_timer") and self._config_save_timer.isActive():
             self._config_save_timer.stop()
         if hasattr(self, "_schedule_poll_timer"):
@@ -4370,6 +4438,9 @@ class MainWindow(QMainWindow):
                         self.config["defaults"]["bluesky_ai_hashtags"] = bsky_opts["ai_hashtags"].isChecked()
                     if "policy" in bsky_opts:
                         self.config["defaults"]["bluesky_over_limit_policy"] = bsky_opts["policy"].currentData() or "ask"
+
+            if hasattr(self, "thumb_size_slider"):
+                self.config["thumbnail_card_width"] = self.thumb_size_slider.value()
 
             save_config(self.config)
             logger.debug("[Config] 界面配置已成功持久化至 presets.json")
@@ -4977,6 +5048,30 @@ class MainWindow(QMainWindow):
         self.gallery_status_lbl.setStyleSheet("color: #a5b4fc;")
         self.gallery_status_lbl.setWordWrap(True)
         gallery_header_row.addWidget(self.gallery_status_lbl, 1)
+
+        # 缩略图卡片尺寸滑杆 (84–196，步进 2、宽约 110px、带数值标注)
+        cur_thumb_w = self.config.get("thumbnail_card_width", DEFAULT_THUMBNAIL_CARD_WIDTH)
+        cur_thumb_w = max(MIN_THUMBNAIL_CARD_WIDTH, min(MAX_THUMBNAIL_CARD_WIDTH, int(round(cur_thumb_w / 2.0) * 2)))
+
+        thumb_size_lbl = QLabel("卡片:")
+        thumb_size_lbl.setProperty("fontRole", "small")
+        thumb_size_lbl.setStyleSheet("color: #94a3b8;")
+        gallery_header_row.addWidget(thumb_size_lbl)
+
+        self.thumb_size_slider = QSlider(Qt.Horizontal)
+        self.thumb_size_slider.setRange(MIN_THUMBNAIL_CARD_WIDTH, MAX_THUMBNAIL_CARD_WIDTH)
+        self.thumb_size_slider.setSingleStep(2)
+        self.thumb_size_slider.setPageStep(10)
+        self.thumb_size_slider.setValue(cur_thumb_w)
+        self.thumb_size_slider.setFixedWidth(110)
+        self.thumb_size_slider.setToolTip("调整下方素材缩略图卡片尺寸 (84px ~ 196px)")
+        self.thumb_size_slider.valueChanged.connect(self._on_thumb_size_slider_changed)
+        gallery_header_row.addWidget(self.thumb_size_slider)
+
+        self.thumb_size_val_lbl = QLabel(f"{cur_thumb_w}px")
+        self.thumb_size_val_lbl.setProperty("fontRole", "small")
+        self.thumb_size_val_lbl.setStyleSheet("color: #cbd5e1; min-width: 38px;")
+        gallery_header_row.addWidget(self.thumb_size_val_lbl)
 
         clear_x_sel_btn = QPushButton("清空 X 选用")
         clear_x_sel_btn.setObjectName("secondaryBtn")
@@ -7056,7 +7151,12 @@ class MainWindow(QMainWindow):
         self.x_video_sources.pop(removed_p, None)
         self.custom_censor_boxes.pop(removed_p, None)
         self.custom_censor_captured_ratios.pop(removed_p, None)
-        self._thumbnail_cache.pop(removed_p, None)
+        keys_to_del = [
+            k for k in self._thumbnail_cache
+            if k == removed_p or (isinstance(k, tuple) and k[0] == str(removed_p))
+        ]
+        for k in keys_to_del:
+            self._thumbnail_cache.pop(k, None)
         if self.image_paths:
             if self.current_preview_index >= len(self.image_paths):
                 self.current_preview_index = len(self.image_paths) - 1
@@ -7132,18 +7232,61 @@ class MainWindow(QMainWindow):
         self.thumbnail_gallery.hlayout.addStretch()
         self._update_gallery_status_label()
 
-    def _get_cached_thumbnail(self, img_path: str):
-        if img_path in self._thumbnail_cache:
-            return self._thumbnail_cache[img_path]
+    def _get_cached_thumbnail(self, img_path: str, target_w: int = None, target_h: int = None):
+        """尺寸感知的缩略图缓存获取:
+        - 缓存键包含渲染框尺寸: (str(img_path), target_w, target_h)
+        - 尺寸变更时必须从原图以 KeepAspectRatio + SmoothTransformation 重新采样
+        - 严禁对已有缓存小图进行拉伸
+        """
+        if target_w is None or target_h is None:
+            metrics = self.get_thumbnail_metrics()
+            target_w = target_w or metrics["render_width"]
+            target_h = target_h or metrics["render_height"]
+
+        cache_key = (str(img_path), int(target_w), int(target_h))
+        if cache_key in self._thumbnail_cache:
+            return self._thumbnail_cache[cache_key]
+
         try:
             pix = QPixmap(str(img_path))
             if pix and not pix.isNull():
-                scaled = pix.scaled(72, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self._thumbnail_cache[img_path] = scaled
+                scaled = pix.scaled(int(target_w), int(target_h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._thumbnail_cache[cache_key] = scaled
                 return scaled
         except Exception as e:
             logger.debug(f"加载缩略图缓存异常: {e}")
         return None
+
+    def get_thumbnail_metrics(self) -> dict:
+        """获取当前配置下的缩略图卡片尺寸指标"""
+        cur_w = self.config.get("thumbnail_card_width", DEFAULT_THUMBNAIL_CARD_WIDTH)
+        return calculate_thumbnail_metrics(cur_w)
+
+    def _on_thumb_size_slider_changed(self, val):
+        """缩略图大小滑杆变化事件，步进 2，数值即时更新，120ms 防抖应用"""
+        val = int(round(val / 2.0) * 2)
+        val = max(MIN_THUMBNAIL_CARD_WIDTH, min(MAX_THUMBNAIL_CARD_WIDTH, val))
+        if hasattr(self, "thumb_size_val_lbl"):
+            self.thumb_size_val_lbl.setText(f"{val}px")
+        if hasattr(self, "_thumb_size_timer"):
+            self._thumb_size_timer.start(120)
+
+    def _do_apply_thumbnail_size(self):
+        """120ms 防抖超时后执行：写 config、清缓存、重建画廊、更新画廊高度"""
+        val = (
+            self.thumb_size_slider.value()
+            if hasattr(self, "thumb_size_slider")
+            else self.config.get("thumbnail_card_width", DEFAULT_THUMBNAIL_CARD_WIDTH)
+        )
+        val = int(round(val / 2.0) * 2)
+        val = max(MIN_THUMBNAIL_CARD_WIDTH, min(MAX_THUMBNAIL_CARD_WIDTH, val))
+        self.config["thumbnail_card_width"] = val
+        self._schedule_config_save()
+        self._thumbnail_cache.clear()
+        metrics = self.get_thumbnail_metrics()
+        if hasattr(self, "thumbnail_gallery"):
+            self.thumbnail_gallery.setFixedHeight(metrics["gallery_height"])
+        self._refresh_thumbnail_gallery()
 
     def _update_gallery_status_label(self):
         if hasattr(self, "gallery_status_lbl"):
