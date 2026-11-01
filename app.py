@@ -5905,16 +5905,19 @@ class MainWindow(QMainWindow):
         return card
 
     def _open_civitai_key_dialog(self, key_lbl=None):
-        disp = next((d for d in self.dispatchers if d.name == "civitai"), None)
-        if disp and hasattr(disp, "login_interactive"):
-            success, msg = disp.login_interactive(parent_window=self)
-            self._update_civitai_key_status_badge(key_lbl)
-            if success:
-                self.notify("Civitai API Key 录入成功！", level="success")
-                self._refresh_all_platform_statuses()
-            else:
-                if "取消" not in msg:
-                    self.notify(f"Civitai Key 校验未通过: {msg}", level="warning")
+        try:
+            disp = next((d for d in self.dispatchers if d.name == "civitai"), None)
+            if disp and hasattr(disp, "prompt_api_key"):
+                success, msg = disp.prompt_api_key(parent_window=self)
+                self._update_civitai_key_status_badge(key_lbl)
+                if success:
+                    self.notify("Civitai API Key 录入成功！", level="success")
+                    self._refresh_all_platform_statuses()
+                else:
+                    if msg and "取消" not in msg:
+                        self.notify(f"Civitai Key 校验未通过: {msg}", level="warning")
+        except Exception as e:
+            self.notify(f"Civitai Key 录入异常: {e}", level="error")
 
     def _update_civitai_key_status_badge(self, key_lbl=None):
         if key_lbl is None:
