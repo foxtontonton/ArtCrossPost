@@ -460,7 +460,9 @@ class PatreonDispatcher(BaseDispatcher):
                 or cfg.get("defaults", {}).get("x_da_link")
                 or "https://www.deviantart.com/foxtontonton"
             )
-            if home_link and home_link in desc:
+            if da_post_url in desc or da_post_url.lower() in desc.lower():
+                pass
+            elif home_link and home_link in desc:
                 desc = desc.replace(home_link, da_post_url)
             else:
                 desc = _re.sub(
