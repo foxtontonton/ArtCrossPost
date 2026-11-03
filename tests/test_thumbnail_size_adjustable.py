@@ -48,6 +48,7 @@ def dummy_image(tmp_path):
 @pytest.fixture
 def mock_main_window(tmp_path, qapp, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.setattr("config.PRESETS_FILE", tmp_path / "presets.json")
 
     with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
         win = MainWindow()
@@ -197,9 +198,10 @@ class TestThumbnailDragResize:
         assert DEFAULT_CONFIG["thumbnail_gallery_height"] == 152
 
         # 验证 load_config 继承默认值
-        cfg = load_config()
-        assert "thumbnail_gallery_height" in cfg
-        assert cfg["thumbnail_gallery_height"] == 152
+        with patch("config.PRESETS_FILE", tmp_path / "presets_default.json"):
+            cfg = load_config()
+            assert "thumbnail_gallery_height" in cfg
+            assert cfg["thumbnail_gallery_height"] == 152
 
         # 验证保存与回读新键
         cfg["thumbnail_gallery_height"] = 240

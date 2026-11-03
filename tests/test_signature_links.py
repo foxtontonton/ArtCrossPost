@@ -311,7 +311,7 @@ def test_deviantart_dispatcher_signature_readback_success(tmp_path, monkeypatch)
     desc_with_sig = "My new art\n\n" + CANONICAL_SIGNATURE_TEMPLATE
     ok, msg = disp._submit_deviation(
         mock_page, mock_context, [str(img_file)], "Title", desc_with_sig,
-        ["tag1"], False, "strict", False, "", comp_list
+        [], False, "strict", False, "", comp_list
     )
 
     assert ok is True
@@ -367,7 +367,7 @@ def test_deviantart_dispatcher_signature_readback_missing_link_aborts(tmp_path, 
     desc_with_sig = "My new art\n\n" + CANONICAL_SIGNATURE_TEMPLATE
     ok, msg = disp._submit_deviation(
         mock_page, mock_context, [str(img_file)], "Title", desc_with_sig,
-        ["tag1"], False, "strict", False, "", comp_list
+        [], False, "strict", False, "", comp_list
     )
 
     assert ok is False
@@ -435,7 +435,7 @@ def test_deviantart_keep_preset_with_signature_links(tmp_path, monkeypatch):
     desc_with_sig = "New Program Artwork\n\n" + CANONICAL_SIGNATURE_TEMPLATE
     ok, msg = disp._submit_deviation(
         mock_page, mock_context, [str(img_file)], "Title", desc_with_sig,
-        ["tag1"], False, "strict", False, "", comp_list,
+        [], False, "strict", False, "", comp_list,
         keep_preset_description=True
     )
 
