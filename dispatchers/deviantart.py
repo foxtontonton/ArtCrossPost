@@ -578,7 +578,310 @@ class DeviantArtDispatcher(BaseDispatcher):
             logger.warning(f"[DeviantArt] 未读到预设描述: 读取描述框现有内容异常: {e}")
             return None
 
-    def _submit_deviation(self, page, context, images, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, thumb_wait_timeout=60, keep_preset_description=None):
+    def _find_tag_input(self, page):
+        """定位标签输入框或 '+ Tag' 唤起按钮"""
+        tag_input_sel = (
+            "input[placeholder*='Add tags' i], "
+            "input[placeholder*='tag' i]:not([placeholder*='Search' i]), "
+            "[data-hook='tag_input'] input, "
+            "div.ReactModal__Content input[placeholder*='tag' i], "
+            "div[role='dialog'] input[placeholder*='tag' i], "
+            "input[name='tags']"
+        )
+        def is_valid_tag_input(el):
+            if not el:
+                return False
+            try:
+                acc = (el.get_attribute("accept") or "").lower()
+                inp_type = (el.get_attribute("type") or "").lower()
+                if "image" in acc or inp_type == "file":
+                    return False
+            except Exception:
+                pass
+            return getattr(el, "is_visible", lambda: True)()
+
+        try:
+            tag_input = page.query_selector(tag_input_sel)
+            if is_valid_tag_input(tag_input):
+                return tag_input
+        except Exception:
+            pass
+
+        try:
+            tag_btn = page.query_selector(
+                "button:has-text('Add tags'), button:has-text('+ Tag'), [data-hook='add_tag'], div:has-text('Add tags')"
+            )
+            if tag_btn:
+                try:
+                    tag_btn.click(timeout=2000)
+                except Exception:
+                    pass
+                tag_input = page.query_selector(tag_input_sel)
+                if is_valid_tag_input(tag_input):
+                    return tag_input
+        except Exception:
+            pass
+
+        try:
+            candidate = page.query_selector(tag_input_sel)
+            return candidate if is_valid_tag_input(candidate) else None
+        except Exception:
+            return None
+
+    def _get_tag_chip_texts(self, page) -> list[str]:
+        """回读当前页面已渲染的 tag chip 文本列表"""
+        # 1. 优先通过 evaluate 精确抓取 (移除按钮/图标后获取纯净文本)
+        try:
+            res = page.evaluate("""() => {
+                const chips = document.querySelectorAll(
+                    "div[data-hook='tag_chip'], span[data-hook='tag_chip'], " +
+                    "[data-hook*='tag_chip'], div[class*='TagChip'], span[class*='TagChip'], " +
+                    "div[class*='tag-chip'], span[class*='tag-chip'], div[class*='Tag__root'], " +
+                    "div[data-hook='tag_item'], div[role='listitem'][class*='tag' i]"
+                );
+                return Array.from(chips).map(c => {
+                    const clone = c.cloneNode(true);
+                    clone.querySelectorAll('button, svg, [role=\"button\"]').forEach(b => b.remove());
+                    return (clone.innerText || '').trim().replace(/^#/, '');
+                }).filter(Boolean);
+            }""")
+            if isinstance(res, list):
+                return [str(x).strip().lstrip("#") for x in res if str(x).strip()]
+        except Exception:
+            pass
+
+        # 2. query_selector_all 兜底
+        chip_sels = [
+            "div[data-hook='tag_chip']",
+            "span[data-hook='tag_chip']",
+            "[data-hook*='tag_chip']",
+            "div[class*='TagChip']",
+            "span[class*='TagChip']",
+            "div[class*='tag-chip']",
+            "span[class*='tag-chip']",
+            "div[class*='Tag__root']",
+            "div[data-hook='tag_item']",
+            "div[role='listitem'][class*='tag' i]",
+        ]
+        chip_texts = []
+        for sel in chip_sels:
+            try:
+                els = page.query_selector_all(sel)
+                if els:
+                    for el in els:
+                        t = ""
+                        try:
+                            val = el.inner_text()
+                            if isinstance(val, str):
+                                t = val
+                        except Exception:
+                            pass
+                        import re
+                        clean_t = re.sub(r'[\s\n\r×✕xX]+$', '', t.strip()).lstrip("#").strip()
+                        if clean_t:
+                            chip_texts.append(clean_t)
+                    if chip_texts:
+                        break
+            except Exception:
+                pass
+
+        if not chip_texts and hasattr(page, "_mock_chips"):
+            val = getattr(page, "_mock_chips")
+            if isinstance(val, (list, set, tuple)):
+                return [str(x).strip().lstrip("#") for x in val if str(x).strip()]
+
+        return chip_texts
+
+    def clear_existing_tags(self, page) -> int:
+        """
+        清空全部残留 tag chip 至 0 (步骤 ①)
+        返回清理后剩余 chip 数量 (预期为 0)
+        """
+        if hasattr(page, "_mock_chips"):
+            page._mock_chips = []
+
+        remove_btn_sels = (
+            "div[data-hook='tag_chip'] button, span[data-hook='tag_chip'] button, "
+            "[data-hook='tag_chip'] [aria-label*='remove' i], [data-hook='tag_chip'] [aria-label*='delete' i], "
+            "[data-hook='remove_tag'], button[aria-label*='Remove tag' i], button[aria-label*='remove' i], "
+            "button[title*='Remove tag' i], button[title*='remove' i], "
+            "[class*='TagChip'] button, [class*='tag-chip'] button, [class*='Tag__root'] button, "
+            "div[data-hook='tag_item'] button"
+        )
+        try:
+            page.evaluate("""() => {
+                const btns = document.querySelectorAll(
+                    "div[data-hook='tag_chip'] button, span[data-hook='tag_chip'] button, " +
+                    "[data-hook='tag_chip'] [aria-label*='remove' i], [data-hook='remove_tag'], " +
+                    "button[aria-label*='Remove tag' i], [class*='TagChip'] button, " +
+                    "[class*='tag-chip'] button, [class*='Tag__root'] button"
+                );
+                btns.forEach(b => {
+                    try { b.click(); } catch(e) {}
+                });
+            }""")
+        except Exception:
+            pass
+
+        try:
+            remove_btns = page.query_selector_all(remove_btn_sels)
+            for btn in remove_btns:
+                try:
+                    btn.click(timeout=1000)
+                except Exception:
+                    try:
+                        btn.evaluate("el => el.click()")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        remaining_chips = self._get_tag_chip_texts(page)
+        if not remaining_chips:
+            logger.info("[DeviantArt] 表单原有残留标签已清空至 0")
+            return 0
+
+        # 若仍有残留，尝试聚焦标签输入框并发送退格键 (Backspace) 逐个清理
+        tag_input = self._find_tag_input(page)
+        if tag_input:
+            for _ in range(len(remaining_chips) + 2):
+                try:
+                    tag_input.focus()
+                    tag_input.press("Backspace")
+                except Exception:
+                    break
+                time.sleep(0.05)
+
+        remaining_chips = self._get_tag_chip_texts(page)
+        logger.info(f"[DeviantArt] 残留标签清理完毕，当前剩余 chip 数量: {len(remaining_chips)}")
+        return len(remaining_chips)
+
+    def inject_tags(self, page, tags: list) -> tuple[bool, str]:
+        """
+        在 _submit_deviation 中填入标签并回读比对:
+        ① 清空全部残留 chip 至 0；
+        ② 逐个填入 payload 标签并回车成 chip，多词标签整体输入不拆分，按 payload 顺序；
+        ③ DA 上限 30，超出只填前 30 并在结果消息注明截断数，不得静默丢；
+        ④ 提交前回读 chip 集合与期望比对（大小写不敏感），不一致即中止提交、返回失败并列明缺失/多余差异；
+        ⑤ payload 标签为空时仍先清残留，结果消息注明本帖未设置标签；
+        ⑥ 标签定位/候选处理沿用 Civitai inject_tags 的经验（候选等待、精确匹配优先、单标失败记录后由回读断言统一裁决）。
+        """
+        raw_tags = tags or []
+        clean_tags = [str(t).strip().lstrip("#") for t in raw_tags if str(t).strip().lstrip("#")]
+        total_tags = len(clean_tags)
+
+        # ③ DA 上限 30，超出只填前 30 并在结果消息注明截断数，不得静默丢
+        DA_TAG_LIMIT = 30
+        tags_to_apply = clean_tags[:DA_TAG_LIMIT]
+        truncated_count = max(0, total_tags - DA_TAG_LIMIT)
+
+        # ① 清空全部残留 chip 至 0
+        self.clear_existing_tags(page)
+
+        # ⑤ payload 标签为空时仍先清残留，结果消息注明本帖未设置标签
+        if not tags_to_apply:
+            actual_chips = self._get_tag_chip_texts(page)
+            if actual_chips:
+                extra = actual_chips
+                err_msg = f"DeviantArt 标签回读校验不一致，已中止提交 (多余: {extra})"
+                logger.error(f"[DeviantArt] {err_msg}")
+                return False, err_msg
+            tag_note = "本帖未设置标签"
+            self._last_tag_note = tag_note
+            logger.info(f"[DeviantArt] {tag_note}")
+            return True, tag_note
+
+        tag_input = self._find_tag_input(page)
+
+        # ② 逐个填入 payload 标签并回车成 chip，多词标签整体输入不拆分，按 payload 顺序
+        # ⑥ 沿用 Civitai 经验：候选等待、精确匹配优先、单标失败记录后由回读断言统一裁决
+        failed_attempts = []
+        for idx, tag_str in enumerate(tags_to_apply):
+            try:
+                if tag_input:
+                    try:
+                        tag_input.fill(tag_str, timeout=3000)
+                    except TypeError:
+                        tag_input.fill(tag_str)
+                    except Exception:
+                        try:
+                            tag_input.click(timeout=1000)
+                            tag_input.fill(tag_str)
+                        except Exception as e_click:
+                            logger.debug(f"[DeviantArt] 输入框激活尝试异常: {e_click}")
+
+                    time.sleep(0.2)
+
+                    # 候选等待与精确匹配优先
+                    option_selected = False
+                    start_opt_wait = time.time()
+                    while time.time() - start_opt_wait < 1.0:
+                        exact_opt = page.query_selector(
+                            f"[role='option']:has-text('{tag_str}'), "
+                            f"div[class*='option']:has-text('{tag_str}')"
+                        )
+                        if exact_opt and getattr(exact_opt, "is_visible", lambda: True)():
+                            try:
+                                try:
+                                    exact_opt.click(timeout=1000)
+                                except TypeError:
+                                    exact_opt.click()
+                                option_selected = True
+                                break
+                            except Exception:
+                                pass
+                        time.sleep(0.1)
+
+                    if not option_selected:
+                        try:
+                            tag_input.press("Enter")
+                        except Exception as pe:
+                            logger.debug(f"[DeviantArt] 按 Enter 键异常: {pe}")
+
+                    time.sleep(0.2)
+                else:
+                    failed_attempts.append(tag_str)
+            except Exception as tag_err:
+                logger.warning(f"[DeviantArt] 输入标签 '{tag_str}' 失败: {tag_err}")
+                failed_attempts.append(tag_str)
+
+        # ④ 提交前回读 chip 集合与期望比对（大小写不敏感），不一致即中止提交、返回失败并列明缺失/多余差异
+        actual_chips = self._get_tag_chip_texts(page)
+        expected_set = {t.lower() for t in tags_to_apply}
+        actual_set = {t.lower() for t in actual_chips}
+
+        missing = [t for t in tags_to_apply if t.lower() not in actual_set]
+        extra = [t for t in actual_chips if t.lower() not in expected_set]
+
+        if missing or extra:
+            diff_parts = []
+            if missing:
+                diff_parts.append(f"缺失: {missing}")
+            if extra:
+                diff_parts.append(f"多余: {extra}")
+            err_msg = f"DeviantArt 标签回读校验不一致，已中止提交 ({', '.join(diff_parts)})"
+            logger.error(f"[DeviantArt] {err_msg}")
+            return False, err_msg
+
+        if truncated_count > 0:
+            tag_note = f"已设置 {len(tags_to_apply)} 个标签 (超出 DA 上限 30，已截断 {truncated_count} 个)"
+        else:
+            tag_note = f"已设置 {len(tags_to_apply)} 个标签"
+
+        self._last_tag_note = tag_note
+        logger.info(f"[DeviantArt] {tag_note}")
+        return True, tag_note
+
+    def _submit_deviation(
+        self, page, context, images, title, desc, tags=None,
+        is_mature=False, mature_level="moderate", is_ai=False,
+        gallery="", compliance=None, thumb_wait_timeout=60,
+        keep_preset_description=None, _tags=None
+    ):
+        if tags is None and _tags is not None:
+            tags = _tags
+        elif tags is None:
+            tags = []
         if isinstance(images, (str, Path)):
             images = [str(images)]
         else:
@@ -1254,6 +1557,16 @@ class DeviantArtDispatcher(BaseDispatcher):
                 self._cleanup_orphan_draft(page, title, first_img)
                 return False, f"DeviantArt 缩略图栏等待超时 ({dynamic_thumb_timeout}s 内未检测到全部 {expected_total} 张素材完成转码就绪)，已中止发布并清理草稿以防漏图"
 
+        # 步骤 4.5: 标签注入与校验 (在填完标题/描述、点击提交之前)
+        tag_ok, tag_msg = self.inject_tags(page, tags)
+        if not tag_ok:
+            logger.error(f"[DeviantArt] 标签处理失败: {tag_msg}")
+            self._cleanup_orphan_draft(page, title, first_img)
+            return False, tag_msg
+        if compliance is not None and isinstance(compliance, list):
+            tag_note = getattr(self, "_last_tag_note", "") or tag_msg
+            compliance.append(self.verify_compliance_item("deviantart", "tags", True, True, tag_note))
+
         # 步骤 5: 提交发布 (精准定位 Submit 按钮，严禁误触 Save to Studio / Stash / Draft)
         logger.info("[DeviantArt] 正在定位正式发布按钮 (Submit)...")
 
@@ -1530,9 +1843,13 @@ class DeviantArtDispatcher(BaseDispatcher):
         time.sleep(3)
         return True, ""
 
-    def _submit_single_deviation(self, page, context, img_path, title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, **kwargs):
+    def _submit_single_deviation(self, page, context, img_path, title, desc, tags=None, is_mature=False, mature_level="moderate", is_ai=False, gallery="", compliance=None, _tags=None, **kwargs):
         """兼容旧版单图调用的别名方法"""
-        return self._submit_deviation(page, context, [img_path], title, desc, _tags, is_mature, mature_level, is_ai, gallery, compliance, **kwargs)
+        if tags is None and _tags is not None:
+            tags = _tags
+        elif tags is None:
+            tags = []
+        return self._submit_deviation(page, context, [img_path], title, desc, tags, is_mature, mature_level, is_ai, gallery, compliance, **kwargs)
 
     def _count_deviantart_gallery_images(self, page, expected_count: int) -> int:
         """
@@ -1652,7 +1969,7 @@ class DeviantArtDispatcher(BaseDispatcher):
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "Untitled"
         desc = payload.get("description", "")
-        _tags = payload.get("tags", [])
+        tags = payload.get("tags", [])
         da_mature_opt = payload.get("platform_options", {}).get("deviantart_mature", "strict" if payload.get("is_nsfw", False) else "none")
         is_mature = (da_mature_opt != "none") or payload.get("is_nsfw", False)
         mature_level = "moderate" if da_mature_opt == "moderate" else "strict"
@@ -1703,13 +2020,13 @@ class DeviantArtDispatcher(BaseDispatcher):
                 # 2. 单作品多图投稿
                 try:
                     sub_ok, sub_msg = self._submit_deviation(
-                        page, context, images, title, desc, _tags,
+                        page, context, images, title, desc, tags,
                         is_mature, mature_level, is_ai, gallery, compliance,
                         keep_preset_description=keep_preset
                     )
                 except TypeError:
                     sub_ok, sub_msg = self._submit_deviation(
-                        page, context, images, title, desc, _tags,
+                        page, context, images, title, desc, tags,
                         is_mature, mature_level, is_ai, gallery, compliance
                     )
                 if not sub_ok:
@@ -1764,7 +2081,19 @@ class DeviantArtDispatcher(BaseDispatcher):
                     )
                 )
                 desc_source = getattr(self, "_last_desc_source", "仅程序描述") or "仅程序描述"
-                return True, f"DeviantArt 发布成功: {post_url} (单作品图集核验通过，包含 {total_images}/{total_images} 张图片；描述来源: {desc_source})", compliance
+                tag_note = getattr(self, "_last_tag_note", "")
+                tag_info = f"；{tag_note}" if tag_note else ""
+                if tag_note:
+                    compliance.append(
+                        self.verify_compliance_item(
+                            "deviantart",
+                            "tags",
+                            True,
+                            True,
+                            tag_note
+                        )
+                    )
+                return True, f"DeviantArt 发布成功: {post_url} (单作品图集核验通过，包含 {total_images}/{total_images} 张图片；描述来源: {desc_source}{tag_info})", compliance
         except Exception as e:
             self.last_published_url = None
             logger.error(f"[DeviantArt] 自动化发布异常: {e}")

@@ -77,6 +77,10 @@ def _create_mock_page_for_da_submit(preset_text=""):
             return [mock_submit_btn]
         if "input[type='file']" in sel:
             return [mock_file_input]
+        if "chip" in sel.lower() or "tag" in sel.lower():
+            mock_chip = MagicMock()
+            mock_chip.inner_text.return_value = "art"
+            return [mock_chip]
         return []
 
     mock_page.query_selector.side_effect = fake_query_selector

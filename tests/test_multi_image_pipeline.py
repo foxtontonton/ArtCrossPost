@@ -116,6 +116,7 @@ def mock_main_window(tmp_path, qapp):
 
     win.image_paths = imgs
     win.x_selected_paths.clear()
+    win.config["thumbnail_gallery_height"] = 152
     win._sync_img_list_widget()
     win._refresh_thumbnail_gallery()
     return win
@@ -660,6 +661,10 @@ def test_deviantart_v2_file_chooser_append_and_submit_success(tmp_path, monkeypa
             return [mock_plus_btn]
         if "Submit" in sel:
             return [mock_submit_btn]
+        if "chip" in sel.lower() or "tag" in sel.lower():
+            m_chip = MagicMock()
+            m_chip.inner_text.return_value = "art"
+            return [m_chip]
         return []
 
     mock_page.query_selector_all = MagicMock(side_effect=fake_query_selector_all)
