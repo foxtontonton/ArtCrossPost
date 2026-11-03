@@ -4040,6 +4040,26 @@ class MainWindow(QMainWindow):
             self._startup_expired_timer.timeout.connect(self._check_startup_expired_tasks)
             self._startup_expired_timer.start(1200)
 
+    def _get_description_text(self) -> str:
+        """
+        获取作品描述文本并保留段落结构语义:
+        1. 遍历 desc_input.document() 全部 QTextBlock
+        2. 以 "\n\n" 拼接各 block
+        3. 连续 3+ 个 \n 压缩回 "\n\n"（保证草稿存读往返不动点）
+        """
+        if not hasattr(self, "desc_input") or not self.desc_input:
+            return ""
+        doc = self.desc_input.document() if hasattr(self.desc_input, "document") else None
+        if doc is None:
+            return self.desc_input.toPlainText() if hasattr(self.desc_input, "toPlainText") else ""
+        blocks = []
+        block = doc.begin()
+        while block.isValid():
+            blocks.append(block.text())
+            block = block.next()
+        joined = "\n\n".join(blocks)
+        return re.sub(r"\n{3,}", "\n\n", joined)
+
     def _save_draft(self):
         """P1-6: 自动将当前草稿保存至 data/draft.json"""
         if os.environ.get("PYTEST_CURRENT_TEST") and self.data_dir == Path(__file__).resolve().parent / "data":
@@ -4049,7 +4069,7 @@ class MainWindow(QMainWindow):
             return
         title = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
         tags = (self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text()).strip()
-        desc = self.desc_input.toPlainText().strip()
+        desc = self._get_description_text().strip()
         if not title and not tags and not desc:
             if draft_file.exists():
                 try:
@@ -4061,7 +4081,7 @@ class MainWindow(QMainWindow):
         data = {
             "title": title,
             "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
-            "description": self.desc_input.toPlainText(),
+            "description": self._get_description_text(),
             "selected_platforms": selected_plats,
             "updated_at": datetime.now().isoformat()
         }
@@ -6985,7 +7005,7 @@ class MainWindow(QMainWindow):
         if not sig:
             self.notify("尚未在系统设置中配置赞助引流签名模版！", level="warning")
             return
-        current = self.desc_input.toPlainText()
+        current = self._get_description_text()
         if sig not in current:
             sep = "\n\n" if current and not current.endswith("\n\n") else ""
             self.desc_input.setPlainText(current + sep + sig)
@@ -7438,7 +7458,7 @@ class MainWindow(QMainWindow):
         else:
             images_to_use = self.image_paths
             title_val = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
-            desc_val = self.desc_input.toPlainText().strip()
+            desc_val = self._get_description_text().strip()
             tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
             selected = []
             for name, ctrl in self.platform_controls.items():
@@ -8178,7 +8198,7 @@ class MainWindow(QMainWindow):
         # 针对 X (Twitter) 进行字数超限决策检查
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         title_val = self.title_input.text().strip()
-        desc_val = self.desc_input.toPlainText().strip()
+        desc_val = self._get_description_text().strip()
         tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
         full_x_text = format_x_full_text(title_val, desc_val, tags_val)
         x_count = calculate_x_char_count(full_x_text)
@@ -8281,7 +8301,7 @@ class MainWindow(QMainWindow):
 
         payload = {
             "title": self.title_input.text().strip(),
-            "description": self.desc_input.toPlainText().strip(),
+            "description": self._get_description_text().strip(),
             "tags": tags,
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
@@ -8849,7 +8869,7 @@ class MainWindow(QMainWindow):
         tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
         return {
             "title": self.title_input.text().strip(),
-            "description": self.desc_input.toPlainText().strip(),
+            "description": self._get_description_text().strip(),
             "tags": tags_val,
             "image_paths": [str(p) for p in self.image_paths],
             "selected_platforms": selected_names,
