@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
     # 1. 界面外观配置
     "ui_theme": "pure_dark",         # "pure_dark"(极黑), "deep_navy"(深蓝), "charcoal"(炭灰)
     "ui_font_size": 13,              # 界面字体大小 (默认 13px, 支持 10~60px 平滑无档位调节)
-    "thumbnail_card_width": 118,     # 缩略图卡片宽度 (默认 118px, 钳制 84~196px, 步进 2)
+    "thumbnail_gallery_height": 152,  # 缩略图图集栏高度 (默认 152px, 钳制 126~351px)
 
     # 2. 常用内容与固定标签偏好
     "default_tags": "original, oc, anime, illustration",  # 常驻固定标签
@@ -138,6 +138,16 @@ def load_config():
                         merged[k] = {**merged[k], **v}
                     else:
                         merged[k] = v
+                # 迁移旧键 thumbnail_card_width 至 thumbnail_gallery_height
+                if "thumbnail_card_width" in user_conf and "thumbnail_gallery_height" not in user_conf:
+                    try:
+                        cw = float(user_conf["thumbnail_card_width"])
+                        cw = max(84, min(320, cw))
+                        img_h = round(70.0 * ((cw / 118.0) ** 1.35))
+                        merged["thumbnail_gallery_height"] = max(126, min(351, int(round(img_h + 82))))
+                    except Exception:
+                        merged["thumbnail_gallery_height"] = 152
+
                 if isinstance(merged.get("watermark"), dict):
                     merged["watermark"].pop("font_size", None)
                 # 平台硬顶约束：civitai_max_images_per_post 强制限制在 [1, 20]
