@@ -536,6 +536,8 @@ class TestDraftAndScheduledSnapshotPersistence:
         win.image_paths = [dummy_img]
         win.title_input.setText("Scheduled Title")
         win.desc_input.setPlainText("Scheduled Desc")
+        if "x_twitter" in win.platform_controls:
+            win.platform_controls["x_twitter"]["checkbox"].setChecked(True)
         win.x_preview_text_edit.setPlainText("Scheduled Custom Short Text")
         win.short_text_dirty = True
 
