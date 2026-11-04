@@ -44,12 +44,12 @@ def mock_main_window(tmp_path, qapp, monkeypatch):
 
 class TestXTextPreview:
     def test_x_preview_tab_exists_in_center_area(self, mock_main_window):
-        """验证中央区域存在 X (Twitter) 推文预览 Tab"""
+        """验证中央区域存在短文案编辑（X / Bluesky）Tab"""
         win = mock_main_window
         assert hasattr(win, "center_tabs")
         assert win.center_tabs.count() >= 2
         tab_names = [win.center_tabs.tabText(i) for i in range(win.center_tabs.count())]
-        assert any("X (Twitter) 推文预览" in name for name in tab_names)
+        assert any("短文案编辑（X / Bluesky）" in name for name in tab_names)
 
         assert hasattr(win, "x_preview_text_edit")
         assert hasattr(win, "x_preview_counter_lbl")

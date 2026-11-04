@@ -1150,16 +1150,20 @@ class BlueskyDispatcher(BaseDispatcher):
             or DEFAULT_BLUESKY_NSFW_NOTICE
         )
 
-        base_text = format_bluesky_teaser_post(
-            title=title,
-            desc=desc,
-            tags=tags,
-            da_link=da_link,
-            nsfw_notice=nsfw_notice,
-            limit=MAX_GRAPHEMES,
-            is_ai=is_ai,
-            add_ai_tags=add_ai_tags
-        )
+        short_text = payload.get("short_text")
+        if short_text and str(short_text).strip():
+            base_text = str(short_text)
+        else:
+            base_text = format_bluesky_teaser_post(
+                title=title,
+                desc=desc,
+                tags=tags,
+                da_link=da_link,
+                nsfw_notice=nsfw_notice,
+                limit=MAX_GRAPHEMES,
+                is_ai=is_ai,
+                add_ai_tags=add_ai_tags
+            )
 
         # P0-2: 字数上限安全网与字素簇计数 (正常情况下 base_text 已在 MAX_GRAPHEMES 内)
         grapheme_len = count_graphemes(base_text)

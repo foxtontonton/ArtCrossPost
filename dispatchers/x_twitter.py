@@ -390,7 +390,16 @@ class XTwitterDispatcher(BaseDispatcher):
         signature_preserved = False
         thread_count = 1
 
-        if over_limit_action == "thread":
+        short_text = payload.get("short_text")
+        if short_text and str(short_text).strip():
+            post_text = str(short_text)
+            thread_chunks = [post_text]
+            current_count = calculate_x_char_count(post_text)
+            orig_body = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
+            truncated = bool(orig_body and orig_body not in post_text)
+            truncated_chars = max(0, len(orig_body) - len(post_text))
+            signature_preserved = bool(da_link and da_link in post_text)
+        elif over_limit_action == "thread":
             raw_full = f"{title}\n\n{desc}".strip() if title and desc else (title or desc)
             if tags:
                 clean_tags = " ".join([f"#{str(t).strip().lstrip('#')}" for t in tags if str(t).strip()])

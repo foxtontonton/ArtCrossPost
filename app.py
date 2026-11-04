@@ -2538,6 +2538,25 @@ class PublishThread(QThread):
                     )
                 self.payload["patreon_description"] = pat_desc
 
+            # 两阶段 DA 链接对 short_text 做幂等替换（已含当帖 URL 跳过、含主页才 replace）
+            st = self.payload.get("short_text")
+            if st and actual_traffic_link:
+                import re as _re
+                target_post_url = captured_url or (actual_traffic_link if actual_traffic_link != default_da_homepage else None)
+                if target_post_url and target_post_url in st:
+                    pass
+                elif default_da_homepage in st:
+                    self.payload["short_text"] = st.replace(default_da_homepage, actual_traffic_link)
+                elif default_da_homepage.rstrip('/') in st:
+                    self.payload["short_text"] = st.replace(default_da_homepage.rstrip('/'), actual_traffic_link)
+                elif _re.search(r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])", st, flags=_re.IGNORECASE):
+                    self.payload["short_text"] = _re.sub(
+                        r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])",
+                        actual_traffic_link,
+                        st,
+                        flags=_re.IGNORECASE
+                    )
+
             # 第二阶段: 剩余平台并发发布
             phase2_dispatchers = [d for d in valid_dispatchers if d != da_disp]
             phase2_total = len(phase2_dispatchers)
@@ -3993,6 +4012,9 @@ class MainWindow(QMainWindow):
         self.video_engine = VideoEngine(cache_dir=CACHE_DIR, watermark_engine=self.watermark_engine)
         self.dispatchers = get_all_dispatchers(COOKIES_DIR)
         
+        self.short_text_dirty = False
+        self._updating_short_text = False
+
         self.image_paths = []
         self.x_selected_paths = set()  # 记录用户在图集中为 X (Twitter) 单独勾选的素材路径 (最多 4 张)
         self.x_video_paths = {}  # {img_path: paired_video_path} (Rule 3)
@@ -4095,7 +4117,8 @@ class MainWindow(QMainWindow):
         title = re.sub(r"[\r\n\t]+", " ", self.title_input.text()).strip()
         tags = (self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text()).strip()
         desc = self._get_description_text().strip()
-        if not title and not tags and not desc:
+        st_content = self.x_preview_text_edit.toPlainText().strip() if hasattr(self, "x_preview_text_edit") else ""
+        if not title and not tags and not desc and not st_content:
             if draft_file.exists():
                 try:
                     draft_file.unlink(missing_ok=True)
@@ -4108,6 +4131,8 @@ class MainWindow(QMainWindow):
             "tags": self.tags_input.toPlainText() if hasattr(self.tags_input, "toPlainText") else self.tags_input.text(),
             "description": self._get_description_text(),
             "selected_platforms": selected_plats,
+            "short_text": self.x_preview_text_edit.toPlainText() if hasattr(self, "x_preview_text_edit") else "",
+            "short_text_dirty": getattr(self, "short_text_dirty", False),
             "updated_at": datetime.now().isoformat()
         }
         try:
@@ -4139,6 +4164,17 @@ class MainWindow(QMainWindow):
                     self.tags_input.setText(tags)
             if desc and hasattr(self, "desc_input"):
                 self.desc_input.setPlainText(desc)
+
+            if "short_text" in data and hasattr(self, "x_preview_text_edit"):
+                self._updating_short_text = True
+                try:
+                    self.x_preview_text_edit.setPlainText(data["short_text"])
+                finally:
+                    self._updating_short_text = False
+            if "short_text_dirty" in data:
+                self.short_text_dirty = bool(data["short_text_dirty"])
+            if hasattr(self, "_update_short_text_counters"):
+                self._update_short_text_counters()
 
             saved_plats = data.get("selected_platforms") or data.get("platforms")
             if saved_plats is not None and hasattr(self, "platform_controls"):
@@ -5164,10 +5200,10 @@ class MainWindow(QMainWindow):
         """)
         self.center_tabs.addTab(preview_group, "🖼️ 综合效果图预览")
 
-        # X 文案实时预览面板 (P1-1)
+        # 短文案编辑（X / Bluesky）面板
         self.x_preview_tab = self._build_x_text_preview_tab()
         x_tab_icon = platform_icon("x")
-        x_tab_title = "X (Twitter) 推文预览" if not x_tab_icon.isNull() else "🐦 X (Twitter) 推文预览"
+        x_tab_title = "短文案编辑（X / Bluesky）"
         self.center_tabs.addTab(self.x_preview_tab, x_tab_icon, x_tab_title)
 
         center_layout.addWidget(self.center_tabs)
@@ -5462,7 +5498,7 @@ class MainWindow(QMainWindow):
         self._update_x_text_preview()
 
     def _build_x_text_preview_tab(self):
-        """P1-1: 构建 X (Twitter) 文案实时预览面板"""
+        """P1-1: 构建短文案编辑（X / Bluesky）面板"""
         panel = QFrame()
         panel.setObjectName("x_preview_panel")
         panel.setStyleSheet("background-color: #121218; border-radius: 8px;")
@@ -5470,19 +5506,37 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 14, 12, 12)
         layout.setSpacing(10)
 
-        # 头部说明与复制按钮
+        # 头部说明、恢复按钮与复制按钮
         header_row = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        header_title = QLabel("🐦 <b>X (Twitter) 实时发帖文案预览</b>")
+        header_title = QLabel("📝 <b>短文案编辑（X / Bluesky）</b>")
         header_title.setProperty("fontRole", "title")
         header_title.setStyleSheet("color: #60a5fa;")
-        header_sub = QLabel("严格按官方加权与方案 B (预告 + DA引流 + 标签) 渲染，与实际发送内容 100% 同步")
+        header_sub = QLabel("支持手动编辑短文案，若编辑则以此为准；与 X、Bluesky 分发实时联动")
         header_sub.setProperty("fontRole", "small")
         header_sub.setStyleSheet("color: #9ca3af;")
         title_box.addWidget(header_title)
         title_box.addWidget(header_sub)
         header_row.addLayout(title_box, 1)
+
+        restore_auto_btn = QPushButton("🔄 恢复自动文案")
+        restore_auto_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #374151;
+                color: #e5e7eb;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: 1px solid #4b5563;
+            }
+            QPushButton:hover {
+                background-color: #4b5563;
+                color: #ffffff;
+            }
+        """)
+        restore_auto_btn.clicked.connect(self._restore_auto_short_text)
+        header_row.addWidget(restore_auto_btn)
 
         copy_btn = QPushButton("📋 复制文案")
         copy_btn.setStyleSheet("""
@@ -5501,9 +5555,9 @@ class MainWindow(QMainWindow):
         header_row.addWidget(copy_btn)
         layout.addLayout(header_row)
 
-        # 推文模拟展示文本框
+        # 短文案模拟展示与编辑文本框 (控件名保持 x_preview_text_edit)
         self.x_preview_text_edit = QPlainTextEdit()
-        self.x_preview_text_edit.setReadOnly(True)
+        self.x_preview_text_edit.setReadOnly(False)
         self.x_preview_text_edit.setStyleSheet("""
             QPlainTextEdit {
                 background-color: #0b0e14;
@@ -5515,9 +5569,10 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
             }
         """)
+        self.x_preview_text_edit.textChanged.connect(self._on_short_text_changed)
         layout.addWidget(self.x_preview_text_edit, 1)
 
-        # 底部状态栏与加权字数统计
+        # 底部状态栏与双计数
         footer_row = QHBoxLayout()
         self.x_preview_status_lbl = QLabel("● 预告排版就绪")
         self.x_preview_status_lbl.setStyleSheet("color: #34d399; font-weight: 500;")
@@ -5526,6 +5581,10 @@ class MainWindow(QMainWindow):
         self.x_preview_counter_lbl = QLabel("加权字数: <b>0/280</b>")
         self.x_preview_counter_lbl.setStyleSheet("color: #38bdf8; font-weight: bold;")
         footer_row.addWidget(self.x_preview_counter_lbl)
+
+        self.bluesky_preview_counter_lbl = QLabel("Bluesky 字素: <b>0/300</b>")
+        self.bluesky_preview_counter_lbl.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        footer_row.addWidget(self.bluesky_preview_counter_lbl)
         layout.addLayout(footer_row)
 
         return panel
@@ -5538,9 +5597,91 @@ class MainWindow(QMainWindow):
         else:
             self.notify("⚠️ 当前预览文案为空", level="warning")
 
-    def _update_x_text_preview(self):
-        """P1-1: 标题/描述/标签任一变化即实时刷新，内容必须调用与实际发送同一个 format_x_teaser_post，禁止另写一套预览逻辑"""
+    def _on_short_text_changed(self):
+        if getattr(self, "_updating_short_text", False):
+            return
+        self.short_text_dirty = True
+        self._update_short_text_counters()
+        if not getattr(self, "_in_char_counter_update", False):
+            self._in_char_counter_update = True
+            try:
+                self._update_x_char_counter()
+            finally:
+                self._in_char_counter_update = False
+
+    def _restore_auto_short_text(self):
+        self.short_text_dirty = False
+        self._update_x_text_preview(force=True)
+        self.notify("🔄 已恢复自动组装短文案并清除修改标记", level="info")
+
+    def _update_short_text_counters(self):
         if not hasattr(self, "x_preview_text_edit"):
+            return
+        text = self.x_preview_text_edit.toPlainText()
+
+        # X 计数
+        x_count = calculate_x_char_count(text)
+        x_limit = self._get_x_char_limit()
+        if x_count > x_limit:
+            x_color = "#ef4444"
+            x_over = f" (超 {x_count - x_limit} 字)"
+            x_tip = f"超 {x_count - x_limit} 字"
+        elif x_count / max(1, x_limit) >= 0.9:
+            x_color = "#fbbf24"
+            x_over = ""
+            x_tip = "接近上限"
+        else:
+            x_color = "#34d399"
+            x_over = ""
+            x_tip = ""
+
+        # Bluesky 计数
+        from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
+        b_count = count_graphemes(text)
+        b_limit = MAX_GRAPHEMES
+        if b_count > b_limit:
+            b_color = "#ef4444"
+            b_over = f" (超 {b_count - b_limit} 字素)"
+            b_tip = f"超 {b_count - b_limit} 字素"
+        elif b_count / max(1, b_limit) >= 0.9:
+            b_color = "#fbbf24"
+            b_over = ""
+            b_tip = "接近上限"
+        else:
+            b_color = "#34d399"
+            b_over = ""
+            b_tip = ""
+
+        if hasattr(self, "x_preview_counter_lbl"):
+            self.x_preview_counter_lbl.setText(f"加权字数: <font color='{x_color}'><b>{x_count}/{x_limit}</b></font>{x_over}")
+        if hasattr(self, "bluesky_preview_counter_lbl"):
+            self.bluesky_preview_counter_lbl.setText(f"Bluesky 字素: <font color='{b_color}'><b>{b_count}/{b_limit}</b></font>{b_over}")
+
+        if hasattr(self, "x_preview_status_lbl"):
+            if x_count > x_limit and b_count > b_limit:
+                status_text = f"<font color='#ef4444'>⚠️ X 超限 ({x_tip})，Bluesky 超限 ({b_tip})</font>"
+            elif x_count > x_limit:
+                status_text = f"<font color='#ef4444'>⚠️ X 超出限制 ({x_tip})</font>"
+            elif b_count > b_limit:
+                status_text = f"<font color='#ef4444'>⚠️ Bluesky 超出限制 ({b_tip})</font>"
+            elif getattr(self, "short_text_dirty", False):
+                status_text = "<font color='#38bdf8'>● 用户自定义短文案就绪</font>"
+            elif (x_count / max(1, x_limit) >= 0.9) or (b_count / max(1, b_limit) >= 0.9):
+                status_text = "<font color='#fbbf24'>● 接近短文案长度上限</font>"
+            else:
+                status_text = "<font color='#34d399'>● 预告排版就绪，在限制内</font>"
+            self.x_preview_status_lbl.setText(status_text)
+
+    def _update_x_text_preview(self, force=False, *args):
+        """P1-1: 标题/描述/标签任一变化即实时刷新。若用户编辑过(dirty)，自动刷新不得覆盖，除非 force=True。"""
+        if not isinstance(force, bool):
+            force = False
+
+        if not hasattr(self, "x_preview_text_edit"):
+            return
+
+        if getattr(self, "short_text_dirty", False) and not force:
+            self._update_short_text_counters()
             return
 
         title = self.title_input.text().strip() if hasattr(self, "title_input") else ""
@@ -5554,7 +5695,6 @@ class MainWindow(QMainWindow):
             da_link = self.config["defaults"].get("x_da_link")
             nsfw_notice = self.config["defaults"].get("x_nsfw_notice")
 
-        # 核心红线：内容必须调用与实际发送同一个 format_x_teaser_post，禁止另写一套预览逻辑
         preview_text = format_x_teaser_post(
             title=title,
             desc=desc,
@@ -5564,25 +5704,16 @@ class MainWindow(QMainWindow):
             limit=limit
         )
 
-        self.x_preview_text_edit.setPlainText(preview_text)
+        self._updating_short_text = True
+        try:
+            self.x_preview_text_edit.setPlainText(preview_text)
+        finally:
+            self._updating_short_text = False
 
-        count = calculate_x_char_count(preview_text)
-        ratio = count / max(1, limit)
+        if force:
+            self.short_text_dirty = False
 
-        if count > limit:
-            color = "#ef4444"
-            status_text = f"<font color='#ef4444'>⚠️ 超出限制 (超 {count - limit} 字)</font>"
-        elif ratio >= 0.9:
-            color = "#fbbf24"
-            status_text = "<font color='#fbbf24'>● 接近推文长度上限</font>"
-        else:
-            color = "#34d399"
-            status_text = "<font color='#34d399'>● 预告排版就绪，在限制内</font>"
-
-        if hasattr(self, "x_preview_counter_lbl"):
-            self.x_preview_counter_lbl.setText(f"加权字数: <font color='{color}'><b>{count}/{limit}</b></font>")
-        if hasattr(self, "x_preview_status_lbl"):
-            self.x_preview_status_lbl.setText(status_text)
+        self._update_short_text_counters()
 
     def _refresh_platform_cards(self):
         """P0-2: 根据 platform_kofi_enabled 等配置动态生成平台卡片列表"""
@@ -6263,12 +6394,17 @@ class MainWindow(QMainWindow):
     def _update_x_char_counter(self):
         if not hasattr(self, "x_char_counter_lbl"):
             return
-        title = self.title_input.text().strip()
-        desc = self.desc_input.toPlainText().strip()
-        tags = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
-        full_text = format_x_full_text(title, desc, tags)
-        count = calculate_x_char_count(full_text)
+        box_text = self.x_preview_text_edit.toPlainText().strip() if hasattr(self, "x_preview_text_edit") else ""
         limit = self._get_x_char_limit()
+
+        if box_text:
+            count = calculate_x_char_count(box_text)
+        else:
+            title = self.title_input.text().strip()
+            desc = self.desc_input.toPlainText().strip()
+            tags = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+            full_text = format_x_full_text(title, desc, tags)
+            count = calculate_x_char_count(full_text)
 
         ratio = count / max(1, limit)
         if count > limit:
@@ -6295,27 +6431,33 @@ class MainWindow(QMainWindow):
             is_bsky_checked = hasattr(self, "platform_controls") and "bluesky" in self.platform_controls and self.platform_controls["bluesky"]["checkbox"].isChecked()
             if is_bsky_checked:
                 from dispatchers.bluesky import format_bluesky_teaser_post, count_graphemes, MAX_GRAPHEMES
-                is_ai = self.ai_checkbox.isChecked() if hasattr(self, "ai_checkbox") else True
-                bsky_opts = self.platform_controls.get("bluesky", {}).get("options", {})
-                bsky_ai_cb = bsky_opts.get("ai_hashtags")
-                add_ai_tags = bsky_ai_cb.isChecked() if bsky_ai_cb else self.config.get("defaults", {}).get("bluesky_ai_hashtags", True)
-
-                da_link = self.config.get("defaults", {}).get("bluesky_da_link") or self.config.get("defaults", {}).get("x_da_link")
-                nsfw_notice = self.config.get("defaults", {}).get("bluesky_nsfw_notice") or self.config.get("defaults", {}).get("x_nsfw_notice")
-
-                bsky_text = format_bluesky_teaser_post(
-                    title=title,
-                    desc=desc,
-                    tags=tags,
-                    da_link=da_link,
-                    nsfw_notice=nsfw_notice,
-                    limit=MAX_GRAPHEMES,
-                    is_ai=is_ai,
-                    add_ai_tags=add_ai_tags
-                )
-
-                bsky_count = count_graphemes(bsky_text)
                 bsky_limit = MAX_GRAPHEMES
+                if box_text:
+                    bsky_count = count_graphemes(box_text)
+                else:
+                    title = self.title_input.text().strip()
+                    desc = self.desc_input.toPlainText().strip()
+                    tags = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
+                    is_ai = self.ai_checkbox.isChecked() if hasattr(self, "ai_checkbox") else True
+                    bsky_opts = self.platform_controls.get("bluesky", {}).get("options", {})
+                    bsky_ai_cb = bsky_opts.get("ai_hashtags")
+                    add_ai_tags = bsky_ai_cb.isChecked() if bsky_ai_cb else self.config.get("defaults", {}).get("bluesky_ai_hashtags", True)
+
+                    da_link = self.config.get("defaults", {}).get("bluesky_da_link") or self.config.get("defaults", {}).get("x_da_link")
+                    nsfw_notice = self.config.get("defaults", {}).get("bluesky_nsfw_notice") or self.config.get("defaults", {}).get("x_nsfw_notice")
+
+                    bsky_text = format_bluesky_teaser_post(
+                        title=title,
+                        desc=desc,
+                        tags=tags,
+                        da_link=da_link,
+                        nsfw_notice=nsfw_notice,
+                        limit=MAX_GRAPHEMES,
+                        is_ai=is_ai,
+                        add_ai_tags=add_ai_tags
+                    )
+                    bsky_count = count_graphemes(bsky_text)
+
                 bsky_ratio = bsky_count / max(1, bsky_limit)
                 if bsky_count > bsky_limit:
                     b_color = "#ef4444"
@@ -8246,12 +8388,20 @@ class MainWindow(QMainWindow):
                 platform_options["bluesky_over_limit_policy"] = opts["policy"].currentData()
 
         # 针对 X (Twitter) 进行字数超限决策检查
+        if scheduled_snapshot and "short_text" in scheduled_snapshot:
+            box_text = str(scheduled_snapshot.get("short_text", "")).strip()
+        else:
+            box_text = self.x_preview_text_edit.toPlainText().strip() if hasattr(self, "x_preview_text_edit") else ""
+
         is_x_selected = any(d.name == "x_twitter" for d in selected)
         title_val = self.title_input.text().strip()
         desc_val = self._get_description_text().strip()
         tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
-        full_x_text = format_x_full_text(title_val, desc_val, tags_val)
-        x_count = calculate_x_char_count(full_x_text)
+        if box_text:
+            x_count = calculate_x_char_count(box_text)
+        else:
+            full_x_text = format_x_full_text(title_val, desc_val, tags_val)
+            x_count = calculate_x_char_count(full_x_text)
         x_limit = platform_options.get("x_char_limit", 280)
 
         x_action = getattr(self, "_pending_x_action", None)
@@ -8281,33 +8431,35 @@ class MainWindow(QMainWindow):
         is_bsky_selected = any(d.name == "bluesky" for d in selected)
         if is_bsky_selected:
             from dispatchers.bluesky import format_bluesky_teaser_post, count_graphemes, MAX_GRAPHEMES
-            is_ai_val = platform_options.get("is_ai_generated", True)
-            add_ai_val = platform_options.get("bluesky_ai_hashtags", True)
-            da_link = (
-                platform_options.get("bluesky_da_link")
-                or self.config.get("defaults", {}).get("bluesky_da_link")
-                or platform_options.get("x_da_link")
-                or self.config.get("defaults", {}).get("x_da_link")
-            )
-            nsfw_notice = (
-                platform_options.get("bluesky_nsfw_notice")
-                or self.config.get("defaults", {}).get("bluesky_nsfw_notice")
-                or platform_options.get("x_nsfw_notice")
-                or self.config.get("defaults", {}).get("x_nsfw_notice")
-            )
-            bsky_full_text = format_bluesky_teaser_post(
-                title=title_val,
-                desc=desc_val,
-                tags=tags_val,
-                da_link=da_link,
-                nsfw_notice=nsfw_notice,
-                limit=MAX_GRAPHEMES,
-                is_ai=is_ai_val,
-                add_ai_tags=add_ai_val
-            )
-
-            bsky_count = count_graphemes(bsky_full_text)
             bsky_limit = MAX_GRAPHEMES
+            if box_text:
+                bsky_count = count_graphemes(box_text)
+            else:
+                is_ai_val = platform_options.get("is_ai_generated", True)
+                add_ai_val = platform_options.get("bluesky_ai_hashtags", True)
+                da_link = (
+                    platform_options.get("bluesky_da_link")
+                    or self.config.get("defaults", {}).get("bluesky_da_link")
+                    or platform_options.get("x_da_link")
+                    or self.config.get("defaults", {}).get("x_da_link")
+                )
+                nsfw_notice = (
+                    platform_options.get("bluesky_nsfw_notice")
+                    or self.config.get("defaults", {}).get("bluesky_nsfw_notice")
+                    or platform_options.get("x_nsfw_notice")
+                    or self.config.get("defaults", {}).get("x_nsfw_notice")
+                )
+                bsky_full_text = format_bluesky_teaser_post(
+                    title=title_val,
+                    desc=desc_val,
+                    tags=tags_val,
+                    da_link=da_link,
+                    nsfw_notice=nsfw_notice,
+                    limit=MAX_GRAPHEMES,
+                    is_ai=is_ai_val,
+                    add_ai_tags=add_ai_val
+                )
+                bsky_count = count_graphemes(bsky_full_text)
 
             bsky_action = getattr(self, "_pending_bsky_action", None)
             if hasattr(self, "_pending_bsky_action"):
@@ -8383,6 +8535,8 @@ class MainWindow(QMainWindow):
             "bluesky_nsfw_notice": self.config.get("defaults", {}).get("bluesky_nsfw_notice") or self.config.get("defaults", {}).get("x_nsfw_notice", "🔞 NSFW full set on DeviantArt 👇"),
             "platform_options": platform_options
         }
+        if box_text:
+            payload["short_text"] = box_text
 
         # 仅当本次未勾选 DeviantArt 时，尝试从发布历史中回填当帖 DA 引流链接 (跨重启补发)
         is_da_selected = any(d.name == "deviantart" for d in selected)
@@ -8931,6 +9085,8 @@ class MainWindow(QMainWindow):
             "custom_censor_captured_ratios": {str(k): float(v) for k, v in getattr(self, "custom_censor_captured_ratios", {}).items()},
             "x_video_paths": {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v},
             "x_video_sources": {str(k): str(v) for k, v in getattr(self, "x_video_sources", {}).items() if v},
+            "short_text": self.x_preview_text_edit.toPlainText() if hasattr(self, "x_preview_text_edit") else "",
+            "short_text_dirty": getattr(self, "short_text_dirty", False),
         }
 
     def _open_schedule_dialog(self):
