@@ -42,6 +42,7 @@ class MockDAPage:
 
         self._tag_input = MagicMock()
         self._tag_input.is_visible.return_value = True
+        self._tag_input.get_attribute.side_effect = lambda attr: "text" if attr == "type" else ""
 
         def fake_fill(val, *args, **kwargs):
             self.typed_inputs.append(val)
@@ -51,13 +52,19 @@ class MockDAPage:
                 curr = self.typed_inputs[-1]
                 if curr not in self.chips:
                     self.chips.append(curr)
+            elif key == "Backspace" and self.chips:
+                self.chips.pop()
 
         self._tag_input.fill.side_effect = fake_fill
         self._tag_input.press.side_effect = fake_press
 
+        self.tag_container = MagicMock()
+        self.tag_container.is_visible.return_value = True
+
         self._title_input = MagicMock()
         self._title_input.is_visible.return_value = True
         self._title_input.input_value.side_effect = lambda: self.current_title
+        self._title_input.get_attribute.side_effect = lambda attr: "title" if attr == "name" else ""
         def fake_title_fill(val, *args, **kwargs):
             self.current_title = val
         self._title_input.fill.side_effect = fake_title_fill
@@ -89,15 +96,35 @@ class MockDAPage:
                     return opt_el
             return None
 
+        # 标签清理中的删除按钮
+        if any(k in sel for k in ["rjL0oj", "remove", "delete", "Remove tag", "TagChip button", "[data-tag] button", "[data-tag] svg", "[data-tag] path"]):
+            if self.chips:
+                remove_btn = MagicMock()
+                def do_remove(*a, **kw):
+                    if self.chips:
+                        self.chips.pop(0)
+                remove_btn.click.side_effect = do_remove
+                remove_btn.evaluate.side_effect = do_remove
+                return remove_btn
+            return None
+
         if "Submit" in sel or "submit" in sel:
             return self.submit_btn
         if "input[type='file']" in sel:
             return self.file_input
         if "description" in sel or "tiptap" in sel or "role='textbox'" in sel:
             return self.desc_area
-        if "input[name='title']" in sel or "title" in sel:
+
+        # 标题输入框 (严格排除含有 :not([name='title']) 的标签输入框选择器)
+        if ":not([name='title'])" not in sel and ("input[name='title']" in sel or sel == "input[name='title']"):
             return self._title_input
-        if "tag" in sel.lower() or "input" in sel.lower():
+
+        # 标签容器
+        if ("combobox" in sel.lower() or "an5hlk" in sel.lower() or "data-tag" in sel.lower()) and "input" not in sel:
+            return self.tag_container
+
+        # 标签输入框
+        if "tag" in sel.lower() or "input" in sel.lower() or "combobox" in sel.lower():
             return self._tag_input
 
         return MagicMock()
@@ -407,3 +434,108 @@ class TestDeviantArtTags:
         tag_comp = next((c for c in comp if c.get("item") == "tags"), None)
         assert tag_comp is not None
         assert "截断 3 个" in tag_comp["detail"]
+
+    # -------------------------------------------------------------------------
+    # 5. 正向定位与失明防护 (Positive Localization & Anti-Blindness) - fix/da-tags-live
+    # -------------------------------------------------------------------------
+
+    def test_inject_tags_fails_when_no_editor_found(self, da_dispatcher):
+        """inject 前正向定位标签编辑器，定位不到立即以「未定位到 DA 标签编辑器」失败"""
+        blind_page = MagicMock()
+        blind_page.query_selector.return_value = None
+        blind_page.query_selector_all.return_value = []
+
+        ok, msg = da_dispatcher.inject_tags(blind_page, ["anime", "digital art"])
+
+        assert ok is False
+        assert msg == "未定位到 DA 标签编辑器"
+
+    def test_clear_existing_tags_blind_readback_does_not_report_cleared(self, da_dispatcher, caplog):
+        """clear 不得对失明回读报已清空，返回 -1 并记录警告日志"""
+        blind_page = MagicMock()
+        blind_page.query_selector.return_value = None
+        blind_page.query_selector_all.return_value = []
+
+        import logging
+        with caplog.at_level(logging.INFO):
+            res = da_dispatcher.clear_existing_tags(blind_page)
+
+        assert res == -1
+        # 绝不得报已清空至 0
+        assert "已清空至 0" not in caplog.text
+        assert "失明态" in caplog.text or "跳过清理" in caplog.text
+
+    def test_diagnostic_logs_and_failed_attempts_output(self, da_dispatcher, caplog):
+        """输入框定位状态、逐标签成败汇总、实际 chip 列表与 failed_attempts 必须明确输出"""
+        page = MockDAPage()
+        # 模拟第二个标签输入抛出异常
+        orig_side_effect = page._tag_input.fill.side_effect
+        def faulty_fill(val, *a, **kw):
+            if val == "broken_tag":
+                raise RuntimeError("Input element detached")
+            return orig_side_effect(val, *a, **kw)
+        page._tag_input.fill.side_effect = faulty_fill
+
+        import logging
+        with caplog.at_level(logging.INFO):
+            ok, msg = da_dispatcher.inject_tags(page, ["valid_tag", "broken_tag"])
+
+        assert ok is False
+        # 校验诊断日志输出
+        assert "[标签诊断] 标签编辑器定位状态:" in caplog.text
+        assert "[标签诊断] 逐标签成败汇总:" in caplog.text
+        assert "[标签诊断] 实际 chip 列表" in caplog.text
+        assert "failed_attempts 详细列表: ['broken_tag']" in caplog.text
+        # 校验返回失败消息包含 failed_attempts
+        assert "注入失败: ['broken_tag']" in msg
+
+    def test_real_dom_fixture_hit_assertions(self, da_dispatcher):
+        """
+        基于真实 DOM fixture (tests/fixtures/deviantart_tag_section.html) 的选择器命中断言：
+        1. 验证真实 DOM 中能够准确定位容器、输入框、30 个 chip 与删除按钮；
+        2. 验证错误或猜测的选择器必定断言失败变红，杜绝再次凭空猜测。
+        """
+        fixture_path = Path(__file__).parent / "fixtures" / "deviantart_tag_section.html"
+        assert fixture_path.exists(), f"真实 DOM fixture 不存在: {fixture_path}"
+        html_content = fixture_path.read_text(encoding="utf-8")
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        # 1. 验证正向输入框选择器命中 (真实 input 没有 placeholder，但有 id="_r_f_" 和 role='combobox' 父级)
+        real_input = soup.select_one("div[role='combobox'] input:not([name='title'])")
+        assert real_input is not None, "选择器未能命中真实 DOM 中的标签输入框"
+        assert real_input.get("id") == "_r_f_"
+
+        # 验证历史猜测的选择器会 miss (若使用猜的 placeholder 则必须变红)
+        old_guessed_input = soup.select_one("input[placeholder*='tag' i]")
+        assert old_guessed_input is None, "真实 DA Studio 输入框不应含有 placeholder，旧猜测选择器应失效"
+
+        # 2. 验证正向容器选择器命中
+        real_container = soup.select_one("div[role='combobox'] div.an5HlK")
+        assert real_container is not None, "选择器未能命中真实 DOM 中的标签 Combobox 容器"
+
+        old_guessed_container = soup.select_one("[data-hook='tag_input']")
+        assert old_guessed_container is None, "真实 DOM 中不含 data-hook='tag_input'，旧猜测应失效"
+
+        # 3. 验证 chip 列表解析：30 个 chip 全部命中
+        chips = soup.select("span[data-tag]")
+        assert len(chips) == 30, f"真实 fixture 包含 30 个 chip，实际命中 {len(chips)} 个"
+
+        # 4. 验证删除按钮定位与纯净文本提取
+        first_chip = chips[0]
+        remove_icon = first_chip.select_one("span.rjL0oj")
+        assert remove_icon is not None, "未能在 chip 中定位到删除/关闭图标 (span.rjL0oj)"
+
+        # 提取全部 30 个标签文本并确认不含关闭图标
+        extracted_tags = []
+        for c in chips:
+            c_copy = BeautifulSoup(str(c), "html.parser")
+            for icon in c_copy.select("span.rjL0oj, svg"):
+                icon.decompose()
+            extracted_tags.append(c_copy.get_text().strip())
+
+        assert len(extracted_tags) == 30
+        assert extracted_tags[0] == "Bara"
+        assert extracted_tags[-1] == "musclelatex"
+        assert "Muscle Growth" in extracted_tags
