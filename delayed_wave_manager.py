@@ -93,15 +93,21 @@ def downscale_image_half(src_path: Union[str, Path], dest_path: Optional[Union[s
                 disposals.append(frame.info.get("disposal", 2))
 
             if frames:
-                frames[0].save(
-                    str(dest),
-                    save_all=True,
-                    append_images=frames[1:],
-                    duration=durations,
-                    disposal=disposals,
-                    loop=loop,
-                    optimize=False,
-                )
+                save_kwargs = {
+                    "save_all": True,
+                    "optimize": False,
+                    "loop": loop,
+                }
+                if len(frames) > 1:
+                    save_kwargs["append_images"] = frames[1:]
+                    save_kwargs["duration"] = durations
+                    save_kwargs["disposal"] = disposals
+                else:
+                    if durations:
+                        save_kwargs["duration"] = durations[0]
+                    if disposals:
+                        save_kwargs["disposal"] = disposals[0]
+                frames[0].save(str(dest), **save_kwargs)
     else:
         img_bgr = cv2.imread(str(src))
         if img_bgr is None:
@@ -255,6 +261,7 @@ class DelayedQueueManager:
         snapshot = dict(material)
         snapshot["asset_files"] = copied_assets
         snapshot["original_filenames"] = original_filenames
+        snapshot["original_source_images"] = [str(s) for s in source_images]
         snapshot["images"] = copied_assets
         snapshot["raw_images"] = copied_assets
 

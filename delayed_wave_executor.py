@@ -82,6 +82,7 @@ class DelayedWaveExecutor:
             asset_files = snapshot.get("images", [])
 
         downscaled_images = []
+        civitai_images = []
         for idx, af in enumerate(asset_files):
             p_af = Path(af)
             if not p_af.exists():
@@ -90,16 +91,137 @@ class DelayedWaveExecutor:
                 self.manager.update_item_status(item.id, status="failed", last_error=errors)
                 return False, errors
 
-            # 现场降档为 ×0.5
+            # Civitai 从不上传 GIF 本体，上传的是配对 MP4；GIF 只是配对钥匙，改名即断链，故保留原路径原名
+            is_gif = (p_af.suffix.lower() == ".gif")
+            if is_gif:
+                civitai_images.append(str(p_af))
+            else:
+                civitai_images.append(None)
+
+            # 现场降档为 ×0.5 (用于 DA / X / Bluesky 等免费平台)
             half_dest = CACHE_DIR / f"{item.id}_{idx:02d}_half{p_af.suffix}"
             try:
                 downscaled = downscale_image_half(p_af, half_dest)
                 downscaled_images.append(str(downscaled))
+                if not is_gif:
+                    civitai_images[-1] = str(downscaled)
             except Exception as de:
                 logger.warning(f"[DelayedWave] 降档异常 ({de})，使用素材原尺寸: {af}")
                 downscaled_images.append(str(p_af))
+                if not is_gif:
+                    civitai_images[-1] = str(p_af)
+
+        # 解析与补全 GIF 配对视频 (与手动发布对齐: comfyui_output_dir 树 + 素材所在目录查同 stem MP4)
+        x_video_paths = dict(
+            snapshot.get("x_video_paths")
+            or snapshot.get("platform_options", {}).get("x_video_paths")
+            or {}
+        )
+        gif_candidates = [str(af) for af in asset_files if str(af).lower().endswith(".gif")]
+        if gif_candidates:
+            comfy_dir = ""
+            try:
+                from config import load_config
+                cfg = load_config()
+                comfy_dir = cfg.get("comfyui_output_dir", "")
+            except Exception:
+                pass
+
+            extra_search_dirs = []
+            for af in asset_files:
+                p_af = Path(af)
+                if p_af.exists():
+                    extra_search_dirs.append(p_af.parent)
+            all_source_refs = (
+                snapshot.get("original_source_images", [])
+                + snapshot.get("raw_images", [])
+                + snapshot.get("images", [])
+                + asset_files
+            )
+            for orig in all_source_refs:
+                try:
+                    p_orig = Path(orig)
+                    if p_orig.exists():
+                        extra_search_dirs.append(p_orig.parent)
+                    elif p_orig.parent.exists():
+                        extra_search_dirs.append(p_orig.parent)
+                except Exception:
+                    pass
+
+            unpaired_gifs = []
+            for g in gif_candidates:
+                pg = Path(g)
+                existing_v = (
+                    x_video_paths.get(g)
+                    or x_video_paths.get(pg.name)
+                    or x_video_paths.get(pg.stem)
+                )
+                if not (existing_v and Path(existing_v).exists()):
+                    unpaired_gifs.append(g)
+
+            if unpaired_gifs:
+                try:
+                    from video_engine import pair_gifs_with_videos
+                    paired_map = pair_gifs_with_videos(
+                        unpaired_gifs,
+                        output_dir=comfy_dir or None,
+                        extra_search_dirs=list(set(extra_search_dirs)),
+                        recursive_extra=True,
+                    )
+                    for g_path, matched in paired_map.items():
+                        if matched:
+                            x_video_paths[str(g_path)] = str(matched)
+                            x_video_paths[Path(g_path).name] = str(matched)
+                            x_video_paths[Path(g_path).stem] = str(matched)
+                except Exception as pe:
+                    logger.warning(f"[DelayedWave] GIF 配对视频解析异常: {pe}")
+
+                # 兜底直接查同 stem MP4 (涵盖剥离 00_ 前缀的情况)
+                for g in unpaired_gifs:
+                    if x_video_paths.get(g):
+                        continue
+                    pg = Path(g)
+                    stems_to_try = [pg.stem, re.sub(r"^\d{2,}_", "", pg.stem)]
+                    matched_mp4 = None
+                    for s_dir in set(extra_search_dirs):
+                        if not s_dir.exists():
+                            continue
+                        for st in stems_to_try:
+                            direct_mp4 = s_dir / f"{st}.mp4"
+                            if direct_mp4.exists():
+                                matched_mp4 = direct_mp4
+                                break
+                        if matched_mp4:
+                            break
+                    if not matched_mp4 and comfy_dir and Path(comfy_dir).exists():
+                        for st in stems_to_try:
+                            for cand in Path(comfy_dir).rglob(f"{st}.mp4"):
+                                if cand.is_file():
+                                    matched_mp4 = cand
+                                    break
+                            if matched_mp4:
+                                break
+                    if matched_mp4:
+                        x_video_paths[str(g)] = str(matched_mp4)
+                        x_video_paths[pg.name] = str(matched_mp4)
+                        x_video_paths[pg.stem] = str(matched_mp4)
+                        clean_stem = re.sub(r"^\d{2,}_", "", pg.stem)
+                        x_video_paths[clean_stem] = str(matched_mp4)
+
+            # 统一补充索引
+            for k, v in list(x_video_paths.items()):
+                if v and Path(v).exists():
+                    kp = Path(k)
+                    x_video_paths[kp.name] = str(v)
+                    x_video_paths[kp.stem] = str(v)
+                    clean_stem = re.sub(r"^\d{2,}_", "", kp.stem)
+                    if clean_stem != kp.stem:
+                        x_video_paths[clean_stem] = str(v)
 
         # 构建分发 payload
+        platform_opts = dict(snapshot.get("platform_options", {}))
+        platform_opts["x_video_paths"] = x_video_paths
+
         payload = {
             "title": snapshot.get("title", item.title),
             "description": snapshot.get("description", ""),
@@ -112,8 +234,9 @@ class DelayedWaveExecutor:
             "da_images": downscaled_images,
             "x_images": downscaled_images,
             "bluesky_images": downscaled_images,
-            "civitai_images": downscaled_images,
-            "platform_options": snapshot.get("platform_options", {}),
+            "civitai_images": civitai_images,
+            "x_video_paths": x_video_paths,
+            "platform_options": platform_opts,
         }
 
         # 2. 确定执行顺序: 若包含 DeviantArt，优先执行 DA 以获取当帖引流链接

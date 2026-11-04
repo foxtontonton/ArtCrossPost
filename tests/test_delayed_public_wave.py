@@ -51,6 +51,9 @@ class DummyDispatcher(BaseDispatcher):
     def check_login(self):
         return True
 
+    def probe_login(self):
+        return {"status": "ok", "detail": "Logged in"}
+
     def login_interactive(self, parent_window=None):
         return True
 
@@ -488,3 +491,134 @@ def test_delayed_wave_two_phase_da_link_propagation(tmp_path):
     expected_da_url = "https://www.deviantart.com/foxtontonton/art/12345678"
     assert expected_da_url in x_short
     assert x_short == f"New art out! Full set: {expected_da_url} #art"
+
+
+# =============================================================================
+# 11. Civitai GIF 降档跳过与 MP4 配对回归测试
+# =============================================================================
+
+def test_publish_thread_civitai_gif_skips_downscale_and_preserves_pairing(tmp_path):
+    """
+    PublishThread 门禁循环针对 Civitai 跳过 .gif 降档改名：
+    - Civitai 不发 GIF 本体，上传的是配对 MP4，GIF 仅作配对钥匙；
+    - 改名即断链，故 civitai_images 中 .gif 保持原路径原名；
+    - prepare_civitai_media 顺利配对并产出 accepted 含配对 MP4；
+    - 同批的 DA 则按规则正常降档。
+    """
+    from app import PublishThread
+    from dispatchers.civitai import prepare_civitai_media
+
+    gif_file = tmp_path / "dance_loop.gif"
+    im = Image.new("RGB", (100, 100), color=(255, 0, 0))
+    im.save(gif_file, "GIF")
+
+    mp4_file = tmp_path / "dance_loop.mp4"
+    mp4_file.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isom")
+
+    disp_civ = DummyDispatcher("civitai", "Civitai", succeed=True)
+    disp_da = DummyDispatcher("deviantart", "DeviantArt", succeed=True)
+
+    payload = {
+        "title": "Civitai GIF Pairing Test",
+        "images": [str(gif_file)],
+        "raw_images": [str(gif_file)],
+        "civitai_images": [str(gif_file)],
+        "da_images": [str(gif_file)],
+        "x_video_paths": {str(gif_file): str(mp4_file)},
+        "platform_options": {
+            "x_video_paths": {str(gif_file): str(mp4_file)},
+        },
+    }
+
+    with patch("dispatchers.civitai.validate_civitai_video_constraints", return_value=(True, "OK")):
+        thread = PublishThread([disp_civ, disp_da], payload)
+        thread.run()
+
+    # 1. 验证 Civitai 名单未被 _freehalf 污染改名，保持原路径原名
+    assert disp_civ.captured_payload is not None
+    civ_imgs = disp_civ.captured_payload.get("civitai_images", [])
+    assert len(civ_imgs) == 1
+    assert civ_imgs[0] == str(gif_file)
+    assert "_freehalf" not in civ_imgs[0]
+
+    # 2. 验证 DA 依然按免费平台规则正常降档
+    assert disp_da.captured_payload is not None
+    da_imgs = disp_da.captured_payload.get("da_images", [])
+    assert len(da_imgs) == 1
+    assert "_freehalf.gif" in da_imgs[0]
+
+    # 3. 验证 prepare_civitai_media 顺利完成钥匙匹配，accepted 含配对 MP4
+    with patch("dispatchers.civitai.validate_civitai_video_constraints", return_value=(True, "OK")):
+        accepted, skipped = prepare_civitai_media(
+            disp_civ.captured_payload.get("civitai_images"),
+            x_video_paths=disp_civ.captured_payload.get("x_video_paths"),
+        )
+    assert str(mp4_file) in accepted
+    assert len(accepted) == 1
+
+
+def test_delayed_wave_executor_civitai_gif_pairing_and_media_resolution(tmp_path, monkeypatch):
+    """
+    DelayedWaveExecutor 构建 payload 时：
+    - civitai_images 保留 GIF 原路径原名；
+    - 自动为快照中的 GIF 查同 stem MP4 (素材目录/ComfyUI输出树) 并补齐 x_video_paths；
+    - prepare_civitai_media 顺利配对并产出 accepted 含配对 MP4。
+    """
+    from dispatchers.civitai import prepare_civitai_media
+
+    q_file = tmp_path / "delayed_queue.json"
+    a_dir = tmp_path / "delayed_assets"
+    mgr = DelayedQueueManager(queue_file=q_file, assets_dir=a_dir, enabled=True)
+    # 模拟保留资产副本，以便后续断言 prepare_civitai_media 的文件存在检查
+    monkeypatch.setattr(mgr, "cleanup_assets", lambda item_id: None)
+
+    # 在临时素材目录创建源 GIF 与同 stem 的配对 MP4
+    src_dir = tmp_path / "src_materials"
+    src_dir.mkdir()
+    gif_file = src_dir / "hero_anim.gif"
+    im = Image.new("RGB", (120, 120), color=(0, 255, 0))
+    im.save(gif_file, "GIF")
+
+    mp4_file = src_dir / "hero_anim.mp4"
+    mp4_file.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isom")
+
+    item = mgr.enroll(
+        {
+            "title": "Wave GIF Civitai Test",
+            "description": "Awesome animated set",
+            "short_text": "Awesome animated set #civitai",
+            "raw_images": [str(gif_file)],
+        },
+        delay_seconds=0,
+        target_platforms=["civitai"],
+    )
+
+    disp_civ = DummyDispatcher("civitai", "Civitai", succeed=True)
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        dispatchers_factory=lambda: [disp_civ],
+    )
+
+    all_ok, errors = executor.execute_item(item)
+    assert all_ok is True
+    assert disp_civ.captured_payload is not None
+
+    # 1. 验证 civitai_images 保留 GIF 原扩展名与路径，未被降档为 _half.gif
+    civ_imgs = disp_civ.captured_payload.get("civitai_images", [])
+    assert len(civ_imgs) == 1
+    assert civ_imgs[0].lower().endswith(".gif")
+    assert "_half.gif" not in civ_imgs[0]
+
+    # 2. 验证 x_video_paths 自动解析并补齐了配对 MP4
+    xvids = disp_civ.captured_payload.get("x_video_paths", {})
+    assert len(xvids) > 0
+    assert any(str(mp4_file) == str(v) for v in xvids.values())
+
+    # 3. 验证 prepare_civitai_media 顺利接收并产出配对 MP4
+    with patch("dispatchers.civitai.validate_civitai_video_constraints", return_value=(True, "OK")):
+        accepted, skipped = prepare_civitai_media(
+            civ_imgs,
+            x_video_paths=xvids,
+        )
+    assert str(mp4_file) in accepted
+    assert len(accepted) == 1

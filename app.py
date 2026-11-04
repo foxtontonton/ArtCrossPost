@@ -2295,13 +2295,17 @@ class PublishThread(QThread):
                 for f_img in disp_images:
                     try:
                         p_f = Path(f_img)
+                        # Civitai 从不上传 GIF 本体，上传的是配对 MP4；GIF 只是配对钥匙，改名即断链，跳过降档改名
+                        if disp.name == "civitai" and p_f.suffix.lower() == ".gif":
+                            scaled_free_images.append(str(f_img))
+                            continue
                         if p_f.exists() and not str(p_f).endswith("_freehalf" + p_f.suffix):
                             h_dest = CACHE_DIR / f"{p_f.stem}_freehalf{p_f.suffix}"
                             scaled_free_images.append(str(downscale_image_half(p_f, h_dest)))
                         else:
                             scaled_free_images.append(str(f_img))
                     except Exception as s_err:
-                        logger.debug(f"[PublishThread] 免费平台降档提示: {s_err}")
+                        logger.warning(f"[PublishThread] 免费平台降档异常 (回退原图): {s_err}")
                         scaled_free_images.append(str(f_img))
                 disp_images = scaled_free_images
                 if disp.name == "deviantart":
