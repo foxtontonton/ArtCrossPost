@@ -164,6 +164,11 @@ class CensorEngine:
             pad_x = int(bw * self.padding_ratio)
             pad_y = int(bh * self.padding_ratio)
             return [max(0, x1 - pad_x), max(0, y1 - pad_y), min(img_w, x2 + pad_x), min(img_h, y2 + pad_y)]
+        elif mode == "public_safe":
+            # 2026-11-05 Patreon 预告「公开安全」独立预设: 敏感部位 + 25% 边距外扩
+            pad_x = max(16, int(bw * 0.25))
+            pad_y = max(16, int(bh * 0.25))
+            return [max(0, x1 - pad_x), max(0, y1 - pad_y), min(img_w, x2 + pad_x), min(img_h, y2 + pad_y)]
         else:
             tw, th = int(bw * 0.55), int(bh * 0.55)
 
@@ -220,6 +225,16 @@ class CensorEngine:
                     y1 = int(round(cy - new_h / 2.0))
                     x2 = int(round(cx + new_w / 2.0))
                     y2 = int(round(cy + new_h / 2.0))
+
+                if mode == "public_safe":
+                    bw = max(1, x2 - x1)
+                    bh = max(1, y2 - y1)
+                    pad_x = max(16, int(bw * 0.25))
+                    pad_y = max(16, int(bh * 0.25))
+                    x1 = x1 - pad_x
+                    y1 = y1 - pad_y
+                    x2 = x2 + pad_x
+                    y2 = y2 + pad_y
 
                 x1 = max(0, min(img_w, x1))
                 y1 = max(0, min(img_h, y1))
@@ -284,7 +299,21 @@ class CensorEngine:
         for x1, y1, x2, y2 in processed_boxes:
             orig_roi = censored[y1:y2, x1:x2].copy()
 
-            if style == "black_bar":
+            if mode == "public_safe":
+                # 公开安全独立预设：从严口径，马赛克颗粒加大 (至少 36px) 或实心遮挡
+                if style == "mosaic":
+                    rw, rh = max(1, x2 - x1), max(1, y2 - y1)
+                    cell = max(36, int(mosaic_size * 2))
+                    small_w = max(1, rw // cell)
+                    small_h = max(1, rh // cell)
+                    small = cv2.resize(orig_roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                    censor_roi = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+                elif style == "blur":
+                    k = max(55, int(blur_ksize) if blur_ksize % 2 == 1 else int(blur_ksize) + 1)
+                    censor_roi = cv2.GaussianBlur(orig_roi, (k, k), 50)
+                else:
+                    censor_roi = np.zeros_like(orig_roi)
+            elif style == "black_bar":
                 censor_roi = np.zeros_like(orig_roi)
             elif style == "mosaic":
                 rw, rh = max(1, x2 - x1), max(1, y2 - y1)
