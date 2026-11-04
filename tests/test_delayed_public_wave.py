@@ -622,3 +622,534 @@ def test_delayed_wave_executor_civitai_gif_pairing_and_media_resolution(tmp_path
         )
     assert str(mp4_file) in accepted
     assert len(accepted) == 1
+
+
+# =============================================================================
+# 12. 公开波执行期补渲染管线 (打码引擎与水印引擎按各平台设置生效，母版不直进图单)
+# =============================================================================
+
+def test_executor_rendering_pipeline_censor_and_watermark_per_platform(tmp_path):
+    """
+    验证公开波执行期补渲染管线：
+    - X / Bluesky 变体经过打码引擎 (CensorEngine.apply_censor)
+    - DA 变体带水印 (WatermarkEngine.apply_watermark，当设置开启时)
+    - 母版原件只供 Civitai 配对钥匙与附件语义，不直接进任何平台的静态图单
+    """
+    from watermark_engine import WatermarkEngine
+
+    q_file = tmp_path / "delayed_queue.json"
+    a_dir = tmp_path / "delayed_assets"
+    cache_dir = tmp_path / "cache"
+    mgr = DelayedQueueManager(queue_file=q_file, assets_dir=a_dir, enabled=True)
+
+    # 创建母版静态图 400x400
+    master_img = tmp_path / "master_source.png"
+    Image.new("RGB", (400, 400), color=(180, 120, 90)).save(master_img, "PNG")
+
+    item = mgr.enroll(
+        {
+            "title": "Render Pipeline Test",
+            "description": "Testing per-platform censor and watermark",
+            "raw_images": [str(master_img)],
+            "custom_censor_boxes": {master_img.name: [[100, 100, 200, 200]]},
+        },
+        delay_seconds=0,
+        target_platforms=["deviantart", "x_twitter", "bluesky", "civitai"],
+    )
+    saved_asset_path = item.material_snapshot["asset_files"][0]
+
+    # 配置: DA 不打码但带水印，X 与 Bluesky 开启打码且带水印，Civitai 不打码带水印
+    test_cfg = {
+        "censor": {
+            "enabled": True,
+            "style": "black_bar",
+            "coverage_mode": "moderate",
+            "coverage_scale": 0.55,
+            "strength": 50,
+            "opacity": 1.0,
+            "padding_ratio": 0.15,
+        },
+        "watermark": {
+            "enabled": True,
+            "apply_to_publish": True,
+            "text": "@TEST_WATERMARK",
+            "font_family": "微软雅黑 (Microsoft YaHei)",
+            "size_pct": 4.0,
+            "opacity": 0.8,
+            "position": "bottom_right",
+            "color": "#ffffff",
+            "stroke": True,
+        },
+        "defaults": {
+            "deviantart_censor": False,
+            "x_censor": True,
+            "bluesky_censor": True,
+            "civitai_censor": False,
+        },
+    }
+
+    real_ce = CensorEngine()
+    real_wm = WatermarkEngine()
+
+    with patch.object(real_ce, "apply_censor", wraps=real_ce.apply_censor) as spy_censor, \
+         patch.object(real_wm, "apply_watermark", wraps=real_wm.apply_watermark) as spy_wm:
+
+        disp_da = DummyDispatcher("deviantart", "DeviantArt", succeed=True)
+        disp_x = DummyDispatcher("x_twitter", "X", succeed=True)
+        disp_bsky = DummyDispatcher("bluesky", "Bluesky", succeed=True)
+        disp_civ = DummyDispatcher("civitai", "Civitai", succeed=True)
+
+        executor = DelayedWaveExecutor(
+            manager=mgr,
+            dispatchers_factory=lambda: [disp_da, disp_x, disp_bsky, disp_civ],
+            config_provider=lambda: test_cfg,
+            censor_engine=real_ce,
+            watermark_engine=real_wm,
+            cache_dir=cache_dir,
+        )
+
+        all_ok, errors = executor.execute_item(item)
+
+        assert all_ok is True
+        assert not errors
+
+        # 1. CensorEngine.apply_censor 与 WatermarkEngine.apply_watermark 均被真实调用
+        assert spy_censor.call_count >= 1
+        assert spy_wm.call_count >= 2  # 打码分支 + 无码分支各压制一次水印
+
+        payload = disp_x.captured_payload
+        assert payload is not None
+
+        # 2. 母版原件路径绝不直接进入任何平台的静态图单
+        for key in ("da_images", "x_images", "bluesky_images", "civitai_images"):
+            plat_list = payload.get(key, [])
+            assert len(plat_list) == 1
+            assert str(master_img) not in plat_list
+            assert str(saved_asset_path) not in plat_list
+            # 均为 ×0.5 降档后的 200x200 变体
+            with Image.open(plat_list[0]) as out_im:
+                assert out_im.size == (200, 200)
+
+        # 3. X 与 Bluesky 使用的是经过打码引擎的变体，DA 使用的是无码带水印变体
+        x_img_path = payload["x_images"][0]
+        bsky_img_path = payload["bluesky_images"][0]
+        da_img_path = payload["da_images"][0]
+        assert "censored_half" in Path(x_img_path).name
+        assert "censored_half" in Path(bsky_img_path).name
+
+        # 校验 X/Bluesky 变体在打码中心点 (150//2=75, 150//2=75) 为纯黑条 (0,0,0)，而 DA 变体保留原色
+        with Image.open(x_img_path) as x_im, Image.open(da_img_path) as da_im:
+            x_px = x_im.convert("RGB").getpixel((75, 75))
+            da_px = da_im.convert("RGB").getpixel((75, 75))
+            assert x_px == (0, 0, 0)
+            assert da_px != (0, 0, 0)
+
+
+# =============================================================================
+# 13. Executor 平台规则对齐与发布历史写入
+# =============================================================================
+
+def test_executor_platform_rules_alignment_and_history_write(tmp_path):
+    """
+    验证 executor 平台规则对齐:
+    - Bluesky 静态图单 ≤ 4；X 静态图单 ≤ 4
+    - Civitai 注入 platform_options 与顶层预设 (resources/tool/channel/max_images)
+    - 执行完成时写入 publish_history.json (复用 PublishHistoryManager.append_record 口径)
+    """
+    from history_manager import PublishHistoryManager
+
+    q_file = tmp_path / "delayed_queue.json"
+    a_dir = tmp_path / "delayed_assets"
+    cache_dir = tmp_path / "cache"
+    mgr = DelayedQueueManager(queue_file=q_file, assets_dir=a_dir, enabled=True)
+    hist_mgr = PublishHistoryManager(tmp_path)
+
+    # 创建 6 张静态图
+    imgs = []
+    for i in range(6):
+        p = tmp_path / f"multi_{i}.jpg"
+        Image.new("RGB", (100, 100), color=(20 * i, 50, 100)).save(p, "JPEG")
+        imgs.append(str(p))
+
+    item = mgr.enroll(
+        {
+            "title": "Six Images Rule Test",
+            "description": "Testing <=4 cap and civitai presets",
+            "tags": ["tag1", "tag2"],
+            "raw_images": imgs,
+        },
+        delay_seconds=0,
+        target_platforms=["deviantart", "x_twitter", "bluesky", "civitai"],
+    )
+
+    custom_cfg = {
+        "censor": {"enabled": False},
+        "watermark": {"enabled": False},
+        "defaults": {
+            "civitai_channel": "api",
+            "civitai_max_images_per_post": 15,
+            "civitai_resources": [{"modelVersionId": 999, "modelName": "TestLoRA"}],
+            "civitai_resources_scope": "first",
+            "civitai_tool": "ForgeUI",
+        },
+    }
+
+    disp_da = DummyDispatcher("deviantart", "DeviantArt", succeed=True)
+    disp_x = DummyDispatcher("x_twitter", "X", succeed=True)
+    disp_bsky = DummyDispatcher("bluesky", "Bluesky", succeed=True)
+    disp_civ = DummyDispatcher("civitai", "Civitai", succeed=True)
+
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        dispatchers_factory=lambda: [disp_da, disp_x, disp_bsky, disp_civ],
+        config_provider=lambda: custom_cfg,
+        history_manager=hist_mgr,
+        cache_dir=cache_dir,
+    )
+
+    all_ok, errors = executor.execute_item(item)
+    assert all_ok is True
+
+    payload = disp_civ.captured_payload
+    # 1. X 与 Bluesky 图单均被截断至 ≤ 4 张，DA 与 Civitai 保留全部 6 张
+    assert len(payload["x_images"]) == 4
+    assert len(payload["bluesky_images"]) == 4
+    assert payload["bluesky_discarded_images_count"] == 2
+    assert len(payload["da_images"]) == 6
+    assert len(payload["civitai_images"]) == 6
+
+    # 2. Civitai 预设注入到 payload 顶层与 platform_options
+    assert payload["civitai_channel"] == "api"
+    assert payload["civitai_max_images_per_post"] == 15
+    assert payload["civitai_resources"] == [{"modelVersionId": 999, "modelName": "TestLoRA"}]
+    assert payload["civitai_resources_scope"] == "first"
+    assert payload["civitai_tool"] == "ForgeUI"
+    po = payload["platform_options"]
+    assert po["civitai_channel"] == "api"
+    assert po["civitai_max_images_per_post"] == 15
+    assert po["civitai_resources"] == [{"modelVersionId": 999, "modelName": "TestLoRA"}]
+    assert po["civitai_tool"] == "ForgeUI"
+
+    # 3. 验证 publish_history.json 已写入记录
+    records = hist_mgr.load_history()
+    assert len(records) == 1
+    assert records[0]["title"] == "Six Images Rule Test"
+    assert "deviantart" in records[0]["platforms"]
+    assert records[0]["platforms"]["deviantart"]["success"] is True
+
+
+def test_executor_gif_sets_x_video_and_bluesky_video(tmp_path, monkeypatch):
+    """
+    验证单 GIF 帖在 executor 中:
+    - X 设置 x_video 指向配对 MP4
+    - Bluesky 设置 bluesky_video 且将 bluesky_images 置空 [] (单帖单 embed 规范)
+    """
+    q_file = tmp_path / "delayed_queue.json"
+    a_dir = tmp_path / "delayed_assets"
+    cache_dir = tmp_path / "cache"
+    mgr = DelayedQueueManager(queue_file=q_file, assets_dir=a_dir, enabled=True)
+
+    src_dir = tmp_path / "gif_src"
+    src_dir.mkdir()
+    gif_file = src_dir / "loop_art.gif"
+    Image.new("RGB", (100, 100), color=(10, 200, 50)).save(gif_file, "GIF")
+    mp4_file = src_dir / "loop_art.mp4"
+    mp4_file.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isom")
+
+    item = mgr.enroll(
+        {"title": "GIF Video Rule Test", "raw_images": [str(gif_file)]},
+        delay_seconds=0,
+        target_platforms=["x_twitter", "bluesky"],
+    )
+
+    disp_x = DummyDispatcher("x_twitter", "X", succeed=True)
+    disp_bsky = DummyDispatcher("bluesky", "Bluesky", succeed=True)
+
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        dispatchers_factory=lambda: [disp_x, disp_bsky],
+        config_provider=lambda: {"censor": {"enabled": False}, "watermark": {"enabled": False}},
+        cache_dir=cache_dir,
+    )
+
+    all_ok, _ = executor.execute_item(item)
+    assert all_ok is True
+
+    payload = disp_x.captured_payload
+    assert payload["x_video"] == str(mp4_file)
+    assert payload["bluesky_video"] == str(mp4_file)
+    assert payload["bluesky_images"] == []
+
+
+# =============================================================================
+# 14. Tab B 预告图 fail-closed 与 GIF 逐帧打码 & 描述双换行 & 防重入
+# =============================================================================
+
+def test_tab_b_teaser_fail_closed_aborts_on_censor_error(tmp_path, monkeypatch):
+    """
+    验证 Tab B 预告图 fail-closed:
+    当 public_safe 打码抛异常时，立即中止发布并响亮报错，绝不回退未打码原图，绝不启动 PublishThread。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+
+    master_img = tmp_path / "tab_b_master.png"
+    Image.new("RGB", (200, 200), color=(200, 50, 50)).save(master_img, "PNG")
+
+    win.tab_b_title_input.setText("Fail Closed Test")
+    from PyQt5.QtWidgets import QListWidgetItem
+    from PyQt5.QtCore import Qt
+    it = QListWidgetItem(master_img.name)
+    it.setData(Qt.UserRole, str(master_img))
+    win.tab_b_img_list.addItem(it)
+    win.tab_b_censor_cb.setChecked(True)
+
+    # 模拟打码引擎失败
+    monkeypatch.setattr(win.censor_engine, "apply_censor", MagicMock(side_effect=RuntimeError("Mock NudeNet Crash")))
+    crit_mock = MagicMock()
+    monkeypatch.setattr(QMessageBox, "critical", crit_mock)
+    pub_thread_mock = MagicMock()
+    monkeypatch.setattr(app_mod, "PublishThread", pub_thread_mock)
+
+    win._start_tab_b_publishing()
+
+    # 必须弹窗报错、未启动 PublishThread、按钮已恢复可用
+    assert crit_mock.call_count == 1
+    assert pub_thread_mock.call_count == 0
+    assert win.tab_b_publish_btn.isEnabled() is True
+
+
+def test_tab_b_gif_teaser_uses_gif_engine_and_paragraph_description(tmp_path, monkeypatch):
+    """
+    验证 Tab B:
+    - 首图为 GIF 时走 GIF 逐帧打码路径 (render_composite_gif_frames)，不走 cv2.imwrite
+    - 描述框多段文本按块间双换行 (\\n\\n) 读取
+    - 发布期间按钮禁用，防重入守卫生效
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+
+    gif_master = tmp_path / "anim_master.gif"
+    f1 = Image.new("RGB", (200, 200), color=(255, 100, 100))
+    f2 = Image.new("RGB", (200, 200), color=(100, 255, 100))
+    f1.save(gif_master, save_all=True, append_images=[f2], duration=100, loop=0)
+
+    win.tab_b_title_input.setText("GIF Teaser Test")
+    win.tab_b_desc_input.setPlainText("Line 1\nLine 2\n\n\nLine 3")
+
+    from PyQt5.QtWidgets import QListWidgetItem
+    from PyQt5.QtCore import Qt
+    it = QListWidgetItem(gif_master.name)
+    it.setData(Qt.UserRole, str(gif_master))
+    win.tab_b_img_list.addItem(it)
+    win.tab_b_censor_cb.setChecked(True)
+    win.custom_censor_boxes[str(gif_master)] = [[40, 40, 120, 120]]
+
+    captured_threads = []
+
+    class FakePublishThread:
+        def __init__(self, disps, payload):
+            self.disps = disps
+            self.payload = payload
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+            captured_threads.append(self)
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return True
+
+    monkeypatch.setattr(app_mod, "PublishThread", FakePublishThread)
+    monkeypatch.setattr(QMessageBox, "critical", MagicMock())
+
+    win._start_tab_b_publishing()
+
+    assert len(captured_threads) == 1
+    sent_payload = captured_threads[0].payload
+    # 1. 描述保留段落间双换行语义
+    assert sent_payload["description"] == "Line 1\n\nLine 2\n\nLine 3"
+    # 2. GIF 预告图成功生成且尺寸减半 (100x100)
+    teaser_gif = Path(sent_payload["patreon_images"][0])
+    assert teaser_gif.exists()
+    assert teaser_gif.suffix.lower() == ".gif"
+    with Image.open(teaser_gif) as out_gif:
+        assert out_gif.size == (100, 100)
+    # 3. 发布中按钮处于禁用状态
+    assert win.tab_b_publish_btn.isEnabled() is False
+
+
+# =============================================================================
+# 15. 繁忙互斥与 queue_btn 告警样式恢复 & _start_publishing(scheduled_snapshot)
+# =============================================================================
+
+def test_delayed_wave_busy_mutex_defers_when_main_publish_running(tmp_path, monkeypatch):
+    """
+    验证繁忙互斥：当主发布或定时发布正在运行时，_poll_delayed_wave_queue 顺延并打日志，不启动后台公开波线程。
+    """
+    from PyQt5.QtWidgets import QApplication
+    import app as app_mod
+
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.data_dir = tmp_path
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    # 登记一个已到期项
+    dummy_img = tmp_path / "mutex_art.jpg"
+    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(dummy_img, "JPEG")
+    win.delayed_wave_manager.enroll({"title": "Mutex Art", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    # 模拟定时发布正在运行
+    win._is_scheduled_task_running = True
+    worker_spy = MagicMock()
+    monkeypatch.setattr(app_mod, "DelayedWaveWorkerThread", worker_spy)
+
+    win._poll_delayed_wave_queue()
+    # 繁忙互斥拦截，不启动 worker
+    assert worker_spy.call_count == 0
+
+    # 解除繁忙后再次轮询，启动后台线程
+    win._is_scheduled_task_running = False
+    win._poll_delayed_wave_queue()
+    assert worker_spy.call_count == 1
+
+
+def test_queue_btn_alert_style_restores_after_clear_or_retry_success(tmp_path, monkeypatch):
+    """
+    验证 queue_btn 告警样式在队列存在失败项时变红，在重试成功或取消后恢复默认空样式。
+    """
+    from PyQt5.QtWidgets import QApplication
+    import app as app_mod
+
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.data_dir = tmp_path
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    dummy_img = tmp_path / "alert_art.jpg"
+    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(dummy_img, "JPEG")
+    item = win.delayed_wave_manager.enroll({"title": "Alert Art", "raw_images": [str(dummy_img)]}, 0, ["deviantart"])
+
+    # 标记为失败 -> 按钮样式变红
+    win.delayed_wave_manager.update_item_status(item.id, status="failed", last_error={"deviantart": "Net Err"})
+    win._on_delayed_wave_item_finished(item, False)
+    assert "#991b1b" in win.queue_btn.styleSheet()
+
+    # 标记为成功完成 -> 按钮样式恢复默认 ("")
+    win.delayed_wave_manager.update_item_status(item.id, status="done", last_error={})
+    win._on_delayed_wave_item_finished(item, True)
+    assert win.queue_btn.styleSheet() == ""
+
+
+def test_start_publishing_scheduled_snapshot_strictly_overrides_ui_widgets(tmp_path, monkeypatch):
+    """
+    验证 _start_publishing(scheduled_snapshot) 全程使用快照值：
+    当快照与当前 UI 内容（title/description/tags/is_nsfw/is_ai/platform_options）完全不同时，
+    生成的 payload 必须严格等于快照值，绝不被当前 UI 控件覆盖。
+    """
+    from PyQt5.QtWidgets import QApplication
+    import app as app_mod
+
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    # 关闭打码和水印以简化素材路径直通验证
+    win.auto_censor_cb.setChecked(False)
+    win.watermark_enabled_cb.setChecked(False)
+
+    # 在当前 UI 中填入一套完全不同的干扰值
+    win.title_input.setText("UI Dirty Title")
+    win.desc_input.setPlainText("UI Dirty Description")
+    win.tags_input.setPlainText("ui_tag_1, ui_tag_2")
+    win.nsfw_checkbox.setChecked(False)
+    win.ai_checkbox.setChecked(False)
+    if "deviantart" in win.platform_controls:
+        win.platform_controls["deviantart"]["checkbox"].setChecked(False)
+
+    # 准备快照专属图片与快照字典
+    snap_img = tmp_path / "snapshot_only.jpg"
+    Image.new("RGB", (120, 120), color=(30, 60, 90)).save(snap_img, "JPEG")
+
+    snapshot = {
+        "title": "Snapshot Clean Title",
+        "description": "Snapshot Para 1\n\nSnapshot Para 2",
+        "tags": ["snap_tag_a", "snap_tag_b"],
+        "image_paths": [str(snap_img)],
+        "selected_platforms": ["deviantart", "civitai"],
+        "censor_enabled": False,
+        "is_nsfw": True,
+        "is_ai": True,
+        "short_text": "Snapshot custom short text",
+        "platform_options": {
+            "deviantart_mature": "strict",
+            "deviantart_gallery": ["CustomSnapFolder"],
+            "deviantart_ai": True,
+            "deviantart_keep_preset_description": False,
+            "civitai_channel": "web",
+            "civitai_tool": "SnapTool",
+            "custom_snap_marker": "preserved_123",
+        },
+    }
+
+    captured = {}
+
+    class DummyPubThread:
+        def __init__(self, selected, payload):
+            captured["selected"] = [d.name for d in selected]
+            captured["payload"] = payload
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", DummyPubThread)
+
+    win._start_publishing(scheduled_snapshot=snapshot)
+
+    assert "payload" in captured
+    p = captured["payload"]
+    assert captured["selected"] == ["deviantart", "civitai"]
+    assert p["title"] == "Snapshot Clean Title"
+    assert p["description"] == "Snapshot Para 1\n\nSnapshot Para 2"
+    assert p["tags"] == ["snap_tag_a", "snap_tag_b"]
+    assert p["is_nsfw"] is True
+    assert p["is_ai"] is True
+    assert p["short_text"] == "Snapshot custom short text"
+
+    po = p["platform_options"]
+    assert po["custom_snap_marker"] == "preserved_123"
+    assert po["deviantart_mature"] == "strict"
+    assert po["deviantart_gallery"] == ["CustomSnapFolder"]
+    assert po["deviantart_keep_preset_description"] is False
+    assert po["civitai_channel"] == "web"
+    assert po["civitai_tool"] == "SnapTool"
+    assert p["civitai_channel"] == "web"
+    assert p["civitai_tool"] == "SnapTool"
+

@@ -75,7 +75,7 @@ from delayed_wave_manager import (
     parse_delay_to_seconds,
     downscale_image_half,
 )
-from delayed_wave_executor import DelayedWaveExecutor
+from delayed_wave_executor import DelayedWaveExecutor, DelayedWaveWorkerThread, render_composite_gif_frames
 from ui_delayed_queue_dialog import DelayedQueueDialog
 
 
@@ -4126,6 +4126,8 @@ class MainWindow(QMainWindow):
         self.delayed_wave_manager = None
         self.delayed_wave_executor = None
         self._delayed_wave_timer = None
+        self._is_delayed_wave_running = False
+        self._delayed_wave_worker_thread = None
 
         self._is_restoring_config = True
         self._is_restoring_layout = True
@@ -4157,18 +4159,19 @@ class MainWindow(QMainWindow):
         if self.delayed_wave_enabled:
             self._init_delayed_wave_subsystem()
 
-    def _get_description_text(self) -> str:
+    def _get_description_text(self, widget=None) -> str:
         """
         获取作品描述文本并保留段落结构语义:
-        1. 遍历 desc_input.document() 全部 QTextBlock
+        1. 遍历 document() 全部 QTextBlock
         2. 以 "\n\n" 拼接各 block
         3. 连续 3+ 个 \n 压缩回 "\n\n"（保证草稿存读往返不动点）
         """
-        if not hasattr(self, "desc_input") or not self.desc_input:
+        target = widget if widget is not None else getattr(self, "desc_input", None)
+        if not target:
             return ""
-        doc = self.desc_input.document() if hasattr(self.desc_input, "document") else None
+        doc = target.document() if hasattr(target, "document") else None
         if doc is None:
-            return self.desc_input.toPlainText() if hasattr(self.desc_input, "toPlainText") else ""
+            return target.toPlainText() if hasattr(target, "toPlainText") else ""
         blocks = []
         block = doc.begin()
         while block.isValid():
@@ -7883,7 +7886,7 @@ class MainWindow(QMainWindow):
         wm_stroke = self.watermark_stroke_cb.isChecked()
 
         # 生成安全文件名 (避免 DeviantArt 等平台直接以文件名覆盖标题为 public_send_0)
-        title_str = self.title_input.text().strip()
+        title_str = title_val
         safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
         safe_title = safe_title[:40]
 
@@ -8375,7 +8378,14 @@ class MainWindow(QMainWindow):
                 bluesky_images.append(str(bsky_target))
 
         # X (Twitter) 专属图按选用状态提取：勾选则按缩略图排序取勾选的最多4张；未勾选则回退取前4张
-        x_candidate_paths = self.get_x_selected_images()
+        if scheduled_snapshot:
+            snap_x_sel = scheduled_snapshot.get("x_selected_paths")
+            if snap_x_sel:
+                x_candidate_paths = [str(p) for p in images_to_use if str(p) in set(str(x) for x in snap_x_sel)][:4]
+            else:
+                x_candidate_paths = [str(p) for p in images_to_use[:4]]
+        else:
+            x_candidate_paths = self.get_x_selected_images()
         x_images = [x_images_map[p] for p in x_candidate_paths if p in x_images_map]
 
         # 清理生成后最终未被 X 选用的 _xopt.jpg 缓存残骸
@@ -8389,48 +8399,12 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         logger.debug(f"[Image Optimizer] 清理未选用 xopt 文件失败: {e}")
 
-        tags = split_and_normalize_tags(self.tags_input.toPlainText())
+        tags = list(tags_val)
 
-        platform_options = {
-            "is_ai_generated": self.ai_checkbox.isChecked(),
-        }
-
-        if "x_twitter" in self.platform_controls:
-            opts = self.platform_controls["x_twitter"]["options"]
-            if "sensitive" in opts:
-                platform_options["x_sensitive"] = opts["sensitive"].isChecked()
-            if "ai" in opts:
-                platform_options["x_ai"] = opts["ai"].isChecked()
-            if "premium" in opts:
-                platform_options["x_premium"] = opts["premium"].isChecked()
-                platform_options["x_char_limit"] = 25000 if opts["premium"].isChecked() else 280
-            if "policy" in opts:
-                platform_options["x_over_limit_policy"] = opts["policy"].currentData()
-
-        if "deviantart" in self.platform_controls:
-            opts = self.platform_controls["deviantart"]["options"]
-            if "mature" in opts:
-                txt = opts["mature"].currentText().lower()
-                if "moderate" in txt:
-                    platform_options["deviantart_mature"] = "moderate"
-                elif "none" in txt:
-                    platform_options["deviantart_mature"] = "none"
-                else:
-                    platform_options["deviantart_mature"] = "strict"
-            if "gallery" in opts:
-                platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
-            if "ai" in opts:
-                platform_options["deviantart_ai"] = opts["ai"].isChecked()
-            if "keep_preset" in opts:
-                platform_options["deviantart_keep_preset_description"] = opts["keep_preset"].isChecked()
-            else:
-                platform_options["deviantart_keep_preset_description"] = self.config.get("defaults", {}).get("deviantart_keep_preset_description", True)
-            da_limit_val = self.config.get("defaults", {}).get(
-                "deviantart_max_images_per_deviation",
-                self.config.get("deviantart_max_images_per_deviation", 10)
-            )
-            platform_options["deviantart_max_images_per_deviation"] = da_limit_val
-
+        da_limit_val = self.config.get("defaults", {}).get(
+            "deviantart_max_images_per_deviation",
+            self.config.get("deviantart_max_images_per_deviation", 10)
+        )
         civitai_limit_val = self.config.get("defaults", {}).get(
             "civitai_max_images_per_post",
             self.config.get("civitai_max_images_per_post", 20)
@@ -8452,53 +8426,104 @@ class MainWindow(QMainWindow):
             "civitai_channel",
             self.config.get("civitai_channel", "auto")
         )
-        if "civitai" in self.platform_controls:
-            opts = self.platform_controls["civitai"]["options"]
-            if "channel" in opts:
-                civitai_channel_val = opts["channel"].currentData() or civitai_channel_val
-            if "censor" in opts:
-                platform_options["civitai_censor"] = opts["censor"].isChecked()
-        platform_options["civitai_max_images_per_post"] = civitai_limit_val
-        platform_options["civitai_resources"] = civitai_res_val
-        platform_options["civitai_resources_scope"] = civitai_scope_val
-        platform_options["civitai_tool"] = civitai_tool_val
-        platform_options["civitai_channel"] = civitai_channel_val
-        platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
 
-        if "patreon" in self.platform_controls:
-            opts = self.platform_controls["patreon"]["options"]
-            if "visibility" in opts:
-                txt = opts["visibility"].currentText().lower()
-                if "public" in txt or "公开" in txt:
-                    platform_options["patreon_visibility"] = "public"
-                elif "tiers" in txt or "档位" in txt:
-                    platform_options["patreon_visibility"] = "tiers"
+        if scheduled_snapshot:
+            platform_options = dict(scheduled_snapshot.get("platform_options", {}))
+            platform_options.setdefault("is_ai_generated", bool(is_ai))
+            da_limit_val = platform_options.setdefault("deviantart_max_images_per_deviation", da_limit_val)
+            civitai_limit_val = platform_options.setdefault("civitai_max_images_per_post", civitai_limit_val)
+            civitai_res_val = platform_options.setdefault("civitai_resources", civitai_res_val)
+            civitai_scope_val = platform_options.setdefault("civitai_resources_scope", civitai_scope_val)
+            civitai_tool_val = platform_options.setdefault("civitai_tool", civitai_tool_val)
+            civitai_channel_val = platform_options.setdefault("civitai_channel", civitai_channel_val)
+            platform_options.setdefault(
+                "x_video_paths",
+                {str(k): str(v) for k, v in (x_video_paths_source or {}).items() if v},
+            )
+        else:
+            platform_options = {
+                "is_ai_generated": self.ai_checkbox.isChecked(),
+            }
+
+            if "x_twitter" in self.platform_controls:
+                opts = self.platform_controls["x_twitter"]["options"]
+                if "sensitive" in opts:
+                    platform_options["x_sensitive"] = opts["sensitive"].isChecked()
+                if "ai" in opts:
+                    platform_options["x_ai"] = opts["ai"].isChecked()
+                if "premium" in opts:
+                    platform_options["x_premium"] = opts["premium"].isChecked()
+                    platform_options["x_char_limit"] = 25000 if opts["premium"].isChecked() else 280
+                if "policy" in opts:
+                    platform_options["x_over_limit_policy"] = opts["policy"].currentData()
+
+            if "deviantart" in self.platform_controls:
+                opts = self.platform_controls["deviantart"]["options"]
+                if "mature" in opts:
+                    txt = opts["mature"].currentText().lower()
+                    if "moderate" in txt:
+                        platform_options["deviantart_mature"] = "moderate"
+                    elif "none" in txt:
+                        platform_options["deviantart_mature"] = "none"
+                    else:
+                        platform_options["deviantart_mature"] = "strict"
+                if "gallery" in opts:
+                    platform_options["deviantart_gallery"] = get_da_gallery_from_widget(opts["gallery"])
+                if "ai" in opts:
+                    platform_options["deviantart_ai"] = opts["ai"].isChecked()
+                if "keep_preset" in opts:
+                    platform_options["deviantart_keep_preset_description"] = opts["keep_preset"].isChecked()
                 else:
-                    platform_options["patreon_visibility"] = "patrons"
-            if "ai" in opts:
-                platform_options["patreon_ai"] = opts["ai"].isChecked()
+                    platform_options["deviantart_keep_preset_description"] = self.config.get("defaults", {}).get("deviantart_keep_preset_description", True)
+                platform_options["deviantart_max_images_per_deviation"] = da_limit_val
 
-        if "kofi" in self.platform_controls:
-            opts = self.platform_controls["kofi"]["options"]
-            if "visibility" in opts:
-                txt = opts["visibility"].currentText().lower()
-                if "everyone" in txt or "公开" in txt or "所有" in txt:
-                    platform_options["kofi_visibility"] = "everyone"
-                else:
-                    platform_options["kofi_visibility"] = "supporters"
-            if "ai" in opts:
-                platform_options["kofi_ai"] = opts["ai"].isChecked()
+            if "civitai" in self.platform_controls:
+                opts = self.platform_controls["civitai"]["options"]
+                if "channel" in opts:
+                    civitai_channel_val = opts["channel"].currentData() or civitai_channel_val
+                if "censor" in opts:
+                    platform_options["civitai_censor"] = opts["censor"].isChecked()
+            platform_options["civitai_max_images_per_post"] = civitai_limit_val
+            platform_options["civitai_resources"] = civitai_res_val
+            platform_options["civitai_resources_scope"] = civitai_scope_val
+            platform_options["civitai_tool"] = civitai_tool_val
+            platform_options["civitai_channel"] = civitai_channel_val
+            platform_options["x_video_paths"] = {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v}
 
-        if "bluesky" in self.platform_controls:
-            opts = self.platform_controls["bluesky"]["options"]
-            if "label" in opts:
-                platform_options["bluesky_label"] = opts["label"].currentData()
-            if "ai_hashtags" in opts:
-                platform_options["bluesky_ai_hashtags"] = opts["ai_hashtags"].isChecked()
-            if "censor" in opts:
-                platform_options["bluesky_censor"] = opts["censor"].isChecked()
-            if "policy" in opts:
-                platform_options["bluesky_over_limit_policy"] = opts["policy"].currentData()
+            if "patreon" in self.platform_controls:
+                opts = self.platform_controls["patreon"]["options"]
+                if "visibility" in opts:
+                    txt = opts["visibility"].currentText().lower()
+                    if "public" in txt or "公开" in txt:
+                        platform_options["patreon_visibility"] = "public"
+                    elif "tiers" in txt or "档位" in txt:
+                        platform_options["patreon_visibility"] = "tiers"
+                    else:
+                        platform_options["patreon_visibility"] = "patrons"
+                if "ai" in opts:
+                    platform_options["patreon_ai"] = opts["ai"].isChecked()
+
+            if "kofi" in self.platform_controls:
+                opts = self.platform_controls["kofi"]["options"]
+                if "visibility" in opts:
+                    txt = opts["visibility"].currentText().lower()
+                    if "everyone" in txt or "公开" in txt or "所有" in txt:
+                        platform_options["kofi_visibility"] = "everyone"
+                    else:
+                        platform_options["kofi_visibility"] = "supporters"
+                if "ai" in opts:
+                    platform_options["kofi_ai"] = opts["ai"].isChecked()
+
+            if "bluesky" in self.platform_controls:
+                opts = self.platform_controls["bluesky"]["options"]
+                if "label" in opts:
+                    platform_options["bluesky_label"] = opts["label"].currentData()
+                if "ai_hashtags" in opts:
+                    platform_options["bluesky_ai_hashtags"] = opts["ai_hashtags"].isChecked()
+                if "censor" in opts:
+                    platform_options["bluesky_censor"] = opts["censor"].isChecked()
+                if "policy" in opts:
+                    platform_options["bluesky_over_limit_policy"] = opts["policy"].currentData()
 
         # 针对 X (Twitter) 进行字数超限决策检查
         if scheduled_snapshot and "short_text" in scheduled_snapshot:
@@ -8507,9 +8532,6 @@ class MainWindow(QMainWindow):
             box_text = self.x_preview_text_edit.toPlainText().strip() if hasattr(self, "x_preview_text_edit") else ""
 
         is_x_selected = any(d.name == "x_twitter" for d in selected)
-        title_val = self.title_input.text().strip()
-        desc_val = self._get_description_text().strip()
-        tags_val = split_and_normalize_tags(self.tags_input.toPlainText()) if hasattr(self, "tags_input") else []
         if box_text:
             x_count = calculate_x_char_count(box_text)
         else:
@@ -8615,8 +8637,8 @@ class MainWindow(QMainWindow):
                     bluesky_images = bluesky_images[:4]
 
         payload = {
-            "title": self.title_input.text().strip(),
-            "description": self._get_description_text().strip(),
+            "title": title_val,
+            "description": desc_val,
             "tags": tags,
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
@@ -8635,10 +8657,10 @@ class MainWindow(QMainWindow):
             "civitai_resources": civitai_res_val,
             "civitai_resources_scope": civitai_scope_val,
             "civitai_tool": civitai_tool_val,
-            "x_video_paths": {str(k): str(v) for k, v in getattr(self, "x_video_paths", {}).items() if v},
+            "x_video_paths": {str(k): str(v) for k, v in (x_video_paths_source or {}).items() if v},
             "raw_images": raw_images,           # 原始未处理原图列表备用
-            "is_nsfw": self.nsfw_checkbox.isChecked(),
-            "is_ai": self.ai_checkbox.isChecked(),
+            "is_nsfw": is_nsfw,
+            "is_ai": is_ai,
             "use_da_post_link_for_traffic": self.config.get("defaults", {}).get(
                 "use_da_post_link_for_traffic",
                 self.config.get("use_da_post_link_for_traffic", True)
@@ -9216,9 +9238,26 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"[ScheduledPublish] 启动过期检查提示: {e}")
 
+    def _is_any_publish_busy(self) -> bool:
+        """检查当前是否有主发布、Tab B 发布、定时发布或公开波后台线程正在运行"""
+        if getattr(self, "_is_scheduled_task_running", False):
+            return True
+        if getattr(self, "_is_delayed_wave_running", False):
+            return True
+        t_main = getattr(self, "thread", None)
+        if isinstance(t_main, QThread) and t_main.isRunning():
+            return True
+        t_cur = getattr(self, "_current_publish_thread", None)
+        if isinstance(t_cur, QThread) and t_cur.isRunning():
+            return True
+        t_wave = getattr(self, "_delayed_wave_worker_thread", None)
+        if isinstance(t_wave, QThread) and t_wave.isRunning():
+            return True
+        return False
+
     def _poll_scheduled_tasks(self):
         # 6. 并发冲突: 触发时若正有发布在跑 -> 排队等当前发布结束
-        if getattr(self, "_is_scheduled_task_running", False) or (isinstance(getattr(self, "thread", None), QThread) and self.thread.isRunning()):
+        if self._is_any_publish_busy():
             return
 
         task = self.schedule_manager.get_next_ready_task()
@@ -9255,14 +9294,33 @@ class MainWindow(QMainWindow):
             manager=self.delayed_wave_manager,
             dispatchers_factory=lambda: self.dispatchers,
             on_item_finished=self._on_delayed_wave_item_finished,
+            config_provider=lambda: self.config,
+            censor_engine=self.censor_engine,
+            watermark_engine=self.watermark_engine,
+            history_manager=self.history_manager,
         )
         self._delayed_wave_timer = QTimer(self)
         self._delayed_wave_timer.setInterval(3600 * 1000)  # 60 分钟轮询一次
         self._delayed_wave_timer.timeout.connect(self._poll_delayed_wave_queue)
         self._delayed_wave_timer.start()
 
+        self._refresh_queue_btn_alert_style()
         # 启动后扫描一遍队列 (1.5秒后防抖启动，不阻塞UI渲染)
-        QTimer.singleShot(1500, self._poll_delayed_wave_queue)
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            QTimer.singleShot(1500, self._poll_delayed_wave_queue)
+
+    def _refresh_queue_btn_alert_style(self):
+        """根据队列中是否存在失败项动态更新或恢复 queue_btn 告警样式"""
+        if not hasattr(self, "queue_btn") or not self.queue_btn:
+            return
+        if not self.delayed_wave_manager:
+            self.queue_btn.setStyleSheet("")
+            return
+        has_failed = any(it.status == "failed" for it in self.delayed_wave_manager.get_items())
+        if has_failed:
+            self.queue_btn.setStyleSheet("background-color: #991b1b; color: #ffffff; font-weight: bold;")
+        else:
+            self.queue_btn.setStyleSheet("")
 
     def _open_delayed_queue_dialog(self):
         """打开延迟公开波管理窗口"""
@@ -9272,19 +9330,38 @@ class MainWindow(QMainWindow):
             manager=self.delayed_wave_manager,
             executor=self.delayed_wave_executor,
             parent=self,
+            is_busy_callback=self._is_any_publish_busy,
         )
+        dlg.queue_updated_signal.connect(self._refresh_queue_btn_alert_style)
         dlg.exec_()
+        self._refresh_queue_btn_alert_style()
 
     def _poll_delayed_wave_queue(self):
-        """定时轮询或启动扫描到期公开波"""
-        if not self.delayed_wave_executor:
+        """定时轮询或启动扫描到期公开波 (后台线程 + 繁忙互斥)"""
+        if not self.delayed_wave_executor or not self.delayed_wave_manager:
             return
-        try:
-            cnt = self.delayed_wave_executor.process_due_items()
+        if self._is_any_publish_busy():
+            logger.info("[DelayedWave] 检测到主发布或定时发布正在运行，本次公开波执行顺延")
+            return
+        due_items = self.delayed_wave_manager.get_due_items()
+        if not due_items:
+            return
+        self._is_delayed_wave_running = True
+        worker = DelayedWaveWorkerThread(
+            executor=self.delayed_wave_executor,
+            mode="poll",
+            parent=self,
+        )
+        self._delayed_wave_worker_thread = worker
+
+        def _on_poll_done(cnt: int):
+            self._is_delayed_wave_running = False
+            self._refresh_queue_btn_alert_style()
             if cnt > 0:
-                logger.info(f"[DelayedWave] 自动轮询处理了 {cnt} 个公开波任务")
-        except Exception as e:
-            logger.error(f"[DelayedWave] 轮询执行公开波队列异常: {e}")
+                logger.info(f"[DelayedWave] 自动轮询后台线程处理了 {cnt} 个公开波任务")
+
+        worker.poll_finished_signal.connect(_on_poll_done)
+        worker.start()
 
     def _on_delayed_wave_item_finished(self, item: DelayedQueueItem, all_success: bool):
         """单个公开波任务完成回调通知"""
@@ -9292,8 +9369,7 @@ class MainWindow(QMainWindow):
             self.notify(f"✅ 延迟公开波全平台发布完成: {item.title}", level="info")
         else:
             self.notify(f"⚠️ 延迟公开波部分平台失败: {item.title} ({item.last_error})", level="error")
-            if hasattr(self, "queue_btn") and self.queue_btn:
-                self.queue_btn.setStyleSheet("background-color: #991b1b; color: #ffffff; font-weight: bold;")
+        self._refresh_queue_btn_alert_style()
 
     def _update_delayed_wave_ui(self):
         """配置变更后动态切换标签页与按钮显示状态"""
@@ -9544,7 +9620,11 @@ class MainWindow(QMainWindow):
                 self.tab_b_img_list.addItem(item)
 
     def _start_tab_b_publishing(self):
-        """标签页 B 发布流程: 仅发 Patreon，成功后登记延迟公开波"""
+        """标签页 B 发布流程: 仅发 Patreon，成功后登记延迟公开波 (带防重入守卫与预告图 fail-closed)"""
+        if self._is_any_publish_busy():
+            self.notify("⚠️ 当前已有发布任务正在运行中，请稍候...", level="warning")
+            return
+
         title = self.tab_b_title_input.text().strip()
         if not title:
             self.notify("⚠️ 作品标题不能为空，请先在标题栏填写标题", level="error")
@@ -9565,7 +9645,10 @@ class MainWindow(QMainWindow):
                 self.notify(f"⚠️ 附件门禁拦截: 导入素材必须是母版本体，严禁使用下游渲染件 ({Path(mi).name})", level="error")
                 return
 
-        desc = self.tab_b_desc_input.toPlainText()
+        if hasattr(self, "tab_b_publish_btn") and self.tab_b_publish_btn:
+            self.tab_b_publish_btn.setEnabled(False)
+
+        desc = self._get_description_text(self.tab_b_desc_input).strip()
         raw_tags = self.tab_b_tags_input.text().strip()
         tags = [t.strip().lstrip("#") for t in raw_tags.replace("，", ",").split(",") if t.strip().lstrip("#")]
         is_nsfw = self.tab_b_nsfw_cb.isChecked()
@@ -9576,31 +9659,86 @@ class MainWindow(QMainWindow):
 
         self.notify("正在准备 Patreon 专属素材 (预告图「公开安全」打码与 ×0.5 降档)...", level="info")
 
-        # 1. 预告图 (Hero media, 主图 images[0]): 打码版 + ×0.5 降档
+        # 1. 预告图 (Hero media, 主图 images[0]): 打码版 + ×0.5 降档 (严格 fail-closed: 任何打码或写出失败立即中止，严禁回退未打码原图)
         first_img = master_images[0]
-        ext = Path(first_img).suffix.lstrip(".").lower()
+        is_first_gif = first_img.lower().endswith(".gif")
+        ext = "gif" if is_first_gif else Path(first_img).suffix.lstrip(".").lower()
         if ext not in ("jpg", "jpeg", "png", "webp", "gif"):
             ext = "jpg"
 
         teaser_censor_on = self.tab_b_censor_cb.isChecked()
         teaser_out = CACHE_DIR / f"{safe_title}_0_pat_teaser.{ext}"
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        if teaser_censor_on:
-            try:
-                # 使用「公开安全」独立预设打码
-                censored_bgr, _ = self.censor_engine.apply_censor(
-                    first_img,
-                    mode="public_safe",
-                )
+        try:
+            if teaser_censor_on:
                 tmp_censor = CACHE_DIR / f"{safe_title}_0_pat_safe_tmp.{ext}"
-                cv2.imwrite(str(tmp_censor), censored_bgr)
-                # 降档 ×0.5
+                if tmp_censor.exists():
+                    tmp_censor.unlink(missing_ok=True)
+                if teaser_out.exists():
+                    teaser_out.unlink(missing_ok=True)
+
+                style, _, _ = self._get_current_censor_params()
+                censor_mosaic = self._get_censor_mosaic_size()
+                censor_blur = self._get_censor_blur_ksize()
+                censor_opacity = self._get_censor_opacity()
+
+                if is_first_gif:
+                    # GIF 首图走 GIF 逐帧打码引擎 (与 A 页 GIF 打码同实现，严禁走 cv2.imwrite)
+                    with Image.open(first_img) as im_g:
+                        gw, gh = im_g.size
+                    safe_boxes = self._get_effective_censor_boxes(
+                        first_img,
+                        orig_w=gw,
+                        orig_h=gh,
+                        mode="public_safe",
+                        ratio=None,
+                    )
+                    c_params = {
+                        "enabled": True,
+                        "style": style,
+                        "mode": "public_safe",
+                        "boxes": safe_boxes,
+                        "mosaic_size": censor_mosaic,
+                        "blur_ksize": censor_blur,
+                        "opacity": censor_opacity,
+                    }
+                    render_composite_gif_frames(first_img, tmp_censor, censor_params=c_params, wm_params=None, watermark_engine=self.watermark_engine)
+                else:
+                    censored_bgr, _ = self.censor_engine.apply_censor(
+                        first_img,
+                        style=style,
+                        mode="public_safe",
+                        mosaic_size=censor_mosaic,
+                        blur_ksize=censor_blur,
+                        opacity=censor_opacity,
+                    )
+                    if censored_bgr is None:
+                        raise RuntimeError("CensorEngine 返回空图像")
+                    ok_write = cv2.imwrite(str(tmp_censor), censored_bgr)
+                    if not ok_write:
+                        raise RuntimeError(f"写出打码临时图失败: {tmp_censor}")
+
+                if not tmp_censor.exists() or tmp_censor.stat().st_size == 0:
+                    raise RuntimeError(f"打码产物未生成或大小为 0: {tmp_censor}")
+
                 downscale_image_half(tmp_censor, teaser_out)
-            except Exception as ce_err:
-                logger.warning(f"[Tab B] 预告图公开安全打码异常: {ce_err}，直接降档")
+                if not teaser_out.exists() or teaser_out.stat().st_size == 0:
+                    raise RuntimeError(f"预告图降档产物未生成或大小为 0: {teaser_out}")
+            else:
+                if teaser_out.exists():
+                    teaser_out.unlink(missing_ok=True)
                 downscale_image_half(first_img, teaser_out)
-        else:
-            downscale_image_half(first_img, teaser_out)
+                if not teaser_out.exists() or teaser_out.stat().st_size == 0:
+                    raise RuntimeError(f"预告图降档产物未生成或大小为 0: {teaser_out}")
+        except Exception as ce_err:
+            if hasattr(self, "tab_b_publish_btn") and self.tab_b_publish_btn:
+                self.tab_b_publish_btn.setEnabled(True)
+            err_msg = f"Patreon 预告图公开安全打码或降档失败，已中止本次发布 (严禁回退未打码原图): {ce_err}"
+            logger.error(f"[Tab B] {err_msg}")
+            self.notify(f"⚠️ {err_msg}", level="error")
+            QMessageBox.critical(self, "预告图处理失败 (已阻断发布)", err_msg)
+            return
 
         # 2. 付费墙之下展示图 (images[1..N]): 无码全尺寸 (若有水印则加水印)
         pat_display_images = [str(teaser_out)]
@@ -9632,6 +9770,8 @@ class MainWindow(QMainWindow):
         # 4. 构建 Patreon 单发布 Payload
         pat_disp = next((d for d in self.dispatchers if d.name == "patreon"), None)
         if not pat_disp:
+            if hasattr(self, "tab_b_publish_btn") and self.tab_b_publish_btn:
+                self.tab_b_publish_btn.setEnabled(True)
             self.notify("⚠️ 未找到 Patreon 分发器，无法发布", level="error")
             return
 
@@ -9659,6 +9799,8 @@ class MainWindow(QMainWindow):
         thread.progress_signal.connect(self._on_progress)
 
         def _on_tab_b_done(results):
+            if hasattr(self, "tab_b_publish_btn") and self.tab_b_publish_btn:
+                self.tab_b_publish_btn.setEnabled(True)
             pat_res = results.get("patreon")
             success = pat_res[0] if (pat_res and isinstance(pat_res, tuple)) else False
             msg = pat_res[1] if (pat_res and isinstance(pat_res, tuple) and len(pat_res) > 1) else str(pat_res)

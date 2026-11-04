@@ -5,11 +5,12 @@ ArtCrossPost - Delayed Public Wave Queue Dialog (延迟公开波队列管理抽�
 - 显示标题、目标平台、创建时间、到期时间、状态
 - 失败项标红并展示具体平台错误原因
 - 提供「立即触发」、「修改时间」、「取消」、「重试失败平台」操作
+- 立即发与重试全部移入后台线程执行，带繁忙互斥守卫，严禁在 UI 线程同步调用 dispatcher.publish
 """
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
@@ -27,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from delayed_wave_executor import DelayedWaveExecutor
+from delayed_wave_executor import DelayedWaveExecutor, DelayedWaveWorkerThread
 from delayed_wave_manager import DelayedQueueItem, DelayedQueueManager
 
 logger = logging.getLogger("ArtCrossPost")
@@ -43,15 +44,35 @@ class DelayedQueueDialog(QDialog):
         manager: DelayedQueueManager,
         executor: Optional[DelayedWaveExecutor] = None,
         parent: Optional[QWidget] = None,
+        is_busy_callback: Optional[Callable[[], bool]] = None,
     ):
         super().__init__(parent)
         self.manager = manager
         self.executor = executor
+        self._is_busy_callback = is_busy_callback
+        self._worker_thread: Optional[DelayedWaveWorkerThread] = None
         self.setWindowTitle("⏳ 延迟公开波队列管理 (Delayed Public Wave)")
         self.resize(880, 520)
         self.setMinimumSize(720, 400)
         self._init_ui()
         self.refresh_table()
+
+    def _is_busy(self) -> bool:
+        if self._worker_thread is not None and self._worker_thread.isRunning():
+            return True
+        if self._is_busy_callback is not None:
+            try:
+                if self._is_busy_callback():
+                    return True
+            except Exception:
+                pass
+        p = self.parent()
+        if p is not None and hasattr(p, "_is_any_publish_busy"):
+            try:
+                return bool(p._is_any_publish_busy())
+            except Exception:
+                pass
+        return False
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -136,6 +157,7 @@ class DelayedQueueDialog(QDialog):
 
         pending_cnt = 0
         failed_cnt = 0
+        running_busy = self._worker_thread is not None and self._worker_thread.isRunning()
 
         for row, it in enumerate(items):
             # 1. 标题
@@ -204,6 +226,7 @@ class DelayedQueueDialog(QDialog):
                 trig_btn = QPushButton("⚡ 立即发")
                 trig_btn.setProperty("fontRole", "small")
                 trig_btn.setStyleSheet("padding: 2px 6px;")
+                trig_btn.setEnabled(not running_busy)
                 trig_btn.clicked.connect(lambda _, item_id=it.id: self._on_trigger_now(item_id))
                 action_layout.addWidget(trig_btn)
 
@@ -211,6 +234,7 @@ class DelayedQueueDialog(QDialog):
                 time_btn = QPushButton("⏰ 改时间")
                 time_btn.setProperty("fontRole", "small")
                 time_btn.setStyleSheet("padding: 2px 6px;")
+                time_btn.setEnabled(not running_busy)
                 time_btn.clicked.connect(lambda _, item_id=it.id, cur_due=it.due_at: self._on_change_time(item_id, cur_due))
                 action_layout.addWidget(time_btn)
 
@@ -218,6 +242,7 @@ class DelayedQueueDialog(QDialog):
                 cancel_btn = QPushButton("✕ 取消")
                 cancel_btn.setProperty("fontRole", "small")
                 cancel_btn.setStyleSheet("padding: 2px 6px; color: #f87171;")
+                cancel_btn.setEnabled(not running_busy)
                 cancel_btn.clicked.connect(lambda _, item_id=it.id: self._on_cancel(item_id))
                 action_layout.addWidget(cancel_btn)
 
@@ -226,6 +251,7 @@ class DelayedQueueDialog(QDialog):
                 retry_btn = QPushButton("🔄 重试失败平台")
                 retry_btn.setProperty("fontRole", "small")
                 retry_btn.setStyleSheet("padding: 2px 6px; background-color: #991b1b; color: #fef2f2;")
+                retry_btn.setEnabled(not running_busy)
                 retry_btn.clicked.connect(lambda _, item_id=it.id: self._on_retry_failed(item_id))
                 action_layout.addWidget(retry_btn)
 
@@ -233,8 +259,52 @@ class DelayedQueueDialog(QDialog):
 
         self.summary_lbl.setText(f"总计: {len(items)} 项 | 待发: {pending_cnt} 项 | 异常: {failed_cnt} 项")
 
+    def _run_item_in_background(self, item: DelayedQueueItem, only_failed: bool = False):
+        """在后台线程中运行指定队列项，禁止在 UI 线程同步调用 dispatcher.publish"""
+        if not self.executor:
+            QMessageBox.warning(self, "执行器未就绪", "后台执行器未初始化")
+            return
+
+        if self._is_busy():
+            logger.info("[DelayedWave] 检测到主发布或定时任务正在运行，拒绝并发执行公开波任务")
+            QMessageBox.warning(self, "发布通道繁忙", "当前已有主发布、定时发布或公开波任务正在执行中，请稍候再试。")
+            return
+
+        parent_win = self.parent()
+        if parent_win is not None and hasattr(parent_win, "_is_delayed_wave_running"):
+            parent_win._is_delayed_wave_running = True
+
+        worker = DelayedWaveWorkerThread(
+            executor=self.executor,
+            mode="single",
+            item=item,
+            only_failed=only_failed,
+            parent=self,
+        )
+        self._worker_thread = worker
+
+        def _on_done(finished_item, ok: bool, errors: dict):
+            if parent_win is not None and hasattr(parent_win, "_is_delayed_wave_running"):
+                parent_win._is_delayed_wave_running = False
+            self.refresh_table()
+            self.queue_updated_signal.emit()
+            if only_failed:
+                if ok:
+                    QMessageBox.information(self, "重试成功", "失败平台已全部补发成功！")
+                else:
+                    QMessageBox.warning(self, "重试完成", f"部分平台重试后依然失败:\n{errors}")
+            else:
+                if ok:
+                    QMessageBox.information(self, "发布成功", f"作品「{finished_item.title}」已全部发布成功！")
+                else:
+                    QMessageBox.warning(self, "部分平台失败", f"发布完成但存在失败平台:\n{errors}")
+
+        worker.item_finished_signal.connect(_on_done)
+        self.refresh_table()
+        worker.start()
+
     def _on_trigger_now(self, item_id: str):
-        """立即手动触发该队列项"""
+        """立即手动触发该队列项 (后台线程执行)"""
         item = next((it for it in self.manager.get_items() if it.id == item_id), None)
         if not item:
             return
@@ -249,32 +319,15 @@ class DelayedQueueDialog(QDialog):
         if ret != QMessageBox.Yes:
             return
 
-        if self.executor:
-            ok, errors = self.executor.execute_item(item)
-            if ok:
-                QMessageBox.information(self, "发布成功", f"作品「{item.title}」已全部发布成功！")
-            else:
-                QMessageBox.warning(self, "部分平台失败", f"发布完成但存在失败平台:\n{errors}")
-        else:
-            QMessageBox.warning(self, "执行器未就绪", "后台执行器未初始化")
-
-        self.refresh_table()
-        self.queue_updated_signal.emit()
+        self._run_item_in_background(item, only_failed=False)
 
     def _on_retry_failed(self, item_id: str):
-        """仅重试失败的平台"""
+        """仅重试失败的平台 (后台线程执行)"""
         item = next((it for it in self.manager.get_items() if it.id == item_id), None)
         if not item:
             return
 
-        if self.executor:
-            ok, errors = self.executor.execute_item(item, only_failed=True)
-            if ok:
-                QMessageBox.information(self, "重试成功", f"失败平台已全部补发成功！")
-            else:
-                QMessageBox.warning(self, "重试完成", f"部分平台重试后依然失败:\n{errors}")
-        self.refresh_table()
-        self.queue_updated_signal.emit()
+        self._run_item_in_background(item, only_failed=True)
 
     def _on_change_time(self, item_id: str, current_due: str):
         """修改到期时间"""
