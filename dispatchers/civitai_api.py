@@ -631,13 +631,13 @@ class CivitaiApiClient:
         return int(post_id)
 
     def get_post(self, post_id: int) -> dict:
-        """调用 get_post 工具回读帖子状态 (并通过 tRPC 补充 modelVersionId 等高级字段)"""
+        """调用 get_post 工具回读帖子状态 (并通过 tRPC post.getEdit/post.get 补充 images 与 modelVersionId 等高级字段)"""
         res = self._call_mcp("tools/call", {
             "name": "get_post",
             "arguments": {"id": int(post_id)}
         })
         try:
-            trpc_url = f"https://civitai.com/api/trpc/post.get?input={json.dumps({'json': {'id': int(post_id)}})}"
+            trpc_url = f"https://civitai.com/api/trpc/post.getEdit?input={json.dumps({'json': {'id': int(post_id)}})}"
             r = self.session.get(
                 trpc_url,
                 headers={"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"},
@@ -645,11 +645,22 @@ class CivitaiApiClient:
             )
             if r.status_code == 200:
                 t_json = r.json().get("result", {}).get("data", {}).get("json", {})
+                struct = res.setdefault("result", {}).setdefault("structuredContent", {})
                 m_vid = t_json.get("modelVersionId")
                 if m_vid:
-                    res.setdefault("result", {}).setdefault("structuredContent", {})["modelVersionId"] = m_vid
+                    struct["modelVersionId"] = m_vid
+                t_images = t_json.get("images")
+                if t_images:
+                    struct["images"] = t_images
+                    struct["imageIds"] = [img.get("id") for img in t_images if img.get("id")]
+                if t_json.get("publishedAt") and not struct.get("publishedAt"):
+                    struct["publishedAt"] = t_json.get("publishedAt")
+                if t_json.get("publishedAt") and "published" not in struct:
+                    struct["published"] = True
+                if t_json.get("tags") and "tags" not in struct:
+                    struct["tags"] = t_json.get("tags")
         except Exception as e:
-            logger.debug(f"[Civitai API] tRPC 补充 modelVersionId 略过: {e}")
+            logger.debug(f"[Civitai API] tRPC 补充 post.getEdit 略过: {e}")
         return res
 
     def delete_post(self, post_id: int) -> dict:
@@ -664,24 +675,38 @@ class CivitaiApiClient:
         self,
         post_id: int,
         expected_count: Union[int, Collection[int]],
-        max_retries: int = 5,
-        delay: float = 3.0
+        max_retries: int = 10,
+        delay: float = 6.0,
+        params: Optional[dict] = None
     ) -> Tuple[bool, List[dict], str]:
         """
         轮询 REST GET /api/v1/images?postId= 核验图片数量
-        ≤5 次 × 3 秒
+        带浏览/可见性参数 (browsingLevel=31, nsfw=true, sort=Newest, period=AllTime)
+        放宽至 ≤10 次 × 6 秒
         """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json"
         }
-        url = f"{self.rest_url}?postId={post_id}"
+        query_parts = [
+            f"postId={post_id}",
+            "browsingLevel=31",
+            "nsfw=true",
+            "sort=Newest",
+            "period=AllTime"
+        ]
+        if params:
+            for k, v in params.items():
+                query_parts.append(f"{k}={v}")
+
+        url = f"{self.rest_url}?{'&'.join(query_parts)}"
 
         expected_set = {expected_count} if isinstance(expected_count, int) else set(expected_count)
         last_count = 0
         last_items = []
         for attempt in range(1, max_retries + 1):
-            time.sleep(delay)
+            if attempt > 1:
+                time.sleep(delay)
             try:
                 r = self.session.get(url, headers=headers, timeout=20)
                 if r.status_code == 200:
@@ -804,9 +829,10 @@ def publish_via_api(
 
     post_url = f"{POSTS_PAGE_URL}/{post_id}"
 
-    # 6. 建帖后成功断言链 (断言失败必须尝试 delete_post 清理并注明)
+    # 6. 建帖后成功断言链
+    # 成功以 get_post（published＋图片已绑定）为准；REST 降为参考 (≤10×6s)
     try:
-        # 断言 2: get_post 回读 published == true (仅回读可退避重试一次)
+        # 断言 1: get_post 回读 (仅回读可退避重试一次)
         gp_res = None
         try:
             gp_res = client.get_post(post_id)
@@ -818,40 +844,55 @@ def publish_via_api(
         gp_payload = gp_res.get("result", {})
         if gp_payload.get("isError"):
             clean_err = redact_api_key(gp_payload.get("content", [{}])[0].get("text", "get_post 失败"), api_key)
-            raise CivitaiAssertionError(f"get_post 回读失败: {clean_err}")
+            raise CivitaiAssertionError(f"get_post 回读失败: {clean_err} (帖子 #{post_id})")
 
         gp_struct = gp_payload.get("structuredContent") or {}
         is_published = bool(gp_struct.get("published") or gp_struct.get("publishedAt"))
         if not is_published:
-            raise CivitaiAssertionError("get_post 回读 published 状态不为 true")
+            gp_summary = f"published={gp_struct.get('published')}, publishedAt={gp_struct.get('publishedAt')}, title={gp_struct.get('title')}"
+            raise CivitaiAssertionError(f"get_post 回读 published 状态不为 true (回读摘要: {gp_summary})")
 
-        # 断言 3: REST GET /api/v1/images?postId= 轮询（≤5 次×3 秒）
-        # 区分静态图片与视频：
-        # - 静态图片：Civitai 服务端同步完成扫描，REST /api/v1/images 返回全部图片对象
-        # - 视频媒体：Civitai 需经后台异步 GPU 转码，初始处于 ingestion: Pending/Analyzing 队列，
-        #   在 MCP 建帖阶段已分配并核验对应数量的 imageIds，REST 接口在转码完成前不暴露未完成视频。
+        # 区分静态图片与视频媒体
         image_media = [m for m in uploaded_images if m.get("type") != "video"]
         video_media = [m for m in uploaded_images if m.get("type") == "video"]
+        created_ids = getattr(client, "last_created_image_ids", [])
+        bound_images = gp_struct.get("images") or gp_struct.get("imageIds") or []
+        total_bound = max(len(bound_images), len(created_ids))
+        expected_bound = len(uploaded_images)
 
-        rest_items = []
+        # 视频转码前置断言
+        if video_media:
+            if not created_ids or len(created_ids) != len(uploaded_images):
+                actual_cnt = len(created_ids) if created_ids else 0
+                raise CivitaiAssertionError(
+                    f"含视频帖子素材未在建帖时完整绑定 imageIds (预期 {len(uploaded_images)}, 实际 {actual_cnt}, 回读摘要: bound={total_bound})"
+                )
+            notes.append("视频转码已在后台排队处理")
+
+        # 断言 2: 核验图片已绑定 (Images bound)
+        if total_bound < expected_bound:
+            gp_summary = f"published={is_published}, bound_count={total_bound}/{expected_bound}, created_ids={created_ids}, gp_keys={list(gp_struct.keys())}"
+            raise CivitaiAssertionError(
+                f"get_post 回读图片未完整绑定 (预期 {expected_bound}, 实际 {total_bound}, 回读摘要: {gp_summary})"
+            )
+
+        # 断言 3: REST GET /api/v1/images?postId= 轮询降为参考 (放宽至 ≤10 次 × 6 秒，带可见性参数)
+        # REST 为 0 但 get_post 达标 → 判成功并注明「公开流暂未收录」，不得删帖；仅 get_post 不达标才失败清理
         expected_counts = {len(image_media), len(uploaded_images)} if video_media else {len(uploaded_images)}
         rest_ok, rest_items, rest_msg = client.poll_rest_images(
             post_id=post_id,
             expected_count=expected_counts,
-            max_retries=5 if image_media else 1,
-            delay=3.0 if image_media else 1.0
+            max_retries=10 if image_media else 1,
+            delay=6.0 if image_media else 1.0
         )
         if not rest_ok:
-            raise CivitaiAssertionError(rest_msg)
-
-        if video_media:
-            created_ids = getattr(client, "last_created_image_ids", [])
-            if not created_ids or len(created_ids) != len(uploaded_images):
-                actual_cnt = len(created_ids) if created_ids else 0
-                raise CivitaiAssertionError(
-                    f"含视频帖子素材未在建帖时完整绑定 imageIds (预期 {len(uploaded_images)}, 实际 {actual_cnt})"
-                )
-            notes.append("视频转码已在后台排队处理")
+            logger.info(
+                f"[Civitai API] REST 轮询未收录 ({rest_msg})，但 get_post 达标（published 且图片已绑定 {total_bound} 个），"
+                f"判定发布成功并注明「公开流暂未收录」，不删帖"
+            )
+            notes.append("公开流暂未收录")
+        else:
+            logger.info(f"[Civitai API] REST 轮询成功: {rest_msg}")
 
         # 提取回读详情
         readback_tags = set()
@@ -861,10 +902,16 @@ def publish_via_api(
                     readback_tags.add(tg["name"])
                 elif isinstance(tg, str):
                     readback_tags.add(tg)
+        if not readback_tags and gp_struct.get("tags"):
+            for tg in gp_struct.get("tags", []):
+                if isinstance(tg, dict) and "name" in tg:
+                    readback_tags.add(tg["name"])
+                elif isinstance(tg, str):
+                    readback_tags.add(tg)
 
     except Exception as assertion_err:
         clean_assert_err = redact_api_key(str(assertion_err), api_key)
-        logger.error(f"[Civitai API] 成功断言未通过: {clean_assert_err}，尝试删除清理草稿帖 #{post_id}...")
+        logger.error(f"[Civitai API] get_post 成功断言未通过: {clean_assert_err}，尝试删除清理草稿帖 #{post_id}...")
 
         cleanup_note = ""
         try:
@@ -886,13 +933,15 @@ def publish_via_api(
         )
     )
     unindexed_video_count = max(0, len(video_media) - rest_video_count)
-    verified_count = len(rest_items) + unindexed_video_count
+    verified_count = (len(rest_items) + unindexed_video_count) if rest_items else total_bound
 
     compliance: List[Dict[str, Any]] = [
         {"category": "channel", "channel": "api", "detail": "API 官方通道"},
         {"category": "post_id", "post_id": post_id, "url": post_url},
         {"category": "media_count", "uploaded": len(uploaded_images), "verified": verified_count},
     ]
+    if not rest_ok:
+        compliance.append({"category": "rest_oracle", "status": "unindexed", "detail": "公开流暂未收录"})
     if tool_note:
         compliance.append({"category": "tool_annotation", "status": "omitted", "detail": tool_note})
     if video_media:
