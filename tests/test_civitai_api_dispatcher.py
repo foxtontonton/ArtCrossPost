@@ -538,13 +538,17 @@ def test_assertion_failure_triggers_delete_post(tmp_path, monkeypatch):
     assert ok is False
     assert "成功断言未通过" in msg
     assert "published 状态不为 true" in msg
+    assert "回读摘要" in msg
     assert "已自动调用 delete_post 销毁未达标测试帖 #998877" in msg
     # 断言 delete_post 被正确调用
     assert 998877 in deleted_post_ids
 
 
-def test_rest_image_count_mismatch_triggers_delete(tmp_path, monkeypatch):
-    """REST /api/v1/images 轮询媒体数不符触发断言失败与 delete_post"""
+def test_rest_image_count_mismatch_marks_success_no_delete_when_get_post_compliant(tmp_path, monkeypatch):
+    """
+    REST 降为参考：REST 为 0 但 get_post 达标（published + 图片已绑定）
+    判成功并注明「公开流暂未收录」，不得删帖 (delete_post 不被调用)
+    """
     img = tmp_path / "img.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4")
 
@@ -569,12 +573,12 @@ def test_rest_image_count_mismatch_triggers_delete(tmp_path, monkeypatch):
             elif tool == "create_post":
                 resp._content = json_dump_bytes({
                     "jsonrpc": "2.0",
-                    "result": {"structuredContent": {"id": 112233, "published": True}}
+                    "result": {"structuredContent": {"id": 112233, "published": True, "imageIds": [101]}}
                 })
             elif tool == "get_post":
                 resp._content = json_dump_bytes({
                     "jsonrpc": "2.0",
-                    "result": {"structuredContent": {"id": 112233, "published": True, "publishedAt": "2026-10-30T12:00:00Z"}}
+                    "result": {"structuredContent": {"id": 112233, "published": True, "publishedAt": "2026-10-30T12:00:00Z", "imageIds": [101]}}
                 })
             elif tool == "delete_post":
                 deleted_post_ids.append(params.get("arguments", {}).get("id"))
@@ -585,7 +589,7 @@ def test_rest_image_count_mismatch_triggers_delete(tmp_path, monkeypatch):
         return resp
 
     def mock_get(url, headers, timeout):
-        # 模拟返回空列表，永远达不到预期数量 1
+        # 模拟返回空列表，公开流暂未收录
         resp = requests.Response()
         resp.status_code = 200
         resp._content = json_dump_bytes({"items": []})
@@ -601,9 +605,69 @@ def test_rest_image_count_mismatch_triggers_delete(tmp_path, monkeypatch):
         payload = {"title": "REST Mismatch Test", "images": [str(img)]}
         ok, msg, comp = publish_via_api(payload=payload, api_key="key")
 
+    assert ok is True
+    assert "公开流暂未收录" in msg
+    assert 112233 not in deleted_post_ids
+    assert any(c.get("status") == "unindexed" for c in comp)
+
+
+test_rest_image_count_mismatch_triggers_delete = test_rest_image_count_mismatch_marks_success_no_delete_when_get_post_compliant
+
+
+def test_get_post_unbound_images_triggers_failure_delete_and_summary(tmp_path, monkeypatch):
+    """
+    仅 get_post 不达标才失败清理，失败消息附回读摘要
+    """
+    img = tmp_path / "img.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4")
+
+    deleted_post_ids = []
+
+    def mock_post(url, headers, json, timeout):
+        resp = requests.Response()
+        resp.status_code = 200
+        method = json.get("method")
+        params = json.get("params", {})
+        if method == "initialize":
+            resp._content = b'{"jsonrpc": "2.0", "result": {}}'
+        elif method == "notifications/initialized":
+            resp._content = b'{}'
+        elif method == "tools/call":
+            tool = params.get("name")
+            if tool == "upload_image":
+                resp._content = json_dump_bytes({
+                    "jsonrpc": "2.0",
+                    "result": {"structuredContent": {"uuid": "u_1", "width": 100, "height": 100}}
+                })
+            elif tool == "create_post":
+                resp._content = json_dump_bytes({
+                    "jsonrpc": "2.0",
+                    "result": {"structuredContent": {"id": 112233, "published": True, "imageIds": []}}
+                })
+            elif tool == "get_post":
+                resp._content = json_dump_bytes({
+                    "jsonrpc": "2.0",
+                    "result": {"structuredContent": {"id": 112233, "published": True, "publishedAt": "2026-10-30T12:00:00Z", "images": []}}
+                })
+            elif tool == "delete_post":
+                deleted_post_ids.append(params.get("arguments", {}).get("id"))
+                resp._content = json_dump_bytes({
+                    "jsonrpc": "2.0",
+                    "result": {"structuredContent": {"ok": True, "id": 112233}}
+                })
+        return resp
+
+    session_mock = requests.Session()
+    monkeypatch.setattr(session_mock, "post", mock_post)
+    monkeypatch.setattr(requests, "Session", lambda: session_mock)
+
+    with patch("time.sleep", return_value=None):
+        payload = {"title": "Unbound Test", "images": [str(img)]}
+        ok, msg, comp = publish_via_api(payload=payload, api_key="key")
+
     assert ok is False
-    assert "REST 轮询" in msg
-    assert "媒体数量仍不匹配" in msg
+    assert "get_post 回读图片未完整绑定" in msg
+    assert "回读摘要" in msg
     assert 112233 in deleted_post_ids
 
 
