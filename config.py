@@ -114,6 +114,7 @@ DEFAULT_CONFIG = {
         "civitai_censor": False,          # Civitai 专属打码保护开关 (默认原图，可勾选启用打码)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
+        "patreon_attach_originals": True, # Patreon 附带原图附件开关 (默认勾选)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
         "kofi_censor": False,             # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_min_duration": 20,          # Ko-fi 发布耗时安全护栏阈值 (秒，低于此值直接判异常以防假阳性)

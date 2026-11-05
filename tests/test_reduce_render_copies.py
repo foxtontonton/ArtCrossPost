@@ -241,10 +241,11 @@ def test_static_render_minimal_set_censor_on_watermark_on(mock_main_window, tmp_
     # 核心需求 1 断言: 严禁生成 censored_clean
     assert not censored_clean_file.exists(), "必须彻底取消 censored_clean 的生成，不留重复副本"
 
-    # 验证全平台 target 分发
+    # 验证全平台 target 分发 (Patreon 统一结构: [teaser_1, hd_1])
+    pat_teaser_file = CACHE_DIR / f"{art_title}_0_pat_teaser.jpg"
     assert pld["da_images"] == [str(da_clean_file)]
     assert pld["x_images"] == [str(censored_wm_file)]
-    assert pld["patreon_images"] == [str(censored_wm_file)]
+    assert pld["patreon_images"] == [str(pat_teaser_file), str(raw_wm_file)]
     assert pld["kofi_images"] == [str(censored_wm_file)]
 
 
@@ -307,9 +308,10 @@ def test_static_render_minimal_set_censor_on_watermark_off(mock_main_window, tmp
     assert da_clean_file.exists()
     assert not censored_clean_file.exists(), "水印关时亦严禁生成冗余的 censored_clean 副本"
 
-    # Patreon / Ko-fi / X 均复用唯一的 censor_file
+    # Ko-fi / X 均复用唯一的 censor_file；Patreon 按统一结构为 [teaser_1, hd_1]
+    pat_teaser_file = CACHE_DIR / f"{art_title}_0_pat_teaser.jpg"
     assert pld["x_images"] == [str(censor_file)]
-    assert pld["patreon_images"] == [str(censor_file)]
+    assert pld["patreon_images"] == [str(pat_teaser_file), str(img_path)]
     assert pld["kofi_images"] == [str(censor_file)]
 
 
@@ -523,10 +525,12 @@ def test_gif_cross_platform_reuse_when_params_and_size_match(mock_main_window, t
     assert not x_opt_gif.exists(), "X 应复用 DA 动图，严禁重复渲染 _xopt.gif"
     assert not kofi_censor_gif.exists(), "Ko-fi 应复用 DA 动图，严禁重复渲染 _kofi_censor.gif"
 
-    # 验证 payload 中均复用了 DA 动图路径
+    # 验证 payload 中 X / Ko-fi 复用了 DA 动图路径，Patreon 为统一结构 [teaser_1, hd_1]
+    pat_teaser_gif = CACHE_DIR / f"{art_title}_0_pat_teaser.gif"
+    pat_wm_gif = CACHE_DIR / f"{art_title}_0_pat_wm.gif"
     pld = captured_payloads[0]
     assert pld["x_images"] == [str(da_render_out)]
-    assert pld["patreon_images"] == [str(da_render_out)]
+    assert pld["patreon_images"] == [str(pat_teaser_gif), str(pat_wm_gif)]
     assert pld["kofi_images"] == [str(da_render_out)]
 
 

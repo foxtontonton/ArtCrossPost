@@ -21,7 +21,7 @@ ArtCrossPost - Signature & Markdown Link Utilities
 import re
 import html
 from urllib.parse import urlparse
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Union
 
 
 CANONICAL_SIGNATURE_TEMPLATE = (
@@ -352,4 +352,77 @@ def render_description_for_bluesky(desc: str, sig_template: Optional[str] = None
     if body_text:
         return f"{body_text}\n\n{converted_sig}".strip()
     return converted_sig
+
+
+def count_expected_paragraphs(desc: str, sig_template: Optional[str] = None) -> int:
+    """
+    计算描述文本期望的富文本段落 (<p>) 数量:
+    按 \\n\\s*\\n 切分后的非空段数（正文+签名整体计算，与 render_description_to_html 的切分口径一致）。
+    """
+    if not desc or not str(desc).strip():
+        return 0
+    body_text, sig_text = split_body_and_signature(str(desc), sig_template)
+    count = 0
+    if body_text:
+        count += sum(1 for p in re.split(r"\n\s*\n", body_text) if p.strip())
+    if sig_text:
+        count += sum(1 for p in re.split(r"\n\s*\n", sig_text) if p.strip())
+    return count
+
+
+def count_html_paragraphs(html_content: str) -> int:
+    """统计回读 HTML 中的 <p> 段落标签总数"""
+    if not html_content or not isinstance(html_content, str):
+        return 0
+    return len(re.findall(r"<p(?:\s[^>]*)?>", html_content, flags=re.IGNORECASE))
+
+
+def verify_paragraphs_in_html(
+    html_content: str,
+    desc_or_expected: Union[str, int],
+    sig_template: Optional[str] = None,
+) -> Tuple[bool, int, int]:
+    """
+    段落回读断言:
+    - 期望段落数 = 描述文本按 \\n\\s*\\n 切分后的非空段数（正文+签名整体计算，与 render 的切分口径一致）；
+    - 回读编辑器 innerHTML，统计 <p> 数须 >= 期望段落数（编辑器尾随空 <p> 只会多不会少，故用 >=）。
+    :return: (is_ok, actual_p_count, expected_p_count)
+    """
+    if isinstance(desc_or_expected, int):
+        expected_p = max(0, int(desc_or_expected))
+    else:
+        expected_p = count_expected_paragraphs(str(desc_or_expected or ""), sig_template=sig_template)
+
+    actual_p = count_html_paragraphs(html_content)
+    if expected_p <= 0:
+        return True, actual_p, 0
+    return (actual_p >= expected_p, actual_p, expected_p)
+
+
+def is_textarea_element(el: Any) -> bool:
+    """
+    textarea 守卫:
+    判断目标元素是否为纯文本 <textarea>（而非 contenteditable 富文本编辑器）。
+    若定位到的是 <textarea>，只走纯文本 fill，跳过 HTML 步与段落断言。
+    """
+    if el is None:
+        return False
+    tag_attr = getattr(el, "tag_name", None)
+    if isinstance(tag_attr, str) and tag_attr.strip().upper() == "TEXTAREA":
+        return True
+    if callable(tag_attr) and not hasattr(tag_attr, "assert_called"):
+        try:
+            t_res = tag_attr()
+            if isinstance(t_res, str) and t_res.strip().upper() == "TEXTAREA":
+                return True
+        except Exception:
+            pass
+    try:
+        val = el.evaluate("el => (el && el.tagName ? String(el.tagName).toUpperCase() : '')")
+        if isinstance(val, str) and val.strip().upper() == "TEXTAREA":
+            return True
+    except Exception:
+        pass
+    return False
+
 

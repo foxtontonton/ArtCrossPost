@@ -149,6 +149,7 @@ class DelayedQueueItem:
     last_error: dict[str, str] = field(default_factory=dict)
     attempts: int = 0
     material_snapshot: dict = field(default_factory=dict)
+    result_note: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -166,6 +167,7 @@ class DelayedQueueItem:
             last_error=dict(data.get("last_error") or {}),
             attempts=int(data.get("attempts") or 0),
             material_snapshot=dict(data.get("material_snapshot") or {}),
+            result_note=str(data.get("result_note") or ""),
         )
 
 
@@ -317,6 +319,7 @@ class DelayedQueueManager:
         status: str,
         last_error: Optional[dict] = None,
         increment_attempts: bool = False,
+        result_note: Optional[str] = None,
     ) -> bool:
         """更新队列项状态并持久化；完成或取消时清理素材副本"""
         items = self.load_queue()
@@ -328,6 +331,8 @@ class DelayedQueueManager:
                     it.last_error = last_error
                 if increment_attempts:
                     it.attempts += 1
+                if result_note is not None:
+                    it.result_note = result_note
                 found = True
                 break
 

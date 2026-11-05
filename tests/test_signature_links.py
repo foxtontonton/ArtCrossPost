@@ -27,6 +27,9 @@ from signature_utils import (
     render_description_to_html,
     render_description_to_plain_text,
     verify_signature_links_in_html,
+    count_expected_paragraphs,
+    verify_paragraphs_in_html,
+    is_textarea_element,
     has_signature,
     normalize_url,
     convert_signature_links_for_bluesky,
@@ -745,5 +748,337 @@ def test_bluesky_description_rendering_preserves_body_brackets():
     assert len(link_uris) == 6
     for _, u in CANONICAL_SIGNATURE_LINKS:
         assert u in link_uris
+
+
+# ==================== 富文本描述段落保真 (无签名 HTML 通道 / 段落断言 / textarea 守卫) ====================
+
+def test_paragraph_assertion_function_unit():
+    """
+    段落断言函数单测:
+    - 期望段数计算与 \\n\\s*\\n 切分一致（含无签名多段、含单换行段内 <br>、含签名段）
+    - 多 <p> 的回读 HTML (>= 期望段数，含编辑器尾随空 <p>) 通过
+    - 塌陷成单个 <p> 的回读 HTML 必须判失败
+    """
+    # 1. 无签名多段描述 + 段内单换行 (<br>)
+    unsigned_desc = "Paragraph 1 line A\nParagraph 1 line B\n\nParagraph 2\n   \nParagraph 3"
+    assert count_expected_paragraphs(unsigned_desc) == 3
+
+    rendered_unsigned = render_description_to_html(unsigned_desc)
+    ok, actual_p, expected_p = verify_paragraphs_in_html(rendered_unsigned, unsigned_desc)
+    assert ok is True
+    assert actual_p == 3
+    assert expected_p == 3
+    assert "<br>" in rendered_unsigned
+
+    # 编辑器尾随空 <p></p> (4 >= 3) 同样通过
+    ok_extra, actual_extra, _ = verify_paragraphs_in_html(rendered_unsigned + "<p><br></p>", unsigned_desc)
+    assert ok_extra is True
+    assert actual_extra == 4
+
+    # 塌陷成单个 <p> 必须判失败
+    collapsed_html = "<p>Paragraph 1 line A Paragraph 1 line B Paragraph 2 Paragraph 3</p>"
+    ok_col, actual_col, exp_col = verify_paragraphs_in_html(collapsed_html, unsigned_desc)
+    assert ok_col is False
+    assert actual_col == 1
+    assert exp_col == 3
+
+    # 2. 含签名段的整体段落计算
+    signed_desc = f"Story Chapter 1\n\nStory Chapter 2\n\n{CANONICAL_SIGNATURE_TEMPLATE}"
+    expected_signed = count_expected_paragraphs(signed_desc)
+    assert expected_signed == 2 + 9  # 2 正文段 + 9 签名段 = 11 段
+    rendered_signed = render_description_to_html(signed_desc)
+    ok_sig, act_sig, exp_sig = verify_paragraphs_in_html(rendered_signed, signed_desc)
+    assert ok_sig is True
+    assert act_sig == 11
+    assert exp_sig == 11
+
+    ok_sig_col, act_sig_col, _ = verify_paragraphs_in_html("<p>All collapsed</p>", signed_desc)
+    assert ok_sig_col is False
+    assert act_sig_col == 1
+
+
+def test_unsigned_description_triggers_html_channel_and_paragraph_readback_all_three_dispatchers(tmp_path, monkeypatch):
+    """
+    门控决策与段落回读集成单测:
+    - 无签名多段描述在 DA / Civitai (浏览器通道) / Patreon 三处均无条件触发 HTML 注入通道
+    - 当编辑器回读 <p> 数量达标时发布成功
+    - 当编辑器把多段塌陷成单个 <p> 时，三家均中止发布并响亮报错（DA 保留草稿、Civitai 删孤儿草稿、Patreon 关会话）
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+    unsigned_story = "Opening paragraph of the story.\n\nSecond paragraph with tension.\n\nThird concluding paragraph."
+    assert has_signature(unsigned_story) is False
+    good_html = render_description_to_html(unsigned_story)
+    collapsed_html = "<p>Opening paragraph of the story. Second paragraph with tension. Third concluding paragraph.</p>"
+
+    img_file = tmp_path / "story_art.png"
+    img_file.write_bytes(b"dummy")
+
+    # ---------------- 1. DeviantArt ----------------
+    da_disp = DeviantArtDispatcher(tmp_path)
+    da_disp.safe_goto = MagicMock()
+    da_disp.assert_attached = MagicMock(return_value=(True, ""))
+    da_disp.assert_field_value = MagicMock(return_value=(True, ""))
+    da_disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    da_disp.assert_submitted = MagicMock(return_value=(True, ""))
+
+    da_html_injected = []
+    def make_da_area(readback_val):
+        m = MagicMock()
+        def _eval(script, *args):
+            s = str(script)
+            if "insertHTML" in s or "setContent" in s:
+                da_html_injected.append(args[0] if args else "")
+                return "execCommand"
+            if "innerHTML" in s:
+                return readback_val
+            if "innerText" in s or "textContent" in s:
+                return ""
+            return "DIV"
+        m.evaluate.side_effect = _eval
+        return m
+
+    mock_da_area_ok = make_da_area(good_html)
+    mock_da_page = MagicMock()
+    mock_da_page.url = "https://www.deviantart.com/art/story-1"
+    mock_da_submit = MagicMock()
+    mock_da_submit.inner_text.return_value = "Submit"
+    mock_da_submit.is_enabled.return_value = True
+    mock_da_submit.get_attribute.return_value = "false"
+    mock_da_fi = MagicMock()
+    mock_da_page.query_selector.side_effect = lambda sel: (
+        mock_da_fi if "input[type='file']" in sel else
+        mock_da_submit if ("Submit" in sel or "submit" in sel) else
+        mock_da_area_ok if ("description" in sel or "tiptap" in sel) else MagicMock()
+    )
+    mock_da_page.query_selector_all.side_effect = lambda sel: [mock_da_submit] if "submit" in sel.lower() or "button" in sel.lower() else [mock_da_fi]
+    mock_da_page.evaluate.return_value = {"count": 1, "llama": False}
+    mock_da_ctx = MagicMock()
+    mock_studio = MagicMock()
+    mock_studio.inner_text.return_value = "No drafts"
+    mock_studio.url = "https://www.deviantart.com/studio"
+    mock_da_ctx.new_page.return_value = mock_studio
+
+    ok_da, msg_da = da_disp._submit_deviation(
+        mock_da_page, mock_da_ctx, [str(img_file)], "Story", unsigned_story,
+        [], False, "strict", False, "", [], keep_preset_description=False
+    )
+    assert ok_da is True
+    assert len(da_html_injected) == 1
+    assert da_html_injected[0] == good_html
+
+    # DA 段落塌陷 -> 中止且不点 Submit
+    mock_da_area_bad = make_da_area(collapsed_html)
+    mock_da_submit_bad = MagicMock()
+    mock_da_page.query_selector.side_effect = lambda sel: (
+        mock_da_fi if "input[type='file']" in sel else
+        mock_da_submit_bad if ("Submit" in sel or "submit" in sel) else
+        mock_da_area_bad if ("description" in sel or "tiptap" in sel) else MagicMock()
+    )
+    ok_da_bad, msg_da_bad = da_disp._submit_deviation(
+        mock_da_page, mock_da_ctx, [str(img_file)], "Story", unsigned_story,
+        [], False, "strict", False, "", [], keep_preset_description=False
+    )
+    assert ok_da_bad is False
+    assert "段落保真断言失败" in msg_da_bad
+    mock_da_submit_bad.click.assert_not_called()
+
+    # ---------------- 2. Civitai (浏览器通道) ----------------
+    civ_disp = CivitaiDispatcher(tmp_path)
+    civ_html_injected = []
+    def make_civ_box(readback_val):
+        m = MagicMock()
+        def _eval(script, *args):
+            s = str(script)
+            if "insertHTML" in s or "setContent" in s:
+                civ_html_injected.append(args[0] if args else "")
+                return "execCommand"
+            if "innerHTML" in s:
+                return readback_val
+            return "DIV"
+        m.evaluate.side_effect = _eval
+        return m
+
+    mock_civ_box_ok = make_civ_box(good_html)
+    mock_civ_page = MagicMock()
+    mock_civ_page.url = "https://civitai.com/posts/998877/edit"
+    mock_civ_pub = MagicMock()
+    mock_civ_pub.is_disabled.return_value = False
+    mock_civ_view = MagicMock()
+    mock_civ_view.is_visible.return_value = True
+    mock_civ_page.query_selector.side_effect = lambda sel: (
+        mock_civ_box_ok if "ProseMirror" in sel else
+        mock_civ_pub if "Publish" in sel else
+        mock_civ_view if "View Post" in sel else MagicMock()
+    )
+    mock_civ_ctx = MagicMock()
+    mock_civ_ctx.pages = [mock_civ_page]
+    civ_payload = {
+        "title": "Civ Story",
+        "description": unsigned_story,
+        "tags": [],
+        "civitai_images": [str(img_file)],
+        "platform_options": {"civitai_channel": "browser"},
+    }
+    with patch.object(civ_disp, "create_persistent_stealth_context", return_value=mock_civ_ctx), \
+         patch.object(civ_disp, "safe_goto"), \
+         patch.object(civ_disp, "delete_orphan_draft") as mock_civ_del:
+        ok_civ, _, _ = civ_disp.publish(civ_payload)
+    assert ok_civ is True
+    assert len(civ_html_injected) == 1
+    assert civ_html_injected[0] == good_html
+    mock_civ_del.assert_not_called()
+
+    # Civitai 段落塌陷 -> 删孤儿草稿并中止
+    mock_civ_box_bad = make_civ_box(collapsed_html)
+    mock_civ_pub_bad = MagicMock()
+    mock_civ_pub_bad.is_disabled.return_value = False
+    mock_civ_page.query_selector.side_effect = lambda sel: (
+        mock_civ_box_bad if "ProseMirror" in sel else
+        mock_civ_pub_bad if "Publish" in sel else MagicMock()
+    )
+    with patch.object(civ_disp, "create_persistent_stealth_context", return_value=mock_civ_ctx), \
+         patch.object(civ_disp, "safe_goto"), \
+         patch.object(civ_disp, "delete_orphan_draft") as mock_civ_del_bad:
+        ok_civ_bad, msg_civ_bad, _ = civ_disp.publish(civ_payload)
+    assert ok_civ_bad is False
+    assert "段落保真断言失败" in msg_civ_bad
+    mock_civ_pub_bad.click.assert_not_called()
+    mock_civ_del_bad.assert_called_once_with(mock_civ_page, "998877")
+
+    # ---------------- 3. Patreon ----------------
+    pat_disp = PatreonDispatcher(tmp_path)
+    pat_disp.get_cookies = MagicMock(return_value=[{"name": "session_id", "value": "xyz"}])
+    pat_disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path))
+    pat_disp.safe_goto = MagicMock()
+    pat_disp.clean_context_tabs = MagicMock()
+    pat_disp.apply_stealth = MagicMock()
+    pat_disp.close_login_session = MagicMock()
+    pat_disp.assert_field_value = MagicMock(return_value=(True, ""))
+    pat_disp.assert_attached = MagicMock(return_value=(True, ""))
+    pat_disp.assert_submitted = MagicMock(return_value=(True, ""))
+    pat_disp._count_patreon_gallery_images = MagicMock(return_value=1)
+
+    pat_html_injected = []
+    def make_pat_box(readback_val):
+        m = MagicMock()
+        def _eval(script, *args):
+            s = str(script)
+            if "insertHTML" in s or "setContent" in s:
+                pat_html_injected.append(args[0] if args else "")
+                return "execCommand"
+            if "innerHTML" in s:
+                return readback_val
+            return "DIV"
+        m.evaluate.side_effect = _eval
+        return m
+
+    mock_pat_box_ok = make_pat_box(good_html)
+    mock_pat_page = MagicMock()
+    mock_pat_page.url = "https://www.patreon.com/posts/12345"
+    mock_pat_inline = MagicMock()
+    mock_pat_inline.is_visible.return_value = True
+    mock_pat_pub = MagicMock()
+    mock_pat_pub.is_disabled.return_value = False
+    mock_pat_pub.get_attribute.return_value = "false"
+    mock_pat_page.query_selector.side_effect = lambda sel: (
+        mock_pat_inline if ("patreon-media" in sel or "media-item" in sel) else
+        mock_pat_box_ok if ("contenteditable" in sel or "ProseMirror" in sel) else
+        mock_pat_pub if "Publish" in sel else MagicMock()
+    )
+    mock_pat_ctx = MagicMock()
+    mock_pat_ctx.pages = [mock_pat_page]
+    pat_disp.create_persistent_stealth_context = MagicMock(return_value=mock_pat_ctx)
+    pat_payload = {
+        "title": "Patreon Story",
+        "description": unsigned_story,
+        "patreon_images": [str(img_file)],
+        "tags": [],
+    }
+    ok_pat, _, _ = pat_disp.publish(pat_payload)
+    assert ok_pat is True
+    assert len(pat_html_injected) == 1
+    assert pat_html_injected[0] == good_html
+
+    # Patreon 段落塌陷 -> 关会话并中止
+    mock_pat_box_bad = make_pat_box(collapsed_html)
+    mock_pat_pub_bad = MagicMock()
+    mock_pat_page.query_selector.side_effect = lambda sel: (
+        mock_pat_inline if ("patreon-media" in sel or "media-item" in sel) else
+        mock_pat_box_bad if ("contenteditable" in sel or "ProseMirror" in sel) else
+        mock_pat_pub_bad if "Publish" in sel else MagicMock()
+    )
+    pat_disp.close_login_session.reset_mock()
+    ok_pat_bad, msg_pat_bad, _ = pat_disp.publish(pat_payload)
+    assert ok_pat_bad is False
+    assert "段落保真断言失败" in msg_pat_bad
+    mock_pat_pub_bad.click.assert_not_called()
+    assert pat_disp.close_login_session.call_count >= 1
+
+
+def test_textarea_guard_skips_html_injection_and_paragraph_assertion(tmp_path, monkeypatch):
+    """
+    textarea 守卫单测:
+    当定位到的描述框是 <textarea> 兜底形态时，只走纯文本 fill，
+    不调用 HTML 注入 (insertHTML/setContent)，不执行段落断言，正常完成提交流程。
+    """
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+    multi_para_desc = "Paragraph One.\n\nParagraph Two.\n\nParagraph Three."
+
+    mock_textarea = MagicMock()
+    html_calls = []
+    def textarea_eval(script, *args):
+        s = str(script)
+        if "tagName" in s:
+            return "TEXTAREA"
+        if "insertHTML" in s or "setContent" in s:
+            html_calls.append(s)
+            return "execCommand"
+        if "innerHTML" in s:
+            # 哪怕 innerHTML 为空，因为是 textarea 也绝不应触发段落断言失败
+            return ""
+        return ""
+    mock_textarea.evaluate.side_effect = textarea_eval
+    assert is_textarea_element(mock_textarea) is True
+
+    disp = DeviantArtDispatcher(tmp_path)
+    disp.safe_goto = MagicMock()
+    disp.assert_attached = MagicMock(return_value=(True, ""))
+    disp.assert_field_value = MagicMock(return_value=(True, ""))
+    disp.check_selector_state = MagicMock(return_value=(True, "ok"))
+    disp.assert_submitted = MagicMock(return_value=(True, ""))
+
+    mock_page = MagicMock()
+    mock_page.url = "https://www.deviantart.com/art/textarea-fallback-1"
+    mock_fi = MagicMock()
+    mock_submit = MagicMock()
+    mock_submit.inner_text.return_value = "Submit"
+    mock_submit.is_enabled.return_value = True
+    mock_submit.get_attribute.return_value = "false"
+
+    mock_page.query_selector.side_effect = lambda sel: (
+        mock_fi if "input[type='file']" in sel else
+        mock_submit if ("Submit" in sel or "submit" in sel) else
+        mock_textarea if ("description" in sel or "tiptap" in sel) else MagicMock()
+    )
+    mock_page.query_selector_all.side_effect = lambda sel: [mock_submit] if "submit" in sel.lower() or "button" in sel.lower() else [mock_fi]
+    mock_page.evaluate.return_value = {"count": 1, "llama": False}
+    mock_ctx = MagicMock()
+    mock_studio = MagicMock()
+    mock_studio.inner_text.return_value = "No drafts"
+    mock_studio.url = "https://www.deviantart.com/studio"
+    mock_ctx.new_page.return_value = mock_studio
+
+    img_file = tmp_path / "ta_art.jpg"
+    img_file.write_bytes(b"dummy")
+
+    ok, msg = disp._submit_deviation(
+        mock_page, mock_ctx, [str(img_file)], "TA Title", multi_para_desc,
+        [], False, "strict", False, "", [], keep_preset_description=False
+    )
+    assert ok is True
+    assert msg == ""
+    mock_textarea.fill.assert_called_once_with(multi_para_desc, timeout=5000)
+    assert len(html_calls) == 0
+
 
 

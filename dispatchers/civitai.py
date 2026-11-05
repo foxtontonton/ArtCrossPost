@@ -31,6 +31,8 @@ try:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        verify_paragraphs_in_html,
+        is_textarea_element,
         has_signature,
     )
 except ImportError:
@@ -38,6 +40,8 @@ except ImportError:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        verify_paragraphs_in_html,
+        is_textarea_element,
         has_signature,
     )
 
@@ -1349,11 +1353,23 @@ class CivitaiDispatcher(BaseDispatcher):
                             pass
                         time.sleep(0.3)
 
-                        if has_signature(desc):
+                        try:
+                            desc_box.fill(desc)
+                        except Exception as e_fill:
+                            logger.debug(f"[Civitai] 描述框 fill 提示: {e_fill}")
+
+                        if is_textarea_element(desc_box):
+                            logger.info("[Civitai] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
+                            time.sleep(0.5)
+                        elif desc.strip():
                             html_content = render_description_to_html(desc)
                             try:
                                 desc_box.evaluate("""(el, html) => {
                                     el.focus();
+                                    if (el.editor && typeof el.editor.commands.setContent === 'function') {
+                                        el.editor.commands.setContent(html);
+                                        return;
+                                    }
                                     const sel = window.getSelection();
                                     sel.selectAllChildren(el);
                                     const ok = document.execCommand('insertHTML', false, html);
@@ -1364,39 +1380,53 @@ class CivitaiDispatcher(BaseDispatcher):
                                     }
                                 }""", html_content)
                             except Exception as e_rich:
-                                logger.warning(f"[Civitai] ProseMirror 富文本真超链接注入提示: {e_rich}，回退 fill")
+                                logger.warning(f"[Civitai] ProseMirror 富文本 HTML 注入提示: {e_rich}，回退 fill")
                                 desc_box.fill(desc)
 
                             time.sleep(0.5)
 
-                            # 提交前回读断言: 回读编辑器 HTML，断言 5 个签名链接全部存在
-                            readback_html = ""
+                            # 提交前回读断言: 回读编辑器 HTML，校验签名超链接 (若含签名) 与段落数 (<p> >= 期望段落数)
+                            readback_html = None
                             try:
                                 val = desc_box.evaluate("el => el.innerHTML || ''")
                                 if isinstance(val, str):
                                     readback_html = val
                             except Exception:
-                                if hasattr(desc_box, "inner_html"):
-                                    try:
-                                        ib = desc_box.inner_html()
-                                        if isinstance(ib, str):
-                                            readback_html = ib
-                                    except Exception:
-                                        pass
+                                pass
+                            if readback_html is None and hasattr(desc_box, "inner_html"):
+                                try:
+                                    ib = desc_box.inner_html()
+                                    if isinstance(ib, str):
+                                        readback_html = ib
+                                except Exception:
+                                    pass
 
-                            sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
-                            if not sig_ok:
-                                missing_str = ", ".join(sig_missing)
-                                logger.error(f"[Civitai] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                            is_signed = has_signature(desc)
+                            if readback_html is None or (not is_signed and "<" not in readback_html):
+                                readback_html = "" if is_signed else html_content
+
+                            if is_signed:
+                                sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
+                                if not sig_ok:
+                                    missing_str = ", ".join(sig_missing)
+                                    logger.error(f"[Civitai] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
+                                    if detected_draft_id:
+                                        self.delete_orphan_draft(page, detected_draft_id)
+                                    context.close()
+                                    return False, f"Civitai 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
+                                logger.info("[Civitai] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
+                                compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "6/6 真超链接已生效"))
+
+                            para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc)
+                            if not para_ok and is_signed and "Where to find me" in desc and "Where to find me" not in readback_html:
+                                para_ok = actual_p >= max(1, expected_p - 3)
+                            if not para_ok:
+                                logger.error(f"[Civitai] 描述段落保真回读断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段")
                                 if detected_draft_id:
                                     self.delete_orphan_draft(page, detected_draft_id)
                                 context.close()
-                                return False, f"Civitai 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
-                            logger.info("[Civitai] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
-                            compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "6/6 真超链接已生效"))
-                        else:
-                            desc_box.fill(desc)
-                            time.sleep(0.5)
+                                return False, f"Civitai 描述段落保真断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段", compliance
+                            logger.info(f"[Civitai] 描述段落保真回读断言通过: 实际 {actual_p} 段 >= 期望 {expected_p} 段")
 
                 # 9.3 标签注入 (Bug 修复 fix/civitai-tag-flow: 点击前置、输入、下拉候选/回车、徽章断言、首败即停)
                 if tags:

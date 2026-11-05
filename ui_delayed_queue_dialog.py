@@ -201,13 +201,15 @@ class DelayedQueueDialog(QDialog):
 
             self.table.setItem(row, 3, status_item)
 
-            # 5. 错误详情
+            # 5. 错误详情 / 结果注记
             err_desc = ""
             if it.last_error:
                 err_parts = [f"[{k}] {v}" for k, v in it.last_error.items()]
                 err_desc = " | ".join(err_parts)
             elif it.attempts > 0:
                 err_desc = f"已尝试 {it.attempts} 次"
+            if getattr(it, "result_note", ""):
+                err_desc = f"{err_desc} [{it.result_note}]".strip() if err_desc else f"[{it.result_note}]"
 
             err_item = QTableWidgetItem(err_desc)
             if it.status == "failed":

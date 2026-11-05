@@ -213,6 +213,7 @@ class DelayedWaveExecutor:
         watermark_engine: Optional[WatermarkEngine] = None,
         history_manager: Optional[PublishHistoryManager] = None,
         cache_dir: Optional[Path] = None,
+        notify_callback: Optional[Callable[[str, str], None]] = None,
     ):
         self.manager = manager
         self.dispatchers_factory = dispatchers_factory
@@ -222,6 +223,7 @@ class DelayedWaveExecutor:
         self._watermark_engine = watermark_engine
         self._history_manager = history_manager
         self.cache_dir = Path(cache_dir) if cache_dir else CACHE_DIR
+        self.notify_callback = notify_callback
 
     def _get_config(self) -> dict:
         if self.config_provider:
@@ -351,6 +353,21 @@ class DelayedWaveExecutor:
             "color_hex": wm_cfg.get("color", "#ffffff"),
             "stroke": bool(wm_cfg.get("stroke", True)),
         } if (wm_enabled and wm_apply and wm_text) else None
+
+        # §4 水印全局门禁: 后台执行期若水印缺失，不弹模态框，但必须以 error 级通知 + 队列项结果注记「无水印发布」响亮留痕
+        watermark_note = ""
+        if wm_info is None:
+            watermark_note = "无水印发布"
+            warn_log = f"[DelayedWave] ⚠️ 水印门禁告警: 队列项 {item.id} ('{item.title}') 当前水印设置未开启或文本为空，按【{watermark_note}】执行！"
+            logger.error(warn_log)
+            if self.notify_callback:
+                try:
+                    self.notify_callback(
+                        f"⚠️ 延迟公开波无水印发布告警: {item.title} (结果注记: {watermark_note})",
+                        "error",
+                    )
+                except Exception as ne:
+                    logger.debug(f"[DelayedWave] notify_callback 异常: {ne}")
 
         title_str = str(snapshot.get("title", item.title)).strip()
         safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
@@ -867,7 +884,16 @@ class DelayedWaveExecutor:
                 publish_results[plat] = (False, str(e), [])
                 logger.error(f"[DelayedWave] {disp.display_name} 执行异常: {e}")
 
-        # 9. 写入 publish_history (复用 PublishHistoryManager.append_record 口径)
+        # 9. 若为无水印发布，为各平台发布结果补充「无水印发布」注记，随后写入 publish_history
+        if watermark_note and publish_results:
+            for _plat_k, _res_val in list(publish_results.items()):
+                if isinstance(_res_val, tuple) and len(_res_val) >= 2:
+                    _ok_v, _msg_v = _res_val[0], str(_res_val[1])
+                    _comp_v = _res_val[2] if len(_res_val) > 2 else []
+                    if watermark_note not in _msg_v:
+                        _msg_v = f"{_msg_v} ({watermark_note})"
+                    publish_results[_plat_k] = (_ok_v, _msg_v, _comp_v)
+
         if publish_results:
             try:
                 hist_mgr = self._get_history_manager()
@@ -883,10 +909,18 @@ class DelayedWaveExecutor:
         # 10. 状态裁决
         all_success = len(errors) == 0
         final_status = "done" if all_success else "failed"
-        self.manager.update_item_status(item.id, status=final_status, last_error=errors)
+        self.manager.update_item_status(
+            item.id,
+            status=final_status,
+            last_error=errors,
+            result_note=watermark_note,
+        )
 
         item.status = final_status
         item.last_error = errors
+        item.result_note = watermark_note
+        if watermark_note:
+            item.material_snapshot["result_note"] = watermark_note
 
         if self.on_item_finished:
             try:
