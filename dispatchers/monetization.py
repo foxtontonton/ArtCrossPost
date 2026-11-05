@@ -966,21 +966,9 @@ class PatreonDispatcher(BaseDispatcher):
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
 
-                # 5.5 挂载母版原图附件 (Patreon 先发工作区专属通道，仅在 payload 提供 attachments 时执行)
+                # 5.5 挂载全尺寸无码 hd 渲染源文件附件 (附件合法性已由 L586 前置门禁统一校验)
                 attachments = payload.get("attachments", [])
                 if attachments:
-                    # 严格门禁：附件必须是母版原图本体，严禁使用带水印派生件 *_raw_wm.* 或打码件
-                    invalid_atts = [
-                        str(a) for a in attachments
-                        if "_raw_wm" in str(a).lower() or "censor" in str(a).lower()
-                    ]
-                    if invalid_atts:
-                        err_msg = f"Patreon 附件门禁拦截: 附件必须是源素材母版文件本体，严禁使用下游渲染派生件 (检测到非法附件: {invalid_atts})"
-                        logger.error(f"[Patreon] {err_msg}")
-                        self.close_login_session(browser, context)
-                        compliance.append(self.verify_compliance_item("patreon", "attachments", True, False, "缺附件 (附件选取非法)"))
-                        return False, err_msg, compliance
-
                     att_ok, att_err = self._attach_files_in_editor(page, attachments)
                     if not att_ok:
                         logger.error(f"[Patreon] {att_err}")

@@ -1839,3 +1839,107 @@ def test_watermark_global_gate_tab_a_and_tab_b_and_executor_note(tmp_path, monke
     reloaded = mgr.load_queue()[0]
     assert reloaded.result_note == "无水印发布"
 
+
+def test_patreon_step55_reaches_attach_with_raw_wm_and_pregate_blocks_censor(tmp_path, monkeypatch):
+    """
+    回归测试：
+    1. mock 穿越登录与编辑器前置步骤、直达 step 5.5，attachments 为 *_raw_wm hd 文件时，
+       断言能顺利到达 _attach_files_in_editor 挂载步且不被旧子串拦截；
+    2. 同时断言打码变体 (*_censored_wm.*) 仍在前置门禁 (L586) 被拦截。
+    """
+    import playwright.sync_api as pw_sync
+    import dispatchers.monetization as mon_mod
+    from dispatchers.monetization import PatreonDispatcher
+
+    monkeypatch.setattr(mon_mod.time, "sleep", lambda *a, **kw: None)
+
+    disp = PatreonDispatcher(cookies_dir=tmp_path)
+    monkeypatch.setattr(disp, "get_cookies", lambda: [{"name": "session_id", "value": "ok", "domain": ".patreon.com", "path": "/"}])
+    monkeypatch.setattr(disp, "get_app_browser_profile_dir", lambda: str(tmp_path / "no_profile"))
+    monkeypatch.setattr(disp, "safe_goto", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "clean_context_tabs", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "apply_stealth", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "close_login_session", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "assert_attached", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "assert_field_value", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "_count_patreon_gallery_images", lambda page, exp: exp)
+
+    # 准备全尺寸母版、预告图 (×0.5)、全尺寸无码带水印渲染件 (*_raw_wm.png) 与打码变体 (*_censored_wm.png)
+    raw_src = tmp_path / "work_master.png"
+    teaser_img = tmp_path / "work_0_pat_teaser.png"
+    hd_raw_wm = tmp_path / "work_0_raw_wm.png"
+    censored_wm = tmp_path / "work_0_censored_wm.png"
+
+    Image.new("RGB", (400, 400), color=(10, 20, 30)).save(raw_src)
+    Image.new("RGB", (200, 200), color=(0, 0, 0)).save(teaser_img)
+    Image.new("RGB", (400, 400), color=(15, 25, 35)).save(hd_raw_wm)
+    Image.new("RGB", (400, 400), color=(5, 5, 5)).save(censored_wm)
+
+    # Mock Playwright 页面直达 step 5.5
+    fake_el = MagicMock()
+    fake_el.is_visible.return_value = True
+    fake_el.is_disabled.return_value = False
+    fake_el.get_attribute.return_value = ""
+    fake_el.evaluate.side_effect = lambda script, *args: "textarea" if "tagName" in str(script) else ""
+
+    fake_page = MagicMock()
+    fake_page.url = "https://www.patreon.com/posts/123456"
+    fake_page.query_selector.return_value = fake_el
+    fake_page.query_selector_all.return_value = [fake_el, fake_el]
+
+    fake_ctx = MagicMock()
+    fake_ctx.pages = [fake_page]
+    fake_browser = MagicMock()
+    fake_browser.new_context.return_value = fake_ctx
+
+    class DummyPWContextMgr:
+        def __enter__(self):
+            pw = MagicMock()
+            pw.chromium.launch.return_value = fake_browser
+            return pw
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    monkeypatch.setattr(pw_sync, "sync_playwright", lambda: DummyPWContextMgr())
+    monkeypatch.setattr(disp, "create_stealth_browser", lambda p, headless=True: fake_browser)
+
+    attach_calls = []
+
+    def spy_attach(page, atts):
+        attach_calls.append(list(atts))
+        return True, ""
+
+    monkeypatch.setattr(disp, "_attach_files_in_editor", spy_attach)
+
+    # 1. attachments 为 *_raw_wm.png 全尺寸 hd 渲染文件 -> 穿越前置门禁并直达 step 5.5 挂载成功
+    valid_payload = {
+        "title": "Step55 Raw WM HD Test",
+        "description": "Body text",
+        "patreon_images": [str(teaser_img), str(hd_raw_wm)],
+        "patreon_hd_images": [str(hd_raw_wm)],
+        "raw_images": [str(raw_src)],
+        "attachments": [str(hd_raw_wm)],
+        "platform_options": {"patreon_visibility": "patrons"},
+    }
+    ok, msg, comp = disp.publish(valid_payload)
+    assert ok is True, f"Expected publish success with *_raw_wm attachment, got: {msg}"
+    assert len(attach_calls) == 1
+    assert attach_calls[0] == [str(hd_raw_wm)]
+    assert any(c.get("item") == "attachments" and c.get("verified") is True for c in comp)
+
+    # 2. attachments 含打码变体 (*_censored_wm.png) -> 在 L586 前置门禁被拦截，不进入编辑器挂载步
+    invalid_payload = {
+        "title": "Blocked Censor Variant",
+        "description": "Body text",
+        "patreon_images": [str(teaser_img), str(hd_raw_wm)],
+        "patreon_hd_images": [str(hd_raw_wm)],
+        "raw_images": [str(raw_src)],
+        "attachments": [str(censored_wm)],
+        "platform_options": {"patreon_visibility": "patrons"},
+    }
+    ok_bad, msg_bad, comp_bad = disp.publish(invalid_payload)
+    assert ok_bad is False
+    assert "缺附件" in msg_bad
+    assert len(attach_calls) == 1  # 未新增调用，证明在前置门禁即被拦截
+
+
