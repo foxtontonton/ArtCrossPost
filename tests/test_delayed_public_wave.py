@@ -1152,4 +1152,304 @@ def test_start_publishing_scheduled_snapshot_strictly_overrides_ui_widgets(tmp_p
     assert po["civitai_tool"] == "SnapTool"
     assert p["civitai_channel"] == "web"
     assert p["civitai_tool"] == "SnapTool"
+def test_delayed_wave_tab_b_toggle_lifecycle_no_runtime_error(tmp_path, monkeypatch):
+    """
+    1. 开关生命周期回归测试:
+    - 开启 -> 关闭 (tab_b_workspace 置为 None) -> 再次开启
+    - 标签页 B 正常重建，不抛 RuntimeError: wrapped C/C++ object has been deleted
+    - 测试 sip.isdeleted 兜底分支
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication, QWidget
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
+    win = app_mod.MainWindow()
+    # 1. 开启
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+    assert win.main_tab_widget is not None
+    assert win.tab_b_workspace is not None
+    assert win.main_tab_widget.count() == 2
+
+    # 2. 关闭 (workspace 设为 None)
+    win.config["delayed_wave_enabled"] = False
+    win._update_delayed_wave_ui()
+    assert win.main_tab_widget is None
+    assert win.tab_b_workspace is None
+
+    # 3. 再次开启 (同会话重建)
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+    assert win.main_tab_widget is not None
+    assert win.tab_b_workspace is not None
+    assert win.main_tab_widget.count() == 2
+
+    # 4. 模拟已删除的 C++ QWidget 存留在 tab_b_workspace (sip.isdeleted 双保险)
+    from PyQt5 import sip
+    deleted_widget = QWidget()
+    deleted_widget.deleteLater()
+    QApplication.processEvents()
+    if hasattr(sip, "isdeleted") and sip.isdeleted(deleted_widget):
+        win.main_tab_widget = None
+        win.tab_b_workspace = deleted_widget
+        win.config["delayed_wave_enabled"] = True
+        win._update_delayed_wave_ui()
+        assert win.tab_b_workspace is not None
+        assert win.tab_b_workspace != deleted_widget
+
+
+def test_tab_b_snapshot_short_text_empty_and_executor_payload_empty(tmp_path, monkeypatch):
+    """
+    2. Tab B 快照 short_text 留空回归测试:
+    - B 页入队快照 short_text 必须为 "" (不截断正文)
+    - executor 产出的 payload short_text 必须为 "" (留给分发器自动组装预告)
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+
+    master_img = tmp_path / "tab_b_master_short.png"
+    Image.new("RGB", (200, 200), color=(100, 150, 200)).save(master_img, "PNG")
+
+    win.tab_b_title_input.setText("Test Short Text Empty Title")
+    long_desc = "Long description " * 30
+    win.tab_b_desc_input.setPlainText(long_desc)
+
+    from PyQt5.QtWidgets import QListWidgetItem
+    from PyQt5.QtCore import Qt
+    it = QListWidgetItem(master_img.name)
+    it.setData(Qt.UserRole, str(master_img))
+    win.tab_b_img_list.addItem(it)
+
+    captured_snapshot = {}
+
+    class DummyManager:
+        def enroll(self, material_snapshot, delay_seconds, target_platforms):
+            captured_snapshot.update(material_snapshot)
+            item = MagicMock()
+            item.id = "mock_item_001"
+            item.due_at = "2026-11-12 10:00:00"
+            return item
+
+    win.delayed_wave_manager = DummyManager()
+
+    class SignalMock:
+        def __init__(self):
+            self._cbs = []
+        def connect(self, cb):
+            self._cbs.append(cb)
+        def emit(self, *a, **kw):
+            for cb in self._cbs:
+                cb(*a, **kw)
+
+    class ImmediateThread:
+        def __init__(self, selected, payload):
+            self.selected = selected
+            self.payload = payload
+            self.progress_signal = SignalMock()
+            self.completed_signal = SignalMock()
+
+        def start(self):
+            self.completed_signal.emit({"patreon": (True, "发布成功", [])})
+
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", ImmediateThread)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: None)
+
+    win._start_tab_b_publishing()
+
+    # 断言 1: 入队快照 short_text 为 ""
+    assert captured_snapshot.get("short_text") == ""
+
+    # 断言 2: executor 组装 payload 时，short_text 亦为 ""
+    queue_file = tmp_path / "delayed_queue.json"
+    mgr = DelayedQueueManager(queue_file=queue_file, assets_dir=tmp_path / "assets")
+    enrolled_item = mgr.enroll(captured_snapshot, delay_seconds=60, target_platforms=["x_twitter", "bluesky"])
+
+    captured_payloads = {}
+    def fake_publish(disp_name, payload):
+        captured_payloads[disp_name] = payload
+        return True, "ok", []
+
+    class DummyDisp:
+        def __init__(self, name):
+            self.name = name
+            self.display_name = name
+        def check_login(self):
+            return True
+        def publish(self, payload):
+            return fake_publish(self.name, payload)
+
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        config_provider=lambda: {},
+        dispatchers_factory=lambda: [DummyDisp("x_twitter"), DummyDisp("bluesky")],
+    )
+    ok, errs = executor.execute_item(enrolled_item)
+    assert ok is True
+    assert "x_twitter" in captured_payloads
+    assert captured_payloads["x_twitter"]["short_text"] == ""
+    assert captured_payloads["bluesky"]["short_text"] == ""
+
+
+def test_delayed_wave_retry_recovers_da_link_from_history(tmp_path):
+    """
+    3. executor 引流兜底回归测试:
+    - 首轮: DA 成功 (URL: https://www.deviantart.com/artist/art/123456789)、X 失败
+    - 写入发布历史记录 (publish_history.json)
+    - 次轮: only_failed 重试 X (目标只有 x_twitter，DA 不在本轮执行)
+    - 验证 payload 的 x_da_link 为历史中的 DA 当帖 URL，而非主页
+    """
+    from history_manager import PublishHistoryManager
+
+    queue_file = tmp_path / "delayed_queue.json"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    mgr = DelayedQueueManager(queue_file=queue_file, assets_dir=tmp_path / "assets")
+
+    img_file = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(img_file, "PNG")
+
+    snapshot = {
+        "title": "History Fallback Artwork",
+        "description": "Test Desc",
+        "short_text": "",
+        "tags": ["art"],
+        "is_nsfw": False,
+        "is_ai": False,
+        "images": [str(img_file)],
+        "raw_images": [str(img_file)],
+    }
+    item = mgr.enroll(snapshot, delay_seconds=0, target_platforms=["deviantart", "x_twitter"])
+
+    da_post_url = "https://www.deviantart.com/foxtontonton/art/123456789"
+    default_homepage = "https://www.deviantart.com/foxtontonton"
+
+    call_count = {"round": 1}
+    captured_payloads = []
+
+    class DummyDADisp:
+        name = "deviantart"
+        display_name = "DeviantArt"
+        def check_login(self): return True
+        def publish(self, payload):
+            captured_payloads.append(("deviantart", payload))
+            return True, f"发布成功 {da_post_url}", [da_post_url]
+
+    class DummyXDisp:
+        name = "x_twitter"
+        display_name = "X"
+        def check_login(self): return True
+        def publish(self, payload):
+            captured_payloads.append(("x_twitter", payload))
+            if call_count["round"] == 1:
+                return False, "Network error", []
+            else:
+                return True, "Published", ["https://x.com/status/999"]
+
+    hist_mgr = PublishHistoryManager(data_dir=data_dir)
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        config_provider=lambda: {"defaults": {"x_da_link": default_homepage}},
+        dispatchers_factory=lambda: [DummyDADisp(), DummyXDisp()],
+        history_manager=hist_mgr,
+    )
+
+    # 第一轮: DA 成功, X 失败 -> 写入 history
+    ok, errs = executor.execute_item(item)
+    assert ok is False
+    assert item.status == "failed"
+    assert "x_twitter" in errs
+    assert "deviantart" not in errs
+
+    # 验证历史记录已写入
+    history_records = hist_mgr.load_history()
+    assert len(history_records) >= 1
+
+    # 第二轮: 重试仅失败平台 (only_failed=True, target_platforms 仅剩 x_twitter)
+    call_count["round"] = 2
+    captured_payloads.clear()
+
+    ok2, errs2 = executor.execute_item(item, only_failed=True)
+    assert ok2 is True
+    assert len(captured_payloads) == 1
+    plat, payload = captured_payloads[0]
+    assert plat == "x_twitter"
+    # 核心断言: payload 的 x_da_link 必须来自历史中的 DA 当帖 URL，而非主页！
+    assert payload["x_da_link"] == da_post_url
+    assert payload["da_post_url"] == da_post_url
+    assert payload["actual_traffic_link"] == da_post_url
+
+
+def test_tab_b_deviantart_image_count_warning_dialog(tmp_path, monkeypatch):
+    """
+    4. Tab B 发前张数警告回归测试:
+    - 目标平台含 DA
+    - 素材数 (11 张) > deviantart_max_images_per_deviation (默认 10)
+    - 弹窗警告 "Patreon 不受影响，但到期公开波的 DA 将超限失败"
+    - 用户选 Cancel -> 中止发布，按钮保持可用，不启动 PublishThread
+    - 用户选 Yes -> 继续发布流程
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    _ = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win.config["defaults"]["deviantart_max_images_per_deviation"] = 10
+    win._update_delayed_wave_ui()
+
+    from PyQt5.QtWidgets import QListWidgetItem
+    from PyQt5.QtCore import Qt
+
+    # 创建 11 张素材
+    for i in range(11):
+        img_p = tmp_path / f"batch_img_{i}.png"
+        Image.new("RGB", (50, 50), color=(10 * i, 20, 30)).save(img_p, "PNG")
+        it = QListWidgetItem(img_p.name)
+        it.setData(Qt.UserRole, str(img_p))
+        win.tab_b_img_list.addItem(it)
+
+    win.tab_b_title_input.setText("Batch DA Limit Test")
+    win.tab_b_target_da_cb.setChecked(True)
+
+    warn_calls = []
+    def mock_warning(parent, title, text, buttons, default_btn):
+        warn_calls.append({"title": title, "text": text, "buttons": buttons})
+        return current_user_choice[0]
+
+    current_user_choice = [QMessageBox.Cancel]
+    monkeypatch.setattr(QMessageBox, "warning", mock_warning)
+
+    pub_threads = []
+    class DummyPubThread:
+        def __init__(self, selected, payload):
+            pub_threads.append(self)
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+        def start(self): pass
+        def isRunning(self): return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", DummyPubThread)
+
+    # Case A: 用户点击 Cancel
+    win._start_tab_b_publishing()
+    assert len(warn_calls) == 1
+    assert "Patreon 不受影响，但到期公开波的 DA 将超限失败" in warn_calls[0]["text"]
+    assert len(pub_threads) == 0
+    assert win.tab_b_publish_btn.isEnabled() is True
+
+    # Case B: 用户点击 Yes (继续)
+    current_user_choice[0] = QMessageBox.Yes
+    win._start_tab_b_publishing()
+    assert len(warn_calls) == 2
+    assert len(pub_threads) == 1

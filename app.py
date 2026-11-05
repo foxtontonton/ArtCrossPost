@@ -40,6 +40,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QByteArray, QEvent, QRect, QPoint, QObject, QMimeData, QEventLoop
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QImage, QPalette, QMovie, QPainterPath, QPen, QDrag
+try:
+    from PyQt5 import sip
+except ImportError:
+    try:
+        import sip
+    except ImportError:
+        sip = None
 
 from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
 from censor_engine import CensorEngine, map_strength_to_mosaic_size, map_strength_to_blur_ksize
@@ -9414,7 +9421,8 @@ class MainWindow(QMainWindow):
                 """)
                 root_layout.removeWidget(self.main_splitter)
                 self.main_tab_widget.addTab(self.main_splitter, "标签页 A「全平台 Free 贴」")
-                if not getattr(self, "tab_b_workspace", None):
+                ws = getattr(self, "tab_b_workspace", None)
+                if ws is None or (sip and hasattr(sip, "isdeleted") and sip.isdeleted(ws)):
                     self.tab_b_workspace = self._build_tab_b_workspace()
                 self.main_tab_widget.addTab(self.tab_b_workspace, "标签页 B「Patreon 先发」")
                 root_layout.addWidget(self.main_tab_widget, 1)
@@ -9429,6 +9437,7 @@ class MainWindow(QMainWindow):
                 self.main_splitter.show()
                 self.main_tab_widget.deleteLater()
                 self.main_tab_widget = None
+                self.tab_b_workspace = None
 
     def _build_tab_b_workspace(self) -> QWidget:
         """构建标签页 B「Patreon 先发」工作区"""
@@ -9645,6 +9654,33 @@ class MainWindow(QMainWindow):
                 self.notify(f"⚠️ 附件门禁拦截: 导入素材必须是母版本体，严禁使用下游渲染件 ({Path(mi).name})", level="error")
                 return
 
+        # 目标平台含 DA 且素材数 > deviantart_max_images_per_deviation 时发布前弹窗警告
+        is_da_target = hasattr(self, "tab_b_target_da_cb") and self.tab_b_target_da_cb.isChecked()
+        if is_da_target:
+            da_max = int(
+                self.config.get("defaults", {}).get(
+                    "deviantart_max_images_per_deviation",
+                    self.config.get("deviantart_max_images_per_deviation", 10),
+                )
+            )
+            if img_count > da_max:
+                warn_msg = (
+                    f"当前导入了 {img_count} 张素材，已超出 DeviantArt 单作品上限 ({da_max} 张)。\n\n"
+                    f"Patreon 不受影响，但到期公开波的 DA 将超限失败。\n\n"
+                    f"是否仍要继续发布？"
+                )
+                logger.warning(f"[Tab B] {warn_msg}")
+                reply = QMessageBox.warning(
+                    self,
+                    "DeviantArt 素材超限预警",
+                    warn_msg,
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if reply != QMessageBox.Yes:
+                    self.notify("已取消发布：素材数超出 DeviantArt 上限", level="info")
+                    return
+
         if hasattr(self, "tab_b_publish_btn") and self.tab_b_publish_btn:
             self.tab_b_publish_btn.setEnabled(False)
 
@@ -9828,7 +9864,7 @@ class MainWindow(QMainWindow):
             material_snapshot = {
                 "title": title,
                 "description": desc,
-                "short_text": desc[:280] if desc else title,
+                "short_text": "",
                 "tags": tags,
                 "is_nsfw": is_nsfw,
                 "is_ai": is_ai,

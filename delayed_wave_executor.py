@@ -793,6 +793,23 @@ class DelayedWaveExecutor:
                         logger.error(f"[DelayedWave] DeviantArt 执行异常: {da_e}")
 
         # 7. 处理当帖引流链接透传
+        if not captured_da_url:
+            # DA 不在本轮目标或本轮发布失败，尝试从快照或发布历史检索已发布的 DA 当帖链接 (重试/补发场景)
+            captured_da_url = (
+                snapshot.get("da_post_url")
+                or platform_opts.get("da_post_url")
+            )
+            if not captured_da_url:
+                try:
+                    hist_mgr = self._get_history_manager()
+                    if hist_mgr and hasattr(hist_mgr, "find_published_da_url"):
+                        history_da_url = hist_mgr.find_published_da_url(asset_files)
+                        if history_da_url:
+                            captured_da_url = history_da_url
+                            logger.info(f"[DelayedWave] 从历史发布记录回填 DA 当帖引流链接: {captured_da_url}")
+                except Exception as he:
+                    logger.debug(f"[DelayedWave] 检索历史 DA 链接异常: {he}")
+
         if captured_da_url:
             actual_traffic_link = captured_da_url.split("?")[0].split("#")[0].rstrip("/")
             logger.info(f"[DelayedWave] 成功捕获 DA 当帖引流链接: {actual_traffic_link}")
