@@ -11,6 +11,7 @@ Unit & integration tests for REQUIREMENTS_media_foundation.md:
 import datetime
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -25,8 +26,12 @@ from media_foundation import (
     ARCHIVE_CATEGORIES,
     archive_file_by_role,
     archive_publish_run_outputs,
+    classify_media_file,
+    classify_role_for_sent_file,
     compute_file_sha256,
+    execute_archive_re_sort,
     execute_legacy_cache_cleanup,
+    get_media_base_key,
     get_monthly_archive_dir,
     get_monthly_cache_dir,
     get_monthly_dir,
@@ -36,6 +41,7 @@ from media_foundation import (
     run_scheduled_cleanup,
     sanitize_ascii_filename,
     sanitize_ascii_stem,
+    scan_archive_categories,
     scan_legacy_cache,
 )
 
@@ -452,3 +458,370 @@ def test_presets_migration_copy_only_and_read_priority(tmp_path, monkeypatch):
     loaded = config_mod.load_config()
     assert loaded["defaults"]["artist_name"] == "FoxArtist"
     assert old_presets.exists()
+
+
+# ==============================================================================
+# §1 & §4 统一媒体分类函数实证用例与三处调用点一致性测试
+# ==============================================================================
+
+def test_unified_classifier_all_empirical_cases(tmp_path):
+    """
+    §4 逐类覆盖实证案例：
+    - 静态：*_censored.png（无 wm）→ intermediate；*_censored_wm.png → intermediate；*_freehalf.jpg → low；*_raw_wm.png → hd
+    - GIF：*_pat_censor.gif、*_kofi_censor.gif → intermediate；*_xopt.gif → low_gif；*_pat_teaser.gif → low_gif；*_da_wm.gif、无标记全尺寸 → hd_gif
+    - MP4：bsky_video_*.mp4 → renders；*_x_video.mp4 → renders；同组大原片+小渲染（无标记）→ 大 originals / 小 renders；唯一无标记 → originals
+    """
+    # 1. 静态图实证用例
+    assert classify_media_file("Artwork_0_censored.png") == "intermediate"
+    assert classify_media_file("Artwork_0_censored_wm.png") == "intermediate"
+    assert classify_media_file("Artwork_0_bsky_censor.jpg") == "intermediate"
+    assert classify_media_file("Artwork_0_freehalf.jpg") == "low_images"
+    assert classify_media_file("Artwork_0_xopt.jpg") == "low_images"
+    assert classify_media_file("Artwork_0_raw_wm.png") == "hd_images"
+    assert classify_media_file("Artwork_0_pat_display_wm.png") == "hd_images"
+
+    # 打码且缩小/预告件 -> low_images（非中间件）
+    assert classify_media_file("Artwork_0_censored_freehalf.jpg") == "low_images"
+    assert classify_media_file("Artwork_0_censored_xopt.jpg") == "low_images"
+    assert classify_media_file("Artwork_0_censored_pat_teaser.png") == "low_images"
+
+    # 无标记静态图：根据尺寸或参照
+    large_img = tmp_path / "art_large.png"
+    Image.new("RGB", (2000, 1500), color=(10, 20, 30)).save(large_img)
+    small_img = tmp_path / "art_small.png"
+    Image.new("RGB", (800, 600), color=(10, 20, 30)).save(small_img)
+
+    assert classify_media_file(large_img) == "hd_images"
+    assert classify_media_file(small_img) == "low_images"
+
+    sibling_dims = {"art": (2000, 1500)}
+    assert classify_media_file(small_img, sibling_max_dims=sibling_dims) == "low_images"
+    assert classify_media_file(large_img, sibling_max_dims=sibling_dims) == "hd_images"
+
+    # 2. GIF 实证用例
+    assert classify_media_file("work_0_pat_censor.gif") == "intermediate"
+    assert classify_media_file("work_0_kofi_censor.gif") == "intermediate"
+    assert classify_media_file("work_0_da_censor.gif") == "intermediate"
+    assert classify_media_file("work_0_xopt.gif") == "low_gif"
+    assert classify_media_file("work_0_pat_teaser.gif") == "low_gif"
+    assert classify_media_file("work_0_freehalf.gif") == "low_gif"
+    assert classify_media_file("work_0_da_wm.gif") == "hd_gif"
+
+    # 实体 GIF 测试全尺寸 vs 低清
+    full_gif = tmp_path / "anim_full.gif"
+    Image.new("RGB", (1000, 800), color=(5, 5, 5)).save(full_gif)
+    teaser_gif = tmp_path / "anim_teaser.gif"
+    Image.new("RGB", (500, 400), color=(5, 5, 5)).save(teaser_gif)
+
+    # 独立无标记全尺寸 -> hd_gif
+    assert classify_media_file(full_gif) == "hd_gif"
+    # 同组参照下，低尺寸 -> low_gif
+    gif_sibling_dims = {"anim": (1000, 800)}
+    assert classify_media_file(teaser_gif, sibling_max_dims=gif_sibling_dims) == "low_gif"
+    assert classify_media_file(full_gif, sibling_max_dims=gif_sibling_dims) == "hd_gif"
+
+    # 3. MP4 实证用例
+    # 渲染标记集测试
+    assert classify_media_file("bsky_video_animation.mp4") == "mp4_renders"
+    assert classify_media_file("anim_x_video.mp4") == "mp4_renders"
+    assert classify_media_file("x_video_005bcb44db102c22.mp4") == "mp4_renders"
+    assert classify_media_file("anim_0_wm.mp4") == "mp4_renders"
+    assert classify_media_file("anim_0_render.mp4") == "mp4_renders"
+    assert classify_media_file("anim_video_render.mp4") == "mp4_renders"
+    assert classify_media_file("anim_0_xopt.mp4") == "mp4_renders"
+
+    # 同组无标记体积参照：大原片 vs 小渲染
+    mp4_large = tmp_path / "clip.mp4"
+    mp4_large.write_bytes(b"M" * 1024 * 100)  # 100 KB
+    mp4_small = tmp_path / "clip_preview.mp4"
+    mp4_small.write_bytes(b"M" * 1024 * 10)   # 10 KB
+
+    mp4_bytes_map = {"clip": 1024 * 100}
+    assert classify_media_file(mp4_large, sibling_max_bytes=mp4_bytes_map) == "mp4_originals"
+    assert classify_media_file(mp4_small, sibling_max_bytes=mp4_bytes_map) == "mp4_renders"
+
+    # 唯一无标记 -> mp4_originals
+    solo_mp4 = tmp_path / "single_film.mp4"
+    solo_mp4.write_bytes(b"M" * 1024 * 50)
+    assert classify_media_file(solo_mp4) == "mp4_originals"
+
+
+def test_three_call_points_classifier_consistency(tmp_path):
+    """
+    §4 验证三处调用点对同一组样本文件判定严格一致：
+    1. classify_role_for_sent_file（发布兜底）
+    2. scan_legacy_cache 分类流
+    3. migrate_legacy_bundle_pool 分类流
+    4. scan_archive_categories 复检流
+    """
+    # 构造涵盖各种类型的一组样本文件
+    samples = [
+        ("art_censored.png", "intermediate"),
+        ("art_raw_wm.png", "hd_images"),
+        ("art_freehalf.jpg", "low_images"),
+        ("art_xopt.jpg", "low_images"),
+        ("anim_pat_censor.gif", "intermediate"),
+        ("anim_xopt.gif", "low_gif"),
+        ("anim_da_wm.gif", "hd_gif"),
+        ("bsky_video_sample.mp4", "mp4_renders"),
+        ("sample_x_video.mp4", "mp4_renders"),
+    ]
+
+    for fname, expected_cat in samples:
+        fpath = tmp_path / fname
+        if fname.endswith((".png", ".jpg")):
+            Image.new("RGB", (100, 100), color=(1, 1, 1)).save(fpath)
+        elif fname.endswith(".gif"):
+            Image.new("RGB", (100, 100), color=(1, 1, 1)).save(fpath)
+        else:
+            fpath.write_bytes(b"V" * 512)
+
+        # 1. 统一函数
+        cat_unified = classify_media_file(fpath)
+        assert cat_unified == expected_cat
+
+        # 2. 调用点 1: classify_role_for_sent_file (无 role_map 兜底模式)
+        cat_sent = classify_role_for_sent_file(fpath, role_map=None)
+        if expected_cat in ARCHIVE_CATEGORIES:
+            assert cat_sent == expected_cat, f"classify_role_for_sent_file mismatch on {fname}"
+        else:
+            # intermediate 不属于 ARCHIVE_CATEGORIES，兜底返回 None
+            assert cat_sent is None
+
+        # 3. 调用点 2: scan_legacy_cache 扫描判定
+        test_cache = tmp_path / f"cache_{fname}"
+        test_cache.mkdir(parents=True, exist_ok=True)
+        sample_copy = test_cache / fname
+        shutil.copy2(fpath, sample_copy)
+        rep = scan_legacy_cache(cache_dir=test_cache)
+        if expected_cat in ("low_images", "low_gif", "intermediate"):
+            assert str(sample_copy) in rep["to_delete"]
+        elif expected_cat in ARCHIVE_CATEGORIES:
+            assert str(sample_copy) in rep["to_archive"]
+
+        # 4. 调用点 3: scan_archive_categories 归档复检判定
+        test_arch = tmp_path / f"arch_{fname}" / "2026-10" / expected_cat
+        test_arch.mkdir(parents=True, exist_ok=True)
+        arch_copy = test_arch / fname
+        shutil.copy2(fpath, arch_copy)
+        arch_rep = scan_archive_categories(archive_root=tmp_path / f"arch_{fname}")
+        # 若放入 expected_cat，归档分类复检应判定正确就位（除非是 intermediate，其应进 to_delete_intermediate）
+        if expected_cat == "intermediate":
+            assert len(arch_rep["to_delete_intermediate"]) == 1
+        else:
+            assert arch_rep["correct_count"] == 1
+
+
+# ==============================================================================
+# §2 & §4 已归档复检（archive re-sort）功能测试
+# ==============================================================================
+
+def test_archive_re_sort_dry_run_and_execution_lifecycle(tmp_path):
+    """
+    §2 测试已归档复检全流程：
+    - 普通错桶 -> 移动到正确类别目录
+    - 误归档中间件（打码件） -> 确认后彻底删除
+    - 未识别文件 -> 保持不动
+    - confirmed=False 严禁修改任何文件
+    - patreon_bundle_pool.json 同步更新移动与删除
+    """
+    archive_root = tmp_path / "archive"
+    month = "2026-10"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 错桶 1: hd_gif 里的 xopt 件（降质发送件，应搬去 low_gif）
+    f_xopt = archive_root / month / "hd_gif" / "work_0_xopt.gif"
+    f_xopt.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (200, 200), color=(1, 2, 3)).save(f_xopt)
+
+    # 2. 错桶 2: mp4_originals 里的 x_video（渲染发送件，应搬去 mp4_renders）
+    f_xvid = archive_root / month / "mp4_originals" / "work_0_x_video.mp4"
+    f_xvid.parent.mkdir(parents=True, exist_ok=True)
+    f_xvid.write_bytes(b"X_VIDEO_DATA")
+
+    # 3. 误归档中间件 1: hd_gif 里的打码件（应删除）
+    f_censor_gif = archive_root / month / "hd_gif" / "work_0_pat_censor.gif"
+    Image.new("RGB", (200, 200), color=(4, 5, 6)).save(f_censor_gif)
+
+    # 4. 误归档中间件 2: hd_images 里的无 wm 打码件（应删除）
+    f_censor_img = archive_root / month / "hd_images" / "work_0_censored.png"
+    f_censor_img.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (200, 200), color=(7, 8, 9)).save(f_censor_img)
+
+    # 5. 正确就位文件: hd_gif 里的全尺寸无码件（应保留不动）
+    f_correct_gif = archive_root / month / "hd_gif" / "work_0_da_wm.gif"
+    Image.new("RGB", (200, 200), color=(10, 11, 12)).save(f_correct_gif)
+
+    # 6. 未识别文件: 文本说明（应保留不动）
+    f_unknown = archive_root / month / "hd_images" / "notes.txt"
+    f_unknown.write_text("info notes", encoding="utf-8")
+
+    # 7. 准备 patreon_bundle_pool.json，同时引用 f_xopt (需被替换) 和 f_censor_gif (需被剔除)
+    pool_file = data_dir / "patreon_bundle_pool.json"
+    pool_file.write_text(
+        json.dumps([
+            {
+                "title": "TestWork",
+                "images": [str(f_xopt), str(f_censor_gif), str(f_correct_gif)],
+                "videos": [str(f_xvid)],
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    # Step A: 扫描复检报告
+    rep = scan_archive_categories(archive_root=archive_root, data_dir=data_dir)
+    assert rep["total_files"] == 6
+    assert rep["correct_count"] == 1
+    assert len(rep["to_move"]) == 2
+    assert len(rep["to_delete_intermediate"]) == 2
+    assert len(rep["unrecognized"]) == 1
+    assert "hd_gif → low_gif" in rep["summary_text"]
+    assert "mp4_originals → mp4_renders" in rep["summary_text"]
+    assert "work_0_xopt.gif" in rep["detailed_text"]
+    assert "work_0_pat_censor.gif" in rep["detailed_text"]
+
+    # Step B: 未确认执行 (confirmed=False) -> 零改动
+    unconf_res = execute_archive_re_sort(
+        rep,
+        archive_root=archive_root,
+        data_dir=data_dir,
+        confirmed=False,
+    )
+    assert unconf_res["executed"] is False
+    assert f_xopt.exists()
+    assert f_xvid.exists()
+    assert f_censor_gif.exists()
+    assert f_censor_img.exists()
+    assert f_correct_gif.exists()
+    assert f_unknown.exists()
+
+    # Step C: 用户确认执行 (confirmed=True) -> 执行搬正与中间件删除
+    conf_res = execute_archive_re_sort(
+        rep,
+        archive_root=archive_root,
+        data_dir=data_dir,
+        confirmed=True,
+    )
+    assert conf_res["executed"] is True
+    assert conf_res["moved_count"] == 2
+    assert conf_res["deleted_count"] == 2
+
+    # 错桶已搬入正确目录
+    target_xopt = archive_root / month / "low_gif" / "work_0_xopt.gif"
+    target_xvid = archive_root / month / "mp4_renders" / "work_0_x_video.mp4"
+    assert target_xopt.exists(), "work_0_xopt.gif 应成功搬入 low_gif"
+    assert target_xvid.exists(), "work_0_x_video.mp4 应成功搬入 mp4_renders"
+    assert not f_xopt.exists()
+    assert not f_xvid.exists()
+
+    # 误归档中间件已被删除
+    assert not f_censor_gif.exists(), "中间件 work_0_pat_censor.gif 应被彻底删除"
+    assert not f_censor_img.exists(), "中间件 work_0_censored.png 应被彻底删除"
+
+    # 正确就位与未识别文件安全保留
+    assert f_correct_gif.exists()
+    assert f_unknown.exists()
+
+    # patreon_bundle_pool.json 索引同步：f_xopt 路径更新为 target_xopt，f_censor_gif 剔除
+    new_pool = json.loads(pool_file.read_text(encoding="utf-8"))
+    imgs = new_pool[0]["images"]
+    vids = new_pool[0]["videos"]
+    assert str(target_xopt) in imgs
+    assert str(f_censor_gif) not in imgs
+    assert str(f_correct_gif) in imgs
+    assert str(target_xvid) in vids
+    assert str(f_xvid) not in vids
+
+
+def test_archive_re_sort_collision_non_overwrite(tmp_path):
+    """验证搬移错桶文件时若目标目录存在同名不同哈希文件，使用 _2 冲突顺延，绝不覆盖"""
+    archive_root = tmp_path / "archive"
+    month = "2026-10"
+
+    # 在目标目录提前存在同名文件
+    target_dir = archive_root / month / "low_gif"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    existing_dest = target_dir / "work_0_xopt.gif"
+    existing_dest.write_bytes(b"EXISTING_ORIGINAL_LOW_GIF")
+
+    # 在错桶放入同名但内容不同的文件
+    wrong_dir = archive_root / month / "hd_gif"
+    wrong_dir.mkdir(parents=True, exist_ok=True)
+    src_file = wrong_dir / "work_0_xopt.gif"
+    src_file.write_bytes(b"NEW_DIFFERENT_XOPT_GIF")
+
+    rep = scan_archive_categories(archive_root=archive_root)
+    assert len(rep["to_move"]) == 1
+
+    res = execute_archive_re_sort(rep, archive_root=archive_root, confirmed=True)
+    assert res["executed"] is True
+    assert res["moved_count"] == 1
+
+    # 原目标文件完好无损
+    assert existing_dest.exists()
+    assert existing_dest.read_bytes() == b"EXISTING_ORIGINAL_LOW_GIF"
+
+    # 新文件被顺延保存为 _2.gif
+    collided_file = target_dir / "work_0_xopt_2.gif"
+    assert collided_file.exists()
+    assert collided_file.read_bytes() == b"NEW_DIFFERENT_XOPT_GIF"
+    assert not src_file.exists()
+
+
+def test_archive_resort_ui_dialog_and_interaction(tmp_path, monkeypatch):
+    """验证设置页中 🗂️ 归档分类复检 按钮、弹窗默认按键为「取消」、详细信息展开与执行回调"""
+    from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
+    from app import SettingsDialog
+    import sys
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    class MockMain(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.data_dir = tmp_path / "data"
+            self.config = {}
+            self.dispatchers = []
+        def notify(self, *args, **kwargs):
+            pass
+        def _schedule_config_save(self):
+            pass
+
+    mock_main = MockMain()
+    dlg = SettingsDialog(mock_main)
+    assert hasattr(dlg, "archive_resort_btn")
+    assert dlg.archive_resort_btn.text() == "🗂️ 归档分类复检"
+
+    fake_report = {
+        "summary_text": "归档分类复检报告:\n需搬动 1 项",
+        "detailed_text": "1. hd_gif -> low_gif: test.gif",
+        "to_move": [],
+        "to_delete_intermediate": [],
+        "unrecognized": [],
+    }
+    monkeypatch.setattr("app.scan_archive_categories", lambda **kw: fake_report)
+
+    captured = {}
+    def mock_exec(box_self):
+        captured["title"] = box_self.windowTitle()
+        captured["text"] = box_self.text()
+        captured["detailedText"] = box_self.detailedText()
+        captured["defaultButton"] = box_self.defaultButton().text()
+        for btn in box_self.buttons():
+            if btn.text() == "取消":
+                box_self.clicked_button = btn
+                break
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", mock_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda box_self: getattr(box_self, "clicked_button", None))
+
+    dlg._on_archive_resort_clicked()
+    assert captured["title"] == "归档分类复检报告"
+    assert "归档分类复检报告" in captured["text"]
+    assert "1. hd_gif -> low_gif" in captured["detailedText"]
+    assert captured["defaultButton"] == "取消"
+
+
