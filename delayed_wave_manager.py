@@ -21,6 +21,12 @@ from typing import Optional, Union
 import cv2
 from PIL import Image, ImageSequence
 
+from media_foundation import (
+    get_monthly_cache_dir,
+    resolve_non_colliding_path,
+    sanitize_ascii_filename,
+)
+
 logger = logging.getLogger("ArtCrossPost")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -65,11 +71,16 @@ def downscale_image_half(src_path: Union[str, Path], dest_path: Optional[Union[s
         raise FileNotFoundError(f"源图片不存在: {src}")
 
     if dest_path is None:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        dest = CACHE_DIR / f"{src.stem}_half{src.suffix}"
+        monthly_cache = get_monthly_cache_dir(CACHE_DIR)
+        dest = resolve_non_colliding_path(
+            monthly_cache,
+            f"{src.stem}_half{src.suffix}",
+            fallback_stem=src.stem,
+        )
     else:
-        dest = Path(dest_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        raw_dest = Path(dest_path)
+        raw_dest.parent.mkdir(parents=True, exist_ok=True)
+        dest = raw_dest.parent / sanitize_ascii_filename(raw_dest.name, fallback_stem=src.stem)
 
     is_gif = src.suffix.lower() == ".gif"
 
@@ -247,7 +258,12 @@ class DelayedQueueManager:
         for idx, src_p in enumerate(source_images):
             sp = Path(src_p)
             if sp.exists():
-                dest_p = item_asset_dir / f"{idx:02d}_{sp.name}"
+                dest_p = resolve_non_colliding_path(
+                    item_asset_dir,
+                    f"{idx:02d}_{sp.name}",
+                    source_file=sp,
+                    fallback_stem=f"asset_{idx:02d}",
+                )
                 try:
                     shutil.copy2(sp, dest_p)
                     copied_assets.append(str(dest_p))

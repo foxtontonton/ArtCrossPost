@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QThread
 
 from config import DEFAULT_CONFIG
+from media_foundation import get_monthly_cache_dir
 from app import (
     MainWindow,
     CACHE_DIR,
@@ -203,8 +204,9 @@ def test_static_render_minimal_set_censor_on_watermark_on(mock_main_window, tmp_
     win.watermark_apply_publish_cb.setChecked(True)
     win.watermark_text_input.setText("@ARTIST")
 
+    work_cache = get_monthly_cache_dir(CACHE_DIR)
     # 清理 CACHE_DIR 中残留同名前缀文件
-    for f in CACHE_DIR.glob(f"{art_title}*"):
+    for f in work_cache.glob(f"{art_title}*"):
         try:
             f.unlink()
         except Exception:
@@ -229,10 +231,10 @@ def test_static_render_minimal_set_censor_on_watermark_on(mock_main_window, tmp_
     pld = captured_payloads[0]
 
     # 验证关键缓存文件生成
-    raw_wm_file = CACHE_DIR / f"{art_title}_0_raw_wm.jpg"
-    censored_wm_file = CACHE_DIR / f"{art_title}_0_censored_wm.jpg"
-    da_clean_file = CACHE_DIR / f"{art_title}.jpg"
-    censored_clean_file = CACHE_DIR / f"{art_title}_0_censored_clean.jpg"
+    raw_wm_file = work_cache / f"{art_title}_0_raw_wm.jpg"
+    censored_wm_file = work_cache / f"{art_title}_0_censored_wm.jpg"
+    da_clean_file = work_cache / f"{art_title}.jpg"
+    censored_clean_file = work_cache / f"{art_title}_0_censored_clean.jpg"
 
     assert raw_wm_file.exists(), "raw_wm 必须存在供无码平台与水印备用"
     assert censored_wm_file.exists(), "censored_wm 必须存在供打码平台"
@@ -242,7 +244,7 @@ def test_static_render_minimal_set_censor_on_watermark_on(mock_main_window, tmp_
     assert not censored_clean_file.exists(), "必须彻底取消 censored_clean 的生成，不留重复副本"
 
     # 验证全平台 target 分发 (Patreon 统一结构: [teaser_1, hd_1])
-    pat_teaser_file = CACHE_DIR / f"{art_title}_0_pat_teaser.jpg"
+    pat_teaser_file = work_cache / f"{art_title}_0_pat_teaser.jpg"
     assert pld["da_images"] == [str(da_clean_file)]
     assert pld["x_images"] == [str(censored_wm_file)]
     assert pld["patreon_images"] == [str(pat_teaser_file), str(raw_wm_file)]
@@ -276,7 +278,8 @@ def test_static_render_minimal_set_censor_on_watermark_off(mock_main_window, tmp
     win.auto_censor_cb.setChecked(True)
     win.watermark_enabled_cb.setChecked(False)
 
-    for f in CACHE_DIR.glob(f"{art_title}*"):
+    work_cache = get_monthly_cache_dir(CACHE_DIR)
+    for f in work_cache.glob(f"{art_title}*"):
         try:
             f.unlink()
         except Exception:
@@ -300,16 +303,16 @@ def test_static_render_minimal_set_censor_on_watermark_off(mock_main_window, tmp
     assert len(captured_payloads) == 1
     pld = captured_payloads[0]
 
-    censor_file = CACHE_DIR / f"{art_title}_0_censored.jpg"
-    da_clean_file = CACHE_DIR / f"{art_title}.jpg"
-    censored_clean_file = CACHE_DIR / f"{art_title}_0_censored_clean.jpg"
+    censor_file = work_cache / f"{art_title}_0_censored.jpg"
+    da_clean_file = work_cache / f"{art_title}.jpg"
+    censored_clean_file = work_cache / f"{art_title}_0_censored_clean.jpg"
 
     assert censor_file.exists()
     assert da_clean_file.exists()
     assert not censored_clean_file.exists(), "水印关时亦严禁生成冗余的 censored_clean 副本"
 
     # Ko-fi / X 均复用唯一的 censor_file；Patreon 按统一结构为 [teaser_1, hd_1]
-    pat_teaser_file = CACHE_DIR / f"{art_title}_0_pat_teaser.jpg"
+    pat_teaser_file = work_cache / f"{art_title}_0_pat_teaser.jpg"
     assert pld["x_images"] == [str(censor_file)]
     assert pld["patreon_images"] == [str(pat_teaser_file), str(img_path)]
     assert pld["kofi_images"] == [str(censor_file)]
@@ -339,7 +342,8 @@ def test_da_clean_name_contents_match_and_hardlink(mock_main_window, tmp_path, m
     win.auto_censor_cb.setChecked(False)
     win.watermark_enabled_cb.setChecked(False)
 
-    for f in CACHE_DIR.glob(f"{art_title}*"):
+    work_cache = get_monthly_cache_dir(CACHE_DIR)
+    for f in work_cache.glob(f"{art_title}*"):
         try:
             f.unlink()
         except Exception:
@@ -361,7 +365,7 @@ def test_da_clean_name_contents_match_and_hardlink(mock_main_window, tmp_path, m
     win._start_publishing()
 
     assert len(captured_payloads) == 1
-    da_clean_file = CACHE_DIR / f"{art_title}.jpg"
+    da_clean_file = work_cache / f"{art_title}.jpg"
     assert da_clean_file.exists()
     assert da_clean_file.read_bytes() == img_path.read_bytes()
 
@@ -411,7 +415,8 @@ def test_x_unselected_xopt_cleaned_up(mock_main_window, tmp_path, monkeypatch):
     win.auto_censor_cb.setChecked(False)
     win.watermark_enabled_cb.setChecked(False)
 
-    for f in CACHE_DIR.glob(f"{art_title}*"):
+    work_cache = get_monthly_cache_dir(CACHE_DIR)
+    for f in work_cache.glob(f"{art_title}*"):
         try:
             f.unlink()
         except Exception:
@@ -437,15 +442,15 @@ def test_x_unselected_xopt_cleaned_up(mock_main_window, tmp_path, monkeypatch):
     assert len(pld["x_images"]) == 2
 
     # 前 2 张选中的 _xopt.jpg 应该存在
-    opt_0 = CACHE_DIR / f"{art_title}_0_xopt.jpg"
-    opt_1 = CACHE_DIR / f"{art_title}_1_xopt.jpg"
+    opt_0 = work_cache / f"{art_title}_0_xopt.jpg"
+    opt_1 = work_cache / f"{art_title}_1_xopt.jpg"
     assert opt_0.exists(), "被选用的 X 图片 xopt 产物必须保留"
     assert opt_1.exists(), "被选用的 X 图片 xopt 产物必须保留"
 
     # 未被选用的第 2, 3, 4 张 _xopt.jpg 必须被清理删除
-    opt_2 = CACHE_DIR / f"{art_title}_2_xopt.jpg"
-    opt_3 = CACHE_DIR / f"{art_title}_3_xopt.jpg"
-    opt_4 = CACHE_DIR / f"{art_title}_4_xopt.jpg"
+    opt_2 = work_cache / f"{art_title}_2_xopt.jpg"
+    opt_3 = work_cache / f"{art_title}_3_xopt.jpg"
+    opt_4 = work_cache / f"{art_title}_4_xopt.jpg"
     assert not opt_2.exists(), "未选用的 xopt 缓存文件必须被删除"
     assert not opt_3.exists(), "未选用的 xopt 缓存文件必须被删除"
     assert not opt_4.exists(), "未选用的 xopt 缓存文件必须被删除"
@@ -483,7 +488,8 @@ def test_gif_cross_platform_reuse_when_params_and_size_match(mock_main_window, t
     win.watermark_apply_publish_cb.setChecked(True)
     win.watermark_text_input.setText("@ARTIST_GIF")
 
-    for f in CACHE_DIR.glob(f"{art_title}*"):
+    work_cache = get_monthly_cache_dir(CACHE_DIR)
+    for f in work_cache.glob(f"{art_title}*"):
         try:
             f.unlink()
         except Exception:
@@ -516,18 +522,18 @@ def test_gif_cross_platform_reuse_when_params_and_size_match(mock_main_window, t
     # 核心断言: _generate_composite_gif 仅被 DA 调用 1 次
     assert len(call_records) == 1, f"预期 _generate_composite_gif 仅执行 1 次，实际执行了 {len(call_records)} 次: {call_records}"
 
-    da_render_out = CACHE_DIR / f"{art_title}_0_da_censor.gif"
+    da_render_out = work_cache / f"{art_title}_0_da_censor.gif"
     assert da_render_out.exists()
 
     # 严禁生成独立的 X 与 Ko-fi 冗余 GIF 文件
-    x_opt_gif = CACHE_DIR / f"{art_title}_0_xopt.gif"
-    kofi_censor_gif = CACHE_DIR / f"{art_title}_0_kofi_censor.gif"
+    x_opt_gif = work_cache / f"{art_title}_0_xopt.gif"
+    kofi_censor_gif = work_cache / f"{art_title}_0_kofi_censor.gif"
     assert not x_opt_gif.exists(), "X 应复用 DA 动图，严禁重复渲染 _xopt.gif"
     assert not kofi_censor_gif.exists(), "Ko-fi 应复用 DA 动图，严禁重复渲染 _kofi_censor.gif"
 
     # 验证 payload 中 X / Ko-fi 复用了 DA 动图路径，Patreon 为统一结构 [teaser_1, hd_1]
-    pat_teaser_gif = CACHE_DIR / f"{art_title}_0_pat_teaser.gif"
-    pat_wm_gif = CACHE_DIR / f"{art_title}_0_pat_wm.gif"
+    pat_teaser_gif = work_cache / f"{art_title}_0_pat_teaser.gif"
+    pat_wm_gif = work_cache / f"{art_title}_0_pat_wm.gif"
     pld = captured_payloads[0]
     assert pld["x_images"] == [str(da_render_out)]
     assert pld["patreon_images"] == [str(pat_teaser_gif), str(pat_wm_gif)]

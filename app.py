@@ -84,6 +84,20 @@ from delayed_wave_manager import (
 )
 from delayed_wave_executor import DelayedWaveExecutor, DelayedWaveWorkerThread, render_composite_gif_frames
 from ui_delayed_queue_dialog import DelayedQueueDialog
+from media_foundation import (
+    ARCHIVE_CATEGORIES,
+    archive_publish_run_outputs,
+    execute_legacy_cache_cleanup,
+    get_monthly_archive_dir,
+    get_monthly_cache_dir,
+    migrate_legacy_bundle_pool,
+    migrate_presets_file,
+    resolve_non_colliding_path,
+    run_scheduled_cleanup,
+    sanitize_ascii_filename,
+    sanitize_ascii_stem,
+    scan_legacy_cache,
+)
 
 
 class NoWheelEventFilter(QObject):
@@ -2298,6 +2312,8 @@ class PublishThread(QThread):
 
             # 2026-11-05 免费平台降档规则：所有发往免费平台 (DA / X / Bluesky / Civitai) 的图片统一降档 (宽、高边长 ×0.5 取整)
             if disp.name in ("deviantart", "x_twitter", "bluesky", "civitai") and disp_images:
+                work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
+                media_roles = self.payload.setdefault("_media_roles", {})
                 scaled_free_images = []
                 for f_img in disp_images:
                     try:
@@ -2307,9 +2323,13 @@ class PublishThread(QThread):
                             scaled_free_images.append(str(f_img))
                             continue
                         if p_f.exists() and not str(p_f).endswith("_freehalf" + p_f.suffix):
-                            h_dest = CACHE_DIR / f"{p_f.stem}_freehalf{p_f.suffix}"
-                            scaled_free_images.append(str(downscale_image_half(p_f, h_dest)))
+                            clean_h_name = sanitize_ascii_filename(f"{p_f.stem}_freehalf{p_f.suffix}", fallback_stem=p_f.stem)
+                            h_dest = work_cache_dir / clean_h_name
+                            scaled_out = str(downscale_image_half(p_f, h_dest))
+                            media_roles[scaled_out] = "low_gif" if p_f.suffix.lower() == ".gif" else "low_images"
+                            scaled_free_images.append(scaled_out)
                         else:
+                            media_roles[str(f_img)] = "low_gif" if p_f.suffix.lower() == ".gif" else "low_images"
                             scaled_free_images.append(str(f_img))
                     except Exception as s_err:
                         logger.warning(f"[PublishThread] 免费平台降档异常 (回退原图): {s_err}")
@@ -2327,6 +2347,7 @@ class PublishThread(QThread):
 
             # 针对 Ko-fi 轨道的防卫性二次自愈门禁 (若未在发布准备时压缩或原图动态超限)
             if disp.name == "kofi":
+                work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
                 kofi_resolved = []
                 compress_failed = False
                 for k_img in disp_images:
@@ -2336,7 +2357,8 @@ class PublishThread(QThread):
                         orig_mb = orig_bytes / (1024 * 1024)
                         logger.info(f"[Pre-publish Gate] [Ko-fi] 门禁捕获 GIF 超出动效播放上限 ({orig_mb:.2f}MB > 4.0MB)，触发无码 GIF 优化器 (目标 ≤ 3.8MB)...")
                         self.progress_signal.emit(10, f"Ko-fi 动图超出播放限制 ({orig_mb:.2f}MB)，正在优化至 3.8MB 以内...")
-                        k_out = CACHE_DIR / f"kofi_gate_opt_{kp.stem}.gif"
+                        clean_k_name = sanitize_ascii_filename(f"kofi_gate_opt_{kp.stem}.gif", fallback_stem=kp.stem)
+                        k_out = work_cache_dir / clean_k_name
                         try:
                             opt_res = optimize_raw_gif(kp, k_out, max_limit_mb=3.8)
                             new_mb = Path(opt_res).stat().st_size / (1024 * 1024)
@@ -3817,8 +3839,69 @@ class SettingsDialog(QDialog):
         warn_desc.setWordWrap(True)
         layout.addWidget(warn_desc)
 
+        # 6. 媒体文件归档与缓存清理 (§4.1 & §4.2)
+        layout.addWidget(self._create_separator())
+        cleanup_header = self._create_section_header(
+            "媒体缓存与归档清理",
+            "自动清理超期缓存衍生件（低画质 30 天 / 其余 60 天），或扫描存量缓存按类别分拣归档。"
+        )
+        layout.addLayout(cleanup_header)
+
+        cleanup_btn_row = QHBoxLayout()
+        cleanup_btn_row.setSpacing(10)
+
+        self.cleanup_now_btn = QPushButton("立即清理")
+        self.cleanup_now_btn.setObjectName("secondaryBtn")
+        self.cleanup_now_btn.clicked.connect(self._on_cleanup_now_clicked)
+        cleanup_btn_row.addWidget(self.cleanup_now_btn)
+
+        self.legacy_cache_btn = QPushButton("📊 存量缓存分拣报告")
+        self.legacy_cache_btn.setObjectName("secondaryBtn")
+        self.legacy_cache_btn.clicked.connect(self._on_legacy_cache_cleanup_clicked)
+        cleanup_btn_row.addWidget(self.legacy_cache_btn)
+        cleanup_btn_row.addStretch()
+
+        layout.addLayout(cleanup_btn_row)
+
         layout.addStretch()
         return self._wrap_in_scroll(content)
+
+    def _on_cleanup_now_clicked(self):
+        data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+        res = run_scheduled_cleanup(data_dir=data_dir, force=True)
+        msg = res.get("summary_message", "缓存清理完成")
+        if self.main_window:
+            self.main_window.notify(msg, level="success")
+        QMessageBox.information(self, "立即清理完成", msg)
+
+    def _on_legacy_cache_cleanup_clicked(self):
+        data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+        report = scan_legacy_cache(cache_dir=data_dir / "cache")
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("存量缓存分拣报告")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText(
+            f"{report.get('summary_text', '')}\n\n"
+            "点击「执行」将删除低画质与中间件，并将高清渲染件与 MP4 迁入按月归档区；未识别文件保持不动。"
+        )
+        exec_btn = msg_box.addButton("执行", QMessageBox.AcceptRole)
+        cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.exec_()
+        if msg_box.clickedButton() is exec_btn:
+            exec_res = execute_legacy_cache_cleanup(
+                report,
+                base_archive_dir=data_dir / "archive",
+                confirmed=True,
+            )
+            done_msg = (
+                f"存量缓存分拣完成：已删除 {exec_res['deleted_count']} 个低画质/中间件，"
+                f"已迁入归档区 {exec_res['archived_count']} 个高清/视频文件，"
+                f"保留未识别文件 {exec_res['untouched_count']} 个。"
+            )
+            if self.main_window:
+                self.main_window.notify(done_msg, level="success")
+            QMessageBox.information(self, "存量分拣完成", done_msg)
 
     def _on_comfyui_dir_changed(self, text):
         val = (text or "").strip()
@@ -4161,6 +4244,11 @@ class MainWindow(QMainWindow):
             self._startup_expired_timer.setSingleShot(True)
             self._startup_expired_timer.timeout.connect(self._check_startup_expired_tasks)
             self._startup_expired_timer.start(1200)
+            try:
+                migrate_legacy_bundle_pool(self.data_dir)
+                run_scheduled_cleanup(self.data_dir, force=False)
+            except Exception as ce:
+                logger.warning(f"启动缓存自动清理或迁移异常: {ce}")
 
         # 延迟公开波子系统启动 (仅当开关为 True 时)
         if self.delayed_wave_enabled:
@@ -7180,11 +7268,12 @@ class MainWindow(QMainWindow):
             return
 
         current_file = self.image_paths[self.current_preview_index]
-        orig_name = Path(current_file).stem
+        orig_name = sanitize_ascii_stem(Path(current_file).stem)
         is_gif = current_file.lower().endswith(".gif")
+        work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
 
         if is_gif:
-            default_path = str(CACHE_DIR / f"{orig_name}_composite.gif")
+            default_path = str(work_cache_dir / f"{orig_name}_composite.gif")
             save_path, _ = QFileDialog.getSaveFileName(
                 self, "导出当前打码水印 GIF 动图", default_path, "GIF 动图 (*.gif)"
             )
@@ -7242,7 +7331,7 @@ class MainWindow(QMainWindow):
             if self._current_rendered_pixmap is None:
                 self.notify("当前无渲染合成图可供导出！", level="warning")
                 return
-            default_path = str(CACHE_DIR / f"{orig_name}_composite.png")
+            default_path = str(work_cache_dir / f"{orig_name}_composite.png")
             save_path, _ = QFileDialog.getSaveFileName(
                 self, "导出当前打码水印合成图", default_path, "PNG 图片 (*.png);;JPG 图片 (*.jpg)"
             )
@@ -7870,9 +7959,10 @@ class MainWindow(QMainWindow):
         if ext not in ("jpg", "jpeg", "png", "webp", "gif"):
             ext = "jpg"
 
-        teaser_out = CACHE_DIR / f"{safe_title}_0_pat_teaser.{ext}"
-        tmp_censor = CACHE_DIR / f"{safe_title}_0_pat_safe_tmp.{ext}"
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
+        clean_safe_title = sanitize_ascii_stem(safe_title, fallback_stem=Path(first_img).stem)[:40]
+        teaser_out = work_cache_dir / f"{clean_safe_title}_0_pat_teaser.{ext}"
+        tmp_censor = work_cache_dir / f"{clean_safe_title}_0_pat_safe_tmp.{ext}"
         if tmp_censor.exists():
             tmp_censor.unlink(missing_ok=True)
         if teaser_out.exists():
@@ -8127,10 +8217,11 @@ class MainWindow(QMainWindow):
         wm_color = self.watermark_color_combo.currentData() or "#ffffff"
         wm_stroke = self.watermark_stroke_cb.isChecked()
 
-        # 生成安全文件名 (避免 DeviantArt 等平台直接以文件名覆盖标题为 public_send_0)
+        # 生成安全文件名 (避免 DeviantArt 等平台直接以文件名覆盖标题为 public_send_0；§5 全 ASCII 化)
         title_str = title_val
-        safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
-        safe_title = safe_title[:40]
+        first_fb_stem = Path(images_to_use[0]).stem if images_to_use else "artwork"
+        safe_title = sanitize_ascii_stem(title_str, fallback_stem=first_fb_stem)[:40]
+        work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
 
         self.notify("正在准备全平台素材 (按各平台打码及体积配置分别渲染处理)...", level="info")
 
@@ -8199,9 +8290,9 @@ class MainWindow(QMainWindow):
                 # 1. DeviantArt 动图
                 da_out_path = None
                 clean_da_gif_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
-                clean_da_gif = CACHE_DIR / f"{clean_da_gif_stem}.gif"
+                clean_da_gif = work_cache_dir / f"{clean_da_gif_stem}.gif"
                 if is_da_censor:
-                    da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_censor.gif"
+                    da_out_path = work_cache_dir / f"{safe_title}_{idx}_da_censor.gif"
                     try:
                         self._generate_composite_gif(p, da_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                         if str(clean_da_gif) != str(da_out_path):
@@ -8213,7 +8304,7 @@ class MainWindow(QMainWindow):
                         return
                 else:
                     if wm_info:
-                        da_out_path = CACHE_DIR / f"{safe_title}_{idx}_da_wm.gif"
+                        da_out_path = work_cache_dir / f"{safe_title}_{idx}_da_wm.gif"
                         try:
                             self._generate_composite_gif(p, da_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
                             if str(clean_da_gif) != str(da_out_path):
@@ -8303,7 +8394,7 @@ class MainWindow(QMainWindow):
                         if reused_x_gif:
                             x_images_map[p] = reused_x_gif
                         else:
-                            x_out_path = CACHE_DIR / f"{safe_title}_{idx}_xopt.gif"
+                            x_out_path = work_cache_dir / f"{safe_title}_{idx}_xopt.gif"
                             x_c = c_params if is_x_censor else None
                             try:
                                 self._generate_composite_gif(p, x_out_path, censor_params=x_c, wm_params=wm_info, max_limit_mb=13.8)
@@ -8372,7 +8463,7 @@ class MainWindow(QMainWindow):
                     if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
                         patreon_hd_images.append(str(da_out_path))
                     else:
-                        pat_out_path = CACHE_DIR / f"{safe_title}_{idx}_pat_wm.gif"
+                        pat_out_path = work_cache_dir / f"{safe_title}_{idx}_pat_wm.gif"
                         try:
                             render_composite_gif_frames(
                                 p,
@@ -8411,7 +8502,7 @@ class MainWindow(QMainWindow):
                     if reused_kofi_gif:
                         kofi_images.append(reused_kofi_gif)
                     elif is_kofi_censor:
-                        kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_censor.gif"
+                        kofi_out_path = work_cache_dir / f"{safe_title}_{idx}_kofi_censor.gif"
                         try:
                             self._generate_composite_gif(p, kofi_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=3.8)
                             kofi_images.append(str(kofi_out_path))
@@ -8421,7 +8512,7 @@ class MainWindow(QMainWindow):
                             return
                     else:
                         if wm_info:
-                            kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofi_wm.gif"
+                            kofi_out_path = work_cache_dir / f"{safe_title}_{idx}_kofi_wm.gif"
                             try:
                                 self._generate_composite_gif(p, kofi_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=3.8)
                                 kofi_images.append(str(kofi_out_path))
@@ -8434,7 +8525,7 @@ class MainWindow(QMainWindow):
                             if p_stat > 4.0 * 1024 * 1024:
                                 orig_mb = p_stat / (1024 * 1024)
                                 logger.info(f"[Pre-publish Gate] [Ko-fi] 检测到原图 GIF 超出动效上限 ({orig_mb:.2f}MB > 4.0MB)，启动无码 GIF 优化器 (目标 ≤ 3.8MB)...")
-                                kofi_out_path = CACHE_DIR / f"{safe_title}_{idx}_kofiopt.gif"
+                                kofi_out_path = work_cache_dir / f"{safe_title}_{idx}_kofiopt.gif"
                                 try:
                                     optimize_raw_gif(p, kofi_out_path, max_limit_mb=3.8)
                                     new_mb = Path(kofi_out_path).stat().st_size / (1024 * 1024)
@@ -8457,7 +8548,7 @@ class MainWindow(QMainWindow):
                         if da_out_path and is_da_censor and Path(da_out_path).exists():
                             bsky_gif_rendered = str(da_out_path)
                         else:
-                            bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_censor.gif"
+                            bsky_out_path = work_cache_dir / f"{safe_title}_{idx}_bsky_censor.gif"
                             try:
                                 self._generate_composite_gif(p, bsky_out_path, censor_params=c_params, wm_params=wm_info, max_limit_mb=None)
                                 bsky_gif_rendered = str(bsky_out_path)
@@ -8470,7 +8561,7 @@ class MainWindow(QMainWindow):
                             if da_out_path and (not is_da_censor) and Path(da_out_path).exists():
                                 bsky_gif_rendered = str(da_out_path)
                             else:
-                                bsky_out_path = CACHE_DIR / f"{safe_title}_{idx}_bsky_wm.gif"
+                                bsky_out_path = work_cache_dir / f"{safe_title}_{idx}_bsky_wm.gif"
                                 try:
                                     self._generate_composite_gif(p, bsky_out_path, censor_params=None, wm_params=wm_info, max_limit_mb=None)
                                     bsky_gif_rendered = str(bsky_out_path)
@@ -8483,7 +8574,7 @@ class MainWindow(QMainWindow):
 
                     # 若尚未设定配对视频，则将首个动图转码为 MP4 走视频管线
                     if not bsky_video_final_path and bsky_gif_rendered:
-                        mp4_out = CACHE_DIR / f"{safe_title}_{idx}_bsky.mp4"
+                        mp4_out = work_cache_dir / f"{safe_title}_{idx}_bsky.mp4"
                         try:
                             convert_gif_to_mp4(bsky_gif_rendered, mp4_out)
                             v_ok, v_err = validate_bluesky_video_constraints(mp4_out)
@@ -8523,7 +8614,7 @@ class MainWindow(QMainWindow):
                         opacity=censor_opacity,
                     )
                     if wm_info:
-                        pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored_wm.{ext}"
+                        pub_censor_path = work_cache_dir / f"{safe_title}_{idx}_censored_wm.{ext}"
                         self.watermark_engine.apply_watermark(
                             censored_bgr,
                             text=wm_text,
@@ -8536,11 +8627,11 @@ class MainWindow(QMainWindow):
                             output_path=pub_censor_path
                         )
                     else:
-                        pub_censor_path = CACHE_DIR / f"{safe_title}_{idx}_censored.{ext}"
+                        pub_censor_path = work_cache_dir / f"{safe_title}_{idx}_censored.{ext}"
                         cv2.imwrite(str(pub_censor_path), censored_bgr)
 
                 if wm_info:
-                    pub_raw_path = CACHE_DIR / f"{safe_title}_{idx}_raw_wm.{ext}"
+                    pub_raw_path = work_cache_dir / f"{safe_title}_{idx}_raw_wm.{ext}"
                     self.watermark_engine.apply_watermark(
                         p,
                         text=wm_text,
@@ -8559,7 +8650,7 @@ class MainWindow(QMainWindow):
                 # DeviantArt 静态图 (防污染: 为避免 DA 服务端将内部缓存文件名如 _raw_wm 初始化为草稿标题，硬链接/复制为洁净文件名；首图必须为作品本体名不带编号)
                 da_target = pub_censor_path if is_da_censor else pub_raw_path
                 clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
-                clean_da_path = CACHE_DIR / f"{clean_da_stem}.{ext}"
+                clean_da_path = work_cache_dir / f"{clean_da_stem}.{ext}"
                 try:
                     if Path(da_target).exists():
                         if str(clean_da_path) != str(da_target):
@@ -8573,7 +8664,7 @@ class MainWindow(QMainWindow):
                 # X (Twitter) 静态图与体积门禁 (JPEG 压缩分支)
                 x_target = pub_censor_path if is_x_censor else pub_raw_path
                 if is_x_selected:
-                    opt_jpg = CACHE_DIR / f"{safe_title}_{idx}_xopt.jpg"
+                    opt_jpg = work_cache_dir / f"{safe_title}_{idx}_xopt.jpg"
                     cfg_comp = load_config().get("compression", {})
                     x_limit = cfg_comp.get("x_max_limit_mb", 4.8)
                     x_quality = cfg_comp.get("jpeg_quality", 88)
@@ -8931,10 +9022,33 @@ class MainWindow(QMainWindow):
                     self.notify(f"Bluesky 单帖上限 4 张图片，已选取前 4 张发布 (后 {discarded_for_bsky} 张已舍弃)", level="info")
                     bluesky_images = bluesky_images[:4]
 
+        media_roles = {}
+        for hp in patreon_hd_images:
+            media_roles[str(hp)] = "hd_gif" if str(hp).lower().endswith(".gif") else "hd_images"
+        if patreon_images and len(patreon_images) > len(patreon_hd_images):
+            t1_p = str(patreon_images[0])
+            media_roles[t1_p] = "low_gif" if t1_p.lower().endswith(".gif") else "low_images"
+        for lp in list(da_images) + list(x_images) + list(bluesky_images):
+            if str(lp) not in media_roles:
+                media_roles[str(lp)] = "low_gif" if str(lp).lower().endswith(".gif") else "low_images"
+        for kp in list(kofi_images) + list(civitai_images):
+            if str(kp) not in media_roles:
+                media_roles[str(kp)] = "hd_gif" if str(kp).lower().endswith(".gif") else "hd_images"
+        if x_video_final_path:
+            media_roles[str(x_video_final_path)] = "mp4_renders"
+        if bsky_video_final_path:
+            media_roles[str(bsky_video_final_path)] = "mp4_renders"
+        for mp4_v in (x_video_paths_source or {}).values():
+            if mp4_v:
+                media_roles[str(mp4_v)] = "mp4_originals"
+        if paired_video_for_x:
+            media_roles[str(paired_video_for_x)] = "mp4_originals"
+
         payload = {
             "title": title_val,
             "description": desc_val,
             "tags": tags,
+            "_media_roles": media_roles,
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
             "da_images": da_images,             # DeviantArt 专属图 (按 DA 打码选项)
             "deviantart_max_images_per_deviation": da_limit_val,
@@ -9177,6 +9291,15 @@ class MainWindow(QMainWindow):
         btn = self._platform_retry_buttons.get(platform_name)
 
         if success:
+            try:
+                archive_publish_run_outputs(
+                    payload=getattr(self, "_last_publish_payload", {}) or {},
+                    results={platform_name: val},
+                    archive_root=ARCHIVE_DIR,
+                    data_dir=DATA_DIR,
+                )
+            except Exception as arch_err:
+                logger.error(f"[Archive] 单平台重试归档失败 (不影响发布结果): {arch_err}")
             if lbl:
                 lbl.setText(f"<font color='#34d399'>● 成功</font> <span style='color:#9ca3af;'>({msg})</span>")
             if btn:
@@ -9232,6 +9355,17 @@ class MainWindow(QMainWindow):
                 )
             except Exception as e:
                 logger.warning(f"保存发布历史记录异常: {e}")
+
+        # §3.1 & §3.2: 归档本次实际发出的媒体文件并更新 Patreon 月底附件池索引
+        try:
+            archive_publish_run_outputs(
+                payload=getattr(self, "_last_publish_payload", {}) or {},
+                results=results if isinstance(results, dict) else {},
+                archive_root=ARCHIVE_DIR,
+                data_dir=DATA_DIR,
+            )
+        except Exception as arch_err:
+            logger.error(f"[Archive] 发布完成归档异常 (不改写发布结果): {arch_err}")
 
         success_count = sum(1 for v in self._last_publish_results.values() if v[0])
         total_count = len(self._last_publish_results)
@@ -10007,8 +10141,9 @@ class MainWindow(QMainWindow):
         is_nsfw = self.tab_b_nsfw_cb.isChecked()
         is_ai = self.tab_b_ai_cb.isChecked()
 
-        safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title) or "artwork"
-        safe_title = safe_title[:40]
+        fallback_stem_b = Path(master_images[0]).stem if master_images else "file"
+        safe_title = sanitize_ascii_stem(title, fallback_stem=fallback_stem_b)[:40] or "file"
+        work_cache_dir = get_monthly_cache_dir(CACHE_DIR)
 
         self.notify("正在准备 Patreon 专属素材 (预告图「公开安全」打码 + 水印 + ×0.5 降档)...", level="info")
 
@@ -10051,10 +10186,18 @@ class MainWindow(QMainWindow):
 
         # 2. 墙下全尺寸无码 + 水印展示图 (hd_1 .. hd_N，首图在墙下以 hd_1 再出现一次)
         patreon_hd_images = []
+        tab_b_paired_videos = {}
         for idx, mi in enumerate(master_images):
+            if str(mi).lower().endswith(".gif"):
+                try:
+                    found_mp4 = self._find_paired_video(mi)
+                    if found_mp4:
+                        tab_b_paired_videos[str(mi)] = str(found_mp4)
+                except Exception:
+                    pass
             if wm_info:
                 if str(mi).lower().endswith(".gif"):
-                    disp_wm = CACHE_DIR / f"{safe_title}_{idx}_pat_display_wm.gif"
+                    disp_wm = work_cache_dir / f"{safe_title}_{idx}_pat_display_wm.gif"
                     render_composite_gif_frames(
                         mi,
                         disp_wm,
@@ -10064,7 +10207,7 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     ext_i = Path(mi).suffix.lstrip(".") or "jpg"
-                    disp_wm = CACHE_DIR / f"{safe_title}_{idx}_pat_display_wm.{ext_i}"
+                    disp_wm = work_cache_dir / f"{safe_title}_{idx}_pat_display_wm.{ext_i}"
                     self.watermark_engine.apply_watermark(
                         mi,
                         text=wm_info["text"],
@@ -10096,6 +10239,14 @@ class MainWindow(QMainWindow):
             self.notify("⚠️ 未找到 Patreon 分发器，无法发布", level="error")
             return
 
+        media_roles_b = {}
+        for hp in patreon_hd_images:
+            media_roles_b[str(hp)] = "hd_gif" if str(hp).lower().endswith(".gif") else "hd_images"
+        if teaser_out is not None:
+            media_roles_b[str(teaser_out)] = "low_gif" if str(teaser_out).lower().endswith(".gif") else "low_images"
+        for mp4_v in tab_b_paired_videos.values():
+            media_roles_b[str(mp4_v)] = "mp4_originals"
+
         payload = {
             "title": title,
             "description": desc,
@@ -10108,6 +10259,8 @@ class MainWindow(QMainWindow):
             "patreon_hd_images": list(patreon_hd_images),
             "raw_images": master_images,
             "attachments": attachments,
+            "x_video_paths": tab_b_paired_videos,
+            "_media_roles": media_roles_b,
             "platform_options": {
                 "patreon_visibility": vis_val,
                 "patreon_censor": teaser_censor_on,
@@ -10132,6 +10285,16 @@ class MainWindow(QMainWindow):
                 self.notify(f"⚠️ Patreon 发布失败 (未入队): {msg}", level="error")
                 QMessageBox.critical(self, "发布失败", f"Patreon 发布未能成功完成，未登记延迟队列:\n{msg}")
                 return
+
+            try:
+                archive_publish_run_outputs(
+                    payload=payload,
+                    results=results if isinstance(results, dict) else {"patreon": pat_res},
+                    archive_root=ARCHIVE_DIR,
+                    data_dir=DATA_DIR,
+                )
+            except Exception as arch_err:
+                logger.error(f"[Tab B] Patreon 发布完成归档异常 (不改写发布结果): {arch_err}")
 
             # Patreon 发布成功，登记延迟公开波
             if not self.delayed_wave_manager:

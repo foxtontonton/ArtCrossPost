@@ -35,6 +35,7 @@ except ImportError:
     def get_logger(name):
         return logging.getLogger(name)
 
+from media_foundation import get_monthly_cache_dir, sanitize_ascii_filename
 from watermark_engine import WatermarkEngine
 
 logger = get_logger("VideoEngine")
@@ -456,8 +457,9 @@ def convert_gif_to_mp4(
     if not in_gif.is_file():
         raise FileNotFoundError(f"待转码 GIF 文件不存在: {gif_path}")
 
-    out_mp4 = Path(output_mp4_path)
-    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    raw_out = Path(output_mp4_path)
+    raw_out.parent.mkdir(parents=True, exist_ok=True)
+    out_mp4 = raw_out.parent / sanitize_ascii_filename(raw_out.name, fallback_stem=in_gif.stem)
     tmp_out = out_mp4.parent / f"{out_mp4.stem}.tmp_{os.getpid()}.mp4"
 
     cmd = [
@@ -798,7 +800,13 @@ class VideoEngine:
             raise FileNotFoundError(f"配对视频文件不存在: {in_p}")
 
         cache_key = self.compute_cache_key(in_p, censor_params=censor_params, wm_params=wm_params, ref_size=ref_size)
-        target_p = Path(output_path) if output_path else (self.cache_dir / f"x_video_{cache_key[:16]}.mp4")
+        if output_path:
+            raw_target = Path(output_path)
+            raw_target.parent.mkdir(parents=True, exist_ok=True)
+            target_p = raw_target.parent / sanitize_ascii_filename(raw_target.name, fallback_stem=in_p.stem)
+        else:
+            monthly_cache = get_monthly_cache_dir(self.cache_dir)
+            target_p = monthly_cache / f"x_video_{cache_key[:16]}.mp4"
         target_p.parent.mkdir(parents=True, exist_ok=True)
 
         if target_p.exists() and target_p.stat().st_size > 0 and output_path is None:
