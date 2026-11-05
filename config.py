@@ -8,12 +8,15 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 COOKIES_DIR = DATA_DIR / "cookies"
-PRESETS_FILE = DATA_DIR / "presets.json"
+TEXT_ASSETS_DIR = DATA_DIR / "text_assets"
+LEGACY_PRESETS_FILE = DATA_DIR / "presets.json"
+PRESETS_FILE = TEXT_ASSETS_DIR / "presets.json"
 WINDOW_STATE_FILE = DATA_DIR / "window_state.json"
 CACHE_DIR = DATA_DIR / "cache"
+ARCHIVE_DIR = DATA_DIR / "archive"
 
 # Ensure directories exist
-for d in [DATA_DIR, COOKIES_DIR, CACHE_DIR]:
+for d in [DATA_DIR, COOKIES_DIR, TEXT_ASSETS_DIR, CACHE_DIR, ARCHIVE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 import copy
@@ -114,6 +117,7 @@ DEFAULT_CONFIG = {
         "civitai_censor": False,          # Civitai 专属打码保护开关 (默认原图，可勾选启用打码)
         "patreon_visibility": "patrons",  # "public", "patrons", "tiers"
         "patreon_censor": False,          # Patreon 专属打码保护开关 (默认原图，可勾选启用打码)
+        "patreon_attach_originals": True, # Patreon 附带原图附件开关 (默认勾选)
         "kofi_visibility": "supporters",  # "everyone", "supporters", "tier"
         "kofi_censor": False,             # Ko-fi 专属打码保护开关 (默认原图，可勾选启用打码)
         "kofi_min_duration": 20,          # Ko-fi 发布耗时安全护栏阈值 (秒，低于此值直接判异常以防假阳性)
@@ -130,10 +134,29 @@ DEFAULT_CONFIG = {
     }
 }
 
-def load_config():
+def _resolve_presets_file_for_read() -> Path:
+    default_target = DATA_DIR / "text_assets" / "presets.json"
+    if PRESETS_FILE != default_target:
+        return PRESETS_FILE
+    try:
+        from media_foundation import migrate_presets_file
+        active_path, _ = migrate_presets_file(DATA_DIR)
+        if active_path.exists():
+            return active_path
+    except Exception:
+        pass
     if PRESETS_FILE.exists():
+        return PRESETS_FILE
+    if (DATA_DIR / "presets.json").exists():
+        return DATA_DIR / "presets.json"
+    return PRESETS_FILE
+
+
+def load_config():
+    target_file = _resolve_presets_file_for_read()
+    if target_file.exists():
         try:
-            with open(PRESETS_FILE, "r", encoding="utf-8") as f:
+            with open(target_file, "r", encoding="utf-8") as f:
                 user_conf = json.load(f)
                 merged = copy.deepcopy(DEFAULT_CONFIG)
                 for k, v in user_conf.items():
@@ -196,6 +219,7 @@ def load_config():
 
 def save_config(config_data):
     try:
+        PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(PRESETS_FILE, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=2)
     except Exception as e:

@@ -30,6 +30,11 @@ from censor_engine import CensorEngine, map_strength_to_blur_ksize, map_strength
 from config import load_config
 from delayed_wave_manager import DelayedQueueItem, DelayedQueueManager, downscale_image_half
 from history_manager import PublishHistoryManager
+from media_foundation import (
+    archive_publish_run_outputs,
+    get_monthly_cache_dir,
+    sanitize_ascii_stem,
+)
 from watermark_engine import WatermarkEngine
 
 logger = logging.getLogger("ArtCrossPost")
@@ -213,6 +218,7 @@ class DelayedWaveExecutor:
         watermark_engine: Optional[WatermarkEngine] = None,
         history_manager: Optional[PublishHistoryManager] = None,
         cache_dir: Optional[Path] = None,
+        notify_callback: Optional[Callable[[str, str], None]] = None,
     ):
         self.manager = manager
         self.dispatchers_factory = dispatchers_factory
@@ -222,6 +228,7 @@ class DelayedWaveExecutor:
         self._watermark_engine = watermark_engine
         self._history_manager = history_manager
         self.cache_dir = Path(cache_dir) if cache_dir else CACHE_DIR
+        self.notify_callback = notify_callback
 
     def _get_config(self) -> dict:
         if self.config_provider:
@@ -352,10 +359,25 @@ class DelayedWaveExecutor:
             "stroke": bool(wm_cfg.get("stroke", True)),
         } if (wm_enabled and wm_apply and wm_text) else None
 
+        # §4 水印全局门禁: 后台执行期若水印缺失，不弹模态框，但必须以 error 级通知 + 队列项结果注记「无水印发布」响亮留痕
+        watermark_note = ""
+        if wm_info is None:
+            watermark_note = "无水印发布"
+            warn_log = f"[DelayedWave] ⚠️ 水印门禁告警: 队列项 {item.id} ('{item.title}') 当前水印设置未开启或文本为空，按【{watermark_note}】执行！"
+            logger.error(warn_log)
+            if self.notify_callback:
+                try:
+                    self.notify_callback(
+                        f"⚠️ 延迟公开波无水印发布告警: {item.title} (结果注记: {watermark_note})",
+                        "error",
+                    )
+                except Exception as ne:
+                    logger.debug(f"[DelayedWave] notify_callback 异常: {ne}")
+
         title_str = str(snapshot.get("title", item.title)).strip()
-        safe_title = re.sub(r'[\\/*?:"<>|\s]+', '_', title_str) or "artwork"
-        safe_title = safe_title[:40]
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        first_asset_stem = Path(asset_files[0]).stem if asset_files else "artwork"
+        safe_title = sanitize_ascii_stem(title_str, fallback_stem=first_asset_stem)[:40]
+        work_cache_dir = get_monthly_cache_dir(self.cache_dir)
 
         custom_boxes_map = snapshot.get("custom_censor_boxes", {}) or {}
         captured_ratios_map = snapshot.get("custom_censor_captured_ratios", {}) or {}
@@ -551,15 +573,15 @@ class DelayedWaveExecutor:
                     }
 
                 if any_censor_needed:
-                    tmp_c_gif = self.cache_dir / f"{item.id}_{idx:02d}_censor.gif"
-                    half_c_gif = self.cache_dir / f"{item.id}_{idx:02d}_censor_half.gif"
+                    tmp_c_gif = work_cache_dir / f"{item.id}_{idx:02d}_censor.gif"
+                    half_c_gif = work_cache_dir / f"{item.id}_{idx:02d}_censor_half.gif"
                     render_composite_gif_frames(p_af, tmp_c_gif, censor_params=c_params, wm_params=wm_info, watermark_engine=wm_eng)
                     censor_variant_half = downscale_image_half(tmp_c_gif, half_c_gif)
 
                 if not all([is_da_censor, is_x_censor, is_bsky_censor]):
-                    half_r_gif = self.cache_dir / f"{item.id}_{idx:02d}_raw_half.gif"
+                    half_r_gif = work_cache_dir / f"{item.id}_{idx:02d}_raw_half.gif"
                     if wm_info:
-                        tmp_r_gif = self.cache_dir / f"{item.id}_{idx:02d}_raw_wm.gif"
+                        tmp_r_gif = work_cache_dir / f"{item.id}_{idx:02d}_raw_wm.gif"
                         render_composite_gif_frames(p_af, tmp_r_gif, censor_params=None, wm_params=wm_info, watermark_engine=wm_eng)
                         raw_variant_half = downscale_image_half(tmp_r_gif, half_r_gif)
                     else:
@@ -567,7 +589,7 @@ class DelayedWaveExecutor:
 
                 da_gif_src = censor_variant_half if is_da_censor else raw_variant_half
                 clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
-                clean_da_gif = self.cache_dir / f"{clean_da_stem}.gif"
+                clean_da_gif = work_cache_dir / f"{clean_da_stem}.gif"
                 if da_gif_src and Path(da_gif_src).exists():
                     if str(clean_da_gif) != str(da_gif_src):
                         shutil.copy2(da_gif_src, clean_da_gif)
@@ -582,7 +604,7 @@ class DelayedWaveExecutor:
                     if paired_video_for_x and Path(paired_video_for_x).exists():
                         bsky_video_final_path = str(paired_video_for_x)
                     elif bsky_gif_src and Path(bsky_gif_src).exists():
-                        mp4_out = self.cache_dir / f"{item.id}_{idx:02d}_bsky.mp4"
+                        mp4_out = work_cache_dir / f"{item.id}_{idx:02d}_bsky.mp4"
                         try:
                             from video_engine import convert_gif_to_mp4
                             convert_gif_to_mp4(bsky_gif_src, mp4_out)
@@ -608,7 +630,7 @@ class DelayedWaveExecutor:
                         blur_ksize=censor_blur,
                         opacity=censor_opacity,
                     )
-                    tmp_c_full = self.cache_dir / f"{item.id}_{idx:02d}_censored_full.{ext}"
+                    tmp_c_full = work_cache_dir / f"{item.id}_{idx:02d}_censored_full.{ext}"
                     if wm_info and wm_eng is not None:
                         wm_eng.apply_watermark(
                             censored_bgr,
@@ -623,13 +645,13 @@ class DelayedWaveExecutor:
                         )
                     else:
                         cv2.imwrite(str(tmp_c_full), censored_bgr)
-                    half_c_path = self.cache_dir / f"{item.id}_{idx:02d}_censored_half.{ext}"
+                    half_c_path = work_cache_dir / f"{item.id}_{idx:02d}_censored_half.{ext}"
                     censor_variant_half = downscale_image_half(tmp_c_full, half_c_path)
 
                 if not all([is_da_censor, is_x_censor, is_bsky_censor, is_civitai_censor]):
-                    half_r_path = self.cache_dir / f"{item.id}_{idx:02d}_raw_half.{ext}"
+                    half_r_path = work_cache_dir / f"{item.id}_{idx:02d}_raw_half.{ext}"
                     if wm_info and wm_eng is not None:
-                        tmp_r_full = self.cache_dir / f"{item.id}_{idx:02d}_raw_wm_full.{ext}"
+                        tmp_r_full = work_cache_dir / f"{item.id}_{idx:02d}_raw_wm_full.{ext}"
                         wm_eng.apply_watermark(
                             str(p_af),
                             text=wm_info["text"],
@@ -647,7 +669,7 @@ class DelayedWaveExecutor:
 
                 da_src = censor_variant_half if is_da_censor else raw_variant_half
                 clean_da_stem = safe_title if idx == 0 else f"{safe_title}_{idx + 1}"
-                clean_da_path = self.cache_dir / f"{clean_da_stem}.{ext}"
+                clean_da_path = work_cache_dir / f"{clean_da_stem}.{ext}"
                 if da_src and Path(da_src).exists():
                     if str(clean_da_path) != str(da_src):
                         shutil.copy2(da_src, clean_da_path)
@@ -719,6 +741,20 @@ class DelayedWaveExecutor:
         platform_opts["deviantart_max_images_per_deviation"] = da_limit_val
         platform_opts["x_video_paths"] = x_video_paths
 
+        media_roles: dict[str, str] = {}
+        for f_p in da_images + x_images + bluesky_images + civitai_images:
+            if str(f_p).lower().endswith(".gif"):
+                media_roles[str(f_p)] = "low_gif"
+            elif not str(f_p).lower().endswith(".mp4"):
+                media_roles[str(f_p)] = "low_images"
+        if x_video_final_path:
+            media_roles[str(x_video_final_path)] = "mp4_renders"
+        if bsky_video_final_path:
+            media_roles[str(bsky_video_final_path)] = "mp4_renders"
+        for mp4_orig in x_video_paths.values():
+            if mp4_orig:
+                media_roles[str(mp4_orig)] = "mp4_originals"
+
         payload = {
             "title": snapshot.get("title", item.title),
             "description": snapshot.get("description", ""),
@@ -744,6 +780,7 @@ class DelayedWaveExecutor:
             "civitai_tool": civitai_tool_val,
             "x_video_paths": x_video_paths,
             "platform_options": platform_opts,
+            "_media_roles": media_roles,
         }
 
         # 6. 确定执行顺序: 若包含 DeviantArt，优先执行 DA 以获取当帖引流链接
@@ -867,7 +904,16 @@ class DelayedWaveExecutor:
                 publish_results[plat] = (False, str(e), [])
                 logger.error(f"[DelayedWave] {disp.display_name} 执行异常: {e}")
 
-        # 9. 写入 publish_history (复用 PublishHistoryManager.append_record 口径)
+        # 9. 若为无水印发布，为各平台发布结果补充「无水印发布」注记，随后写入 publish_history
+        if watermark_note and publish_results:
+            for _plat_k, _res_val in list(publish_results.items()):
+                if isinstance(_res_val, tuple) and len(_res_val) >= 2:
+                    _ok_v, _msg_v = _res_val[0], str(_res_val[1])
+                    _comp_v = _res_val[2] if len(_res_val) > 2 else []
+                    if watermark_note not in _msg_v:
+                        _msg_v = f"{_msg_v} ({watermark_note})"
+                    publish_results[_plat_k] = (_ok_v, _msg_v, _comp_v)
+
         if publish_results:
             try:
                 hist_mgr = self._get_history_manager()
@@ -880,13 +926,32 @@ class DelayedWaveExecutor:
             except Exception as he:
                 logger.warning(f"[DelayedWave] 写入发布历史记录异常: {he}")
 
+            try:
+                data_root = self.cache_dir.parent
+                archive_publish_run_outputs(
+                    payload=payload,
+                    publish_results=publish_results,
+                    base_archive_dir=data_root / "archive",
+                    pool_file=data_root / "patreon_bundle_pool.json",
+                )
+            except Exception as ae:
+                logger.error(f"[DelayedWave] 归档发送文件异常（不改判发布结果）: {ae}")
+
         # 10. 状态裁决
         all_success = len(errors) == 0
         final_status = "done" if all_success else "failed"
-        self.manager.update_item_status(item.id, status=final_status, last_error=errors)
+        self.manager.update_item_status(
+            item.id,
+            status=final_status,
+            last_error=errors,
+            result_note=watermark_note,
+        )
 
         item.status = final_status
         item.last_error = errors
+        item.result_note = watermark_note
+        if watermark_note:
+            item.material_snapshot["result_note"] = watermark_note
 
         if self.on_item_finished:
             try:

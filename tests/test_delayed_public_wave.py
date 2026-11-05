@@ -326,30 +326,74 @@ def test_zero_side_effect_when_disabled(tmp_path):
 # 8. B 页附件门禁 (附件失败不入队、状态「缺附件」、严禁渲染件)
 # =============================================================================
 
-def test_patreon_attachments_rejects_raw_wm_derived_files(tmp_path):
-    """测试附件门禁：必须是源素材母版路径，严禁使用 *_raw_wm.* 或 censor 渲染件"""
+def test_patreon_attachments_rejects_raw_wm_derived_files(tmp_path, monkeypatch):
+    """
+    §2 & §6 附件门禁反转回归测试 (按新 spec 改写):
+    - 附件为打码变体或 ×0.5 降档变体 -> 判「缺附件」失败；
+    - 附件为本帖全尺寸无码带水印 hd 渲染源文件 (*_raw_wm.* / *_pat_display_wm.*) -> 门禁放行通过。
+    """
     disp = PatreonDispatcher(tmp_path)
 
-    # 传入非法带水印渲染件
-    derived_file = tmp_path / "test_artwork_0_raw_wm.jpg"
-    derived_file.write_bytes(b"wm_content")
+    src_file = tmp_path / "src_master.jpg"
+    Image.new("RGB", (200, 200), color=(100, 150, 200)).save(src_file, "JPEG")
 
-    payload = {
-        "title": "Illegal Attachment Test",
-        "images": [str(derived_file)],
-        "patreon_images": [str(derived_file)],
-        "attachments": [str(derived_file)],
+    hd_wm_file = tmp_path / "test_artwork_0_raw_wm.jpg"
+    Image.new("RGB", (200, 200), color=(102, 152, 202)).save(hd_wm_file, "JPEG")
+
+    teaser_file = tmp_path / "test_artwork_0_pat_teaser.jpg"
+    Image.new("RGB", (100, 100), color=(0, 0, 0)).save(teaser_file, "JPEG")
+
+    censored_file = tmp_path / "test_artwork_0_censored_wm.jpg"
+    Image.new("RGB", (200, 200), color=(0, 0, 0)).save(censored_file, "JPEG")
+
+    downscaled_unmarked = tmp_path / "shrunk_variant.jpg"
+    Image.new("RGB", (100, 100), color=(100, 150, 200)).save(downscaled_unmarked, "JPEG")
+
+    # 1. 传入打码变体 -> 判「缺附件」失败
+    payload_censor = {
+        "title": "Censored Attachment Test",
+        "raw_images": [str(src_file)],
+        "patreon_images": [str(teaser_file), str(hd_wm_file)],
+        "patreon_hd_images": [str(hd_wm_file)],
+        "attachments": [str(censored_file)],
     }
+    ok1, msg1, comp1 = disp.publish(payload_censor)
+    assert ok1 is False
+    assert "附件门禁拦截" in msg1
+    assert "缺附件" in msg1
+    comp_att1 = next((c for c in comp1 if c.get("item") == "attachments"), None)
+    assert comp_att1 is not None
+    assert "缺附件" in comp_att1.get("detail", "")
 
-    ok, msg, comp = disp.publish(payload)
+    # 2. 传入降档变体 (尺寸减半) -> 判「缺附件」失败
+    payload_downscaled = {
+        "title": "Downscaled Attachment Test",
+        "raw_images": [str(src_file)],
+        "patreon_images": [str(teaser_file), str(downscaled_unmarked)],
+        "patreon_hd_images": [str(downscaled_unmarked)],
+        "attachments": [str(downscaled_unmarked)],
+    }
+    ok2, msg2, comp2 = disp.publish(payload_downscaled)
+    assert ok2 is False
+    assert "缺附件" in msg2
+    comp_att2 = next((c for c in comp2 if c.get("item") == "attachments"), None)
+    assert comp_att2 is not None
+    assert "缺附件" in comp_att2.get("detail", "")
 
-    assert ok is False
-    assert "附件门禁拦截" in msg
-    assert "严禁使用下游渲染派生件" in msg
-    # 状态包含「缺附件」
-    comp_att = next((c for c in comp if c.get("item") == "attachments"), None)
-    assert comp_att is not None
-    assert "缺附件" in comp_att.get("detail", "")
+    # 3. 传入本帖全尺寸无码带水印 hd 渲染源文件 (*_raw_wm.jpg) -> 通过附件门禁 (进入后续浏览器流程)
+    disp.get_cookies = MagicMock(return_value=[])
+    disp.get_app_browser_profile_dir = MagicMock(return_value=str(tmp_path / "no_profile"))
+    payload_valid_hd = {
+        "title": "Valid HD Attachment Test",
+        "raw_images": [str(src_file)],
+        "patreon_images": [str(teaser_file), str(hd_wm_file)],
+        "patreon_hd_images": [str(hd_wm_file)],
+        "attachments": [str(hd_wm_file)],
+    }
+    ok3, msg3, _ = disp.publish(payload_valid_hd)
+    # 未被附件门禁拦截 (因无 cookie 在登录检查返回未登录)
+    assert "附件门禁拦截" not in msg3
+    assert "未登录" in msg3
 
 
 def test_patreon_attachments_mount_failure_aborts_and_reports_missing_attachment(tmp_path, monkeypatch):
@@ -893,7 +937,8 @@ def test_tab_b_teaser_fail_closed_aborts_on_censor_error(tmp_path, monkeypatch):
     from PyQt5.QtWidgets import QApplication, QMessageBox
     import app as app_mod
 
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -936,7 +981,8 @@ def test_tab_b_gif_teaser_uses_gif_engine_and_paragraph_description(tmp_path, mo
     from PyQt5.QtWidgets import QApplication, QMessageBox
     import app as app_mod
 
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1005,7 +1051,8 @@ def test_delayed_wave_busy_mutex_defers_when_main_publish_running(tmp_path, monk
     from PyQt5.QtWidgets import QApplication
     import app as app_mod
 
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1040,7 +1087,8 @@ def test_queue_btn_alert_style_restores_after_clear_or_retry_success(tmp_path, m
     from PyQt5.QtWidgets import QApplication
     import app as app_mod
 
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1072,7 +1120,8 @@ def test_start_publishing_scheduled_snapshot_strictly_overrides_ui_widgets(tmp_p
     from PyQt5.QtWidgets import QApplication
     import app as app_mod
 
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1161,7 +1210,8 @@ def test_delayed_wave_tab_b_toggle_lifecycle_no_runtime_error(tmp_path, monkeypa
     """
     import app as app_mod
     from PyQt5.QtWidgets import QApplication, QWidget
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1207,7 +1257,8 @@ def test_tab_b_snapshot_short_text_empty_and_executor_payload_empty(tmp_path, mo
     """
     import app as app_mod
     from PyQt5.QtWidgets import QApplication, QMessageBox
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1400,7 +1451,8 @@ def test_tab_b_deviantart_image_count_warning_dialog(tmp_path, monkeypatch):
     """
     import app as app_mod
     from PyQt5.QtWidgets import QApplication, QMessageBox
-    _ = QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
     win = app_mod.MainWindow()
@@ -1453,3 +1505,441 @@ def test_tab_b_deviantart_image_count_warning_dialog(tmp_path, monkeypatch):
     win._start_tab_b_publishing()
     assert len(warn_calls) == 2
     assert len(pub_threads) == 1
+
+
+# =============================================================================
+# 16. Patreon 发帖结构统一 (预告 / 墙下高清 / 附件反转 / 水印全局门禁 / A 页开关三态)
+# =============================================================================
+
+def test_patreon_unified_structure_tab_a_and_tab_b_and_public_visibility(tmp_path, monkeypatch):
+    """
+    §1 & §6 结构构建测试:
+    - 单图帖 (visibility=patrons): patreon_images == [teaser_1, hd_1]，
+      teaser_1 含公开安全打码 + 水印 + ×0.5 降档，hd_1 为全尺寸无码带水印，attachments == [hd_1]；
+    - 多图帖 (3 张): patreon_images == [teaser_1, hd_1, hd_2, hd_3]，
+      attachments == [hd_1, hd_2, hd_3]，与墙下展示图一一对应、同序；
+    - visibility=public 时: 无 teaser_1，patreon_images == [hd_1, ..., hd_N]，attachments 同上。
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication, QMessageBox, QListWidgetItem
+    from PyQt5.QtCore import Qt
+
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+
+    # 开启水印与打码 (固定黑条 100% 不透明度以验证像素遮挡)
+    win.auto_censor_cb.setChecked(True)
+    win.censor_style_combo.setCurrentIndex(0)  # black_bar
+    win.censor_opacity_slider.setValue(100)
+    win.watermark_enabled_cb.setChecked(True)
+    win.watermark_apply_publish_cb.setChecked(True)
+    win.watermark_text_input.setText("@PATREON_WM")
+
+    # 创建 2 张 200x200 原图
+    img1 = tmp_path / "art_p1.png"
+    img2 = tmp_path / "art_p2.png"
+    Image.new("RGB", (200, 200), color=(180, 90, 90)).save(img1, "PNG")
+    Image.new("RGB", (200, 200), color=(90, 180, 90)).save(img2, "PNG")
+    win.custom_censor_boxes[str(img1)] = [[60, 60, 140, 140]]
+
+    captured = []
+
+    class DummyPubThread:
+        def __init__(self, selected, payload):
+            captured.append((selected, payload))
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+        def start(self):
+            pass
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", DummyPubThread)
+    monkeypatch.setattr(QMessageBox, "critical", MagicMock())
+
+    # --- Part 1: Tab B 单图帖 (visibility=patrons) ---
+    win.tab_b_title_input.setText("TabB Single Post")
+    win.tab_b_img_list.clear()
+    it1 = QListWidgetItem(img1.name)
+    it1.setData(Qt.UserRole, str(img1))
+    win.tab_b_img_list.addItem(it1)
+    win.tab_b_visibility_combo.setCurrentIndex(0)  # patrons
+
+    with patch.object(win.watermark_engine, "apply_watermark", wraps=win.watermark_engine.apply_watermark) as spy_wm:
+        win._start_tab_b_publishing()
+        # teaser_1 与 hd_1 均经过水印引擎 (调用 2 次)
+        assert spy_wm.call_count == 2
+
+    assert len(captured) == 1
+    _, p_tab_b_single = captured[-1]
+    pat_imgs_b1 = p_tab_b_single["patreon_images"]
+    assert len(pat_imgs_b1) == 2  # [teaser_1, hd_1]
+    teaser_b1, hd_b1 = Path(pat_imgs_b1[0]), Path(pat_imgs_b1[1])
+    assert teaser_b1.exists() and hd_b1.exists()
+    with Image.open(teaser_b1) as im_t, Image.open(hd_b1) as im_hd:
+        assert im_t.size == (100, 100)  # ×0.5 降档
+        assert im_hd.size == (200, 200)  # 全尺寸
+        # teaser 中心点 (50, 50) 被公开安全黑条遮挡为 (0, 0, 0)，hd_1 中心点保持无码原色
+        assert im_t.convert("RGB").getpixel((50, 50)) == (0, 0, 0)
+        assert im_hd.convert("RGB").getpixel((100, 100)) != (0, 0, 0)
+    assert p_tab_b_single["attachments"] == [str(hd_b1)]
+
+    # --- Part 2: Tab B 多图帖 (2 张, visibility=patrons) ---
+    it2 = QListWidgetItem(img2.name)
+    it2.setData(Qt.UserRole, str(img2))
+    win.tab_b_img_list.addItem(it2)
+    win.tab_b_title_input.setText("TabB Multi Post")
+    win._start_tab_b_publishing()
+
+    _, p_tab_b_multi = captured[-1]
+    assert len(p_tab_b_multi["patreon_images"]) == 3  # [teaser_1, hd_1, hd_2]
+    assert p_tab_b_multi["attachments"] == p_tab_b_multi["patreon_images"][1:]
+    assert len(p_tab_b_multi["attachments"]) == 2
+
+    # --- Part 3: Tab B visibility=public (无预告图) ---
+    win.tab_b_visibility_combo.setCurrentIndex(1)  # public
+    win.tab_b_title_input.setText("TabB Public Post")
+    win._start_tab_b_publishing()
+
+    _, p_tab_b_pub = captured[-1]
+    assert len(p_tab_b_pub["patreon_images"]) == 2  # [hd_1, hd_2] 无 teaser
+    assert p_tab_b_pub["attachments"] == p_tab_b_pub["patreon_images"]
+
+    # --- Part 4: Tab A 多图帖 (visibility=patrons vs visibility=public) ---
+    win.title_input.setText("TabA Unified Post")
+    win.image_paths = [str(img1), str(img2)]
+    for name, ctrl in win.platform_controls.items():
+        ctrl["checkbox"].setChecked(name == "patreon")
+    pat_opts = win.platform_controls["patreon"]["options"]
+    pat_opts["visibility"].setCurrentIndex(0)  # patrons
+    pat_opts["attach_originals"].setChecked(True)
+
+    win._start_publishing()
+    _, p_tab_a_patrons = captured[-1]
+    assert len(p_tab_a_patrons["patreon_images"]) == 3  # [teaser_1, hd_1, hd_2]
+    assert p_tab_a_patrons["attachments"] == p_tab_a_patrons["patreon_images"][1:]
+    for hd_p in p_tab_a_patrons["attachments"]:
+        assert "_raw_wm" in Path(hd_p).name
+        with Image.open(hd_p) as im_hd_a:
+            assert im_hd_a.size == (200, 200)
+
+    # 切换 Tab A 为 public -> 无 teaser
+    pat_opts["visibility"].setCurrentIndex(1)  # public
+    win._start_publishing()
+    _, p_tab_a_public = captured[-1]
+    assert len(p_tab_a_public["patreon_images"]) == 2  # [hd_1, hd_2]
+    assert p_tab_a_public["attachments"] == p_tab_a_public["patreon_images"]
+
+
+def test_tab_a_patreon_attach_originals_three_states_and_snapshot(tmp_path, monkeypatch):
+    """
+    §3 & §6 A 页「附带原图附件」开关三态与定时快照路径测试:
+    1. 开关开 + 勾选 Patreon -> payload["attachments"] == [hd_1, ...]
+    2. 开关关 + 勾选 Patreon -> "attachments" not in payload (其余结构不变)
+    3. 开关开 + 未勾选 Patreon -> "attachments" not in payload
+    4. 定时快照路径 -> 按快照素材与快照 platform_options["patreon_attach_originals"] 构建结构与 hd 附件
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication
+
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.auto_censor_cb.setChecked(True)
+    win.watermark_enabled_cb.setChecked(True)
+    win.watermark_apply_publish_cb.setChecked(True)
+    win.watermark_text_input.setText("@SNAP_WM")
+
+    img1 = tmp_path / "state_test.jpg"
+    Image.new("RGB", (160, 160), color=(60, 120, 180)).save(img1, "JPEG")
+    win.image_paths = [str(img1)]
+    win.title_input.setText("Attach Switch Three States")
+
+    captured = []
+
+    class DummyPubThread:
+        def __init__(self, selected, payload):
+            captured.append(([d.name for d in selected], payload))
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+        def start(self):
+            pass
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", DummyPubThread)
+
+    pat_opts = win.platform_controls["patreon"]["options"]
+    pat_opts["visibility"].setCurrentIndex(0)  # patrons
+
+    # 态 1: 开关开 + 勾选 Patreon
+    for name, ctrl in win.platform_controls.items():
+        ctrl["checkbox"].setChecked(name == "patreon")
+    pat_opts["attach_originals"].setChecked(True)
+    win._start_publishing()
+    _, p1 = captured[-1]
+    assert len(p1["patreon_images"]) == 2
+    assert "attachments" in p1
+    assert p1["attachments"] == [p1["patreon_images"][1]]
+    assert "_raw_wm" in Path(p1["attachments"][0]).name
+
+    # 态 2: 开关关 + 勾选 Patreon -> 不写 attachments，patreon_images 结构不变
+    pat_opts["attach_originals"].setChecked(False)
+    win._start_publishing()
+    _, p2 = captured[-1]
+    assert len(p2["patreon_images"]) == 2
+    assert "attachments" not in p2
+
+    # 态 3: 开关开 + 未勾选 Patreon (仅勾选 DA) -> 不写 attachments
+    pat_opts["attach_originals"].setChecked(True)
+    for name, ctrl in win.platform_controls.items():
+        ctrl["checkbox"].setChecked(name == "deviantart")
+    win._start_publishing()
+    _, p3 = captured[-1]
+    assert "attachments" not in p3
+
+    # 态 4: 定时快照路径 (UI 当前把开关关掉，但快照中 patreon_attach_originals=True)
+    pat_opts["attach_originals"].setChecked(False)
+    snap_img = tmp_path / "snap_patreon.jpg"
+    Image.new("RGB", (180, 180), color=(140, 70, 110)).save(snap_img, "JPEG")
+    snapshot = {
+        "title": "Scheduled Patreon Post",
+        "description": "Scheduled body",
+        "tags": ["sched"],
+        "image_paths": [str(snap_img)],
+        "selected_platforms": ["patreon"],
+        "censor_enabled": True,
+        "is_nsfw": True,
+        "is_ai": True,
+        "platform_options": {
+            "patreon_visibility": "patrons",
+            "patreon_attach_originals": True,
+        },
+    }
+    win._start_publishing(scheduled_snapshot=snapshot)
+    _, p_snap = captured[-1]
+    assert len(p_snap["patreon_images"]) == 2  # [teaser_1, hd_1]
+    assert "attachments" in p_snap
+    assert p_snap["attachments"] == [p_snap["patreon_images"][1]]
+    assert "_raw_wm" in Path(p_snap["attachments"][0]).name
+
+
+def test_watermark_global_gate_tab_a_and_tab_b_and_executor_note(tmp_path, monkeypatch):
+    """
+    §4 & §6 水印全局门禁测试:
+    - 手动发布入口 (Tab A _start_publishing、Tab B _start_tab_b_publishing) 在无水印时弹确认框:
+      「本次发布的图片将不带水印，仍要继续发布吗？」
+      选取消 -> 中止发布，不启动 PublishThread；
+      选继续 -> 正常启动发布。
+    - 延迟公开波 executor 在无水印执行时 -> 打 error 日志 + 触发 error 通知 + 队列项结果注记含「无水印发布」。
+    """
+    import app as app_mod
+    from PyQt5.QtWidgets import QApplication, QMessageBox, QListWidgetItem
+    from PyQt5.QtCore import Qt
+
+    qapp = QApplication.instance() or QApplication([])
+    assert qapp is not None
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    win = app_mod.MainWindow()
+    win.config["delayed_wave_enabled"] = True
+    win._update_delayed_wave_ui()
+
+    # 设置水印为关闭状态
+    win.watermark_enabled_cb.setChecked(False)
+
+    img = tmp_path / "wm_gate.jpg"
+    Image.new("RGB", (120, 120), color=(80, 80, 80)).save(img, "JPEG")
+
+    # 准备 Tab A 与 Tab B 输入
+    win.title_input.setText("WM Gate Tab A")
+    win.image_paths = [str(img)]
+    for name, ctrl in win.platform_controls.items():
+        ctrl["checkbox"].setChecked(name == "deviantart")
+
+    win.tab_b_title_input.setText("WM Gate Tab B")
+    it = QListWidgetItem(img.name)
+    it.setData(Qt.UserRole, str(img))
+    win.tab_b_img_list.addItem(it)
+
+    dialog_calls = []
+    user_decision = [QMessageBox.Cancel]
+
+    def mock_question(parent, title, text, buttons, default_btn):
+        dialog_calls.append((title, text))
+        return user_decision[0]
+
+    monkeypatch.setattr(QMessageBox, "question", mock_question)
+
+    pub_threads = []
+
+    class DummyPubThread:
+        def __init__(self, selected, payload):
+            pub_threads.append(payload)
+            self.progress_signal = MagicMock()
+            self.completed_signal = MagicMock()
+        def start(self):
+            pass
+        def isRunning(self):
+            return False
+
+    monkeypatch.setattr(app_mod, "PublishThread", DummyPubThread)
+
+    # 1. Tab A 无水印 + 选取消 -> 不发布
+    win._start_publishing()
+    assert len(dialog_calls) == 1
+    assert "本次发布的图片将不带水印，仍要继续发布吗？" in dialog_calls[-1][1]
+    assert len(pub_threads) == 0
+
+    # 2. Tab B 无水印 + 选取消 -> 不发布，按钮保持可用
+    win._start_tab_b_publishing()
+    assert len(dialog_calls) == 2
+    assert "本次发布的图片将不带水印，仍要继续发布吗？" in dialog_calls[-1][1]
+    assert len(pub_threads) == 0
+    assert win.tab_b_publish_btn.isEnabled() is True
+
+    # 3. 选继续 -> Tab A 与 Tab B 均正常发布
+    user_decision[0] = QMessageBox.Yes
+    win._start_publishing()
+    assert len(pub_threads) == 1
+    win._start_tab_b_publishing()
+    assert len(pub_threads) == 2
+
+    # 4. Executor 无水印执行 -> error 通知 + 队列项结果含「无水印发布」注记
+    q_file = tmp_path / "wm_queue.json"
+    a_dir = tmp_path / "wm_assets"
+    mgr = DelayedQueueManager(queue_file=q_file, assets_dir=a_dir, enabled=True)
+    item = mgr.enroll(
+        {"title": "Unwatermarked Wave", "raw_images": [str(img)]},
+        delay_seconds=0,
+        target_platforms=["deviantart"],
+    )
+
+    notified_errors = []
+    disp_da = DummyDispatcher("deviantart", "DeviantArt", succeed=True)
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        dispatchers_factory=lambda: [disp_da],
+        config_provider=lambda: {"censor": {"enabled": False}, "watermark": {"enabled": False}},
+        notify_callback=lambda msg, lvl: notified_errors.append((msg, lvl)),
+        cache_dir=tmp_path / "cache",
+    )
+
+    ok, errs = executor.execute_item(item)
+    assert ok is True
+    assert item.result_note == "无水印发布"
+    assert any(lvl == "error" and "无水印发布" in msg for msg, lvl in notified_errors)
+    reloaded = mgr.load_queue()[0]
+    assert reloaded.result_note == "无水印发布"
+
+
+def test_patreon_step55_reaches_attach_with_raw_wm_and_pregate_blocks_censor(tmp_path, monkeypatch):
+    """
+    回归测试：
+    1. mock 穿越登录与编辑器前置步骤、直达 step 5.5，attachments 为 *_raw_wm hd 文件时，
+       断言能顺利到达 _attach_files_in_editor 挂载步且不被旧子串拦截；
+    2. 同时断言打码变体 (*_censored_wm.*) 仍在前置门禁 (L586) 被拦截。
+    """
+    import playwright.sync_api as pw_sync
+    import dispatchers.monetization as mon_mod
+    from dispatchers.monetization import PatreonDispatcher
+
+    monkeypatch.setattr(mon_mod.time, "sleep", lambda *a, **kw: None)
+
+    disp = PatreonDispatcher(cookies_dir=tmp_path)
+    monkeypatch.setattr(disp, "get_cookies", lambda: [{"name": "session_id", "value": "ok", "domain": ".patreon.com", "path": "/"}])
+    monkeypatch.setattr(disp, "get_app_browser_profile_dir", lambda: str(tmp_path / "no_profile"))
+    monkeypatch.setattr(disp, "safe_goto", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "clean_context_tabs", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "apply_stealth", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "close_login_session", lambda *a, **kw: None)
+    monkeypatch.setattr(disp, "assert_attached", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "assert_field_value", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(disp, "_count_patreon_gallery_images", lambda page, exp: exp)
+
+    # 准备全尺寸母版、预告图 (×0.5)、全尺寸无码带水印渲染件 (*_raw_wm.png) 与打码变体 (*_censored_wm.png)
+    raw_src = tmp_path / "work_master.png"
+    teaser_img = tmp_path / "work_0_pat_teaser.png"
+    hd_raw_wm = tmp_path / "work_0_raw_wm.png"
+    censored_wm = tmp_path / "work_0_censored_wm.png"
+
+    Image.new("RGB", (400, 400), color=(10, 20, 30)).save(raw_src)
+    Image.new("RGB", (200, 200), color=(0, 0, 0)).save(teaser_img)
+    Image.new("RGB", (400, 400), color=(15, 25, 35)).save(hd_raw_wm)
+    Image.new("RGB", (400, 400), color=(5, 5, 5)).save(censored_wm)
+
+    # Mock Playwright 页面直达 step 5.5
+    fake_el = MagicMock()
+    fake_el.is_visible.return_value = True
+    fake_el.is_disabled.return_value = False
+    fake_el.get_attribute.return_value = ""
+    fake_el.evaluate.side_effect = lambda script, *args: "textarea" if "tagName" in str(script) else ""
+
+    fake_page = MagicMock()
+    fake_page.url = "https://www.patreon.com/posts/123456"
+    fake_page.query_selector.return_value = fake_el
+    fake_page.query_selector_all.return_value = [fake_el, fake_el]
+
+    fake_ctx = MagicMock()
+    fake_ctx.pages = [fake_page]
+    fake_browser = MagicMock()
+    fake_browser.new_context.return_value = fake_ctx
+
+    class DummyPWContextMgr:
+        def __enter__(self):
+            pw = MagicMock()
+            pw.chromium.launch.return_value = fake_browser
+            return pw
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    monkeypatch.setattr(pw_sync, "sync_playwright", lambda: DummyPWContextMgr())
+    monkeypatch.setattr(disp, "create_stealth_browser", lambda p, headless=True: fake_browser)
+
+    attach_calls = []
+
+    def spy_attach(page, atts):
+        attach_calls.append(list(atts))
+        return True, ""
+
+    monkeypatch.setattr(disp, "_attach_files_in_editor", spy_attach)
+
+    # 1. attachments 为 *_raw_wm.png 全尺寸 hd 渲染文件 -> 穿越前置门禁并直达 step 5.5 挂载成功
+    valid_payload = {
+        "title": "Step55 Raw WM HD Test",
+        "description": "Body text",
+        "patreon_images": [str(teaser_img), str(hd_raw_wm)],
+        "patreon_hd_images": [str(hd_raw_wm)],
+        "raw_images": [str(raw_src)],
+        "attachments": [str(hd_raw_wm)],
+        "platform_options": {"patreon_visibility": "patrons"},
+    }
+    ok, msg, comp = disp.publish(valid_payload)
+    assert ok is True, f"Expected publish success with *_raw_wm attachment, got: {msg}"
+    assert len(attach_calls) == 1
+    assert attach_calls[0] == [str(hd_raw_wm)]
+    assert any(c.get("item") == "attachments" and c.get("verified") is True for c in comp)
+
+    # 2. attachments 含打码变体 (*_censored_wm.png) -> 在 L586 前置门禁被拦截，不进入编辑器挂载步
+    invalid_payload = {
+        "title": "Blocked Censor Variant",
+        "description": "Body text",
+        "patreon_images": [str(teaser_img), str(hd_raw_wm)],
+        "patreon_hd_images": [str(hd_raw_wm)],
+        "raw_images": [str(raw_src)],
+        "attachments": [str(censored_wm)],
+        "platform_options": {"patreon_visibility": "patrons"},
+    }
+    ok_bad, msg_bad, comp_bad = disp.publish(invalid_payload)
+    assert ok_bad is False
+    assert "缺附件" in msg_bad
+    assert len(attach_calls) == 1  # 未新增调用，证明在前置门禁即被拦截
+
+

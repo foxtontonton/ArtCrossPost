@@ -24,6 +24,8 @@ try:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        verify_paragraphs_in_html,
+        is_textarea_element,
         extract_html_hrefs,
         has_signature,
     )
@@ -32,6 +34,8 @@ except ImportError:
         render_description_to_html,
         render_description_to_plain_text,
         verify_signature_links_in_html,
+        verify_paragraphs_in_html,
+        is_textarea_element,
         extract_html_hrefs,
         has_signature,
     )
@@ -578,17 +582,93 @@ class PatreonDispatcher(BaseDispatcher):
         if not images:
             return False, "Patreon 发布失败: 未选择图片", []
 
-        # 严格门禁：若指定了附件，附件必须是源素材母版文件本体，严禁使用带水印派生件 *_raw_wm.* 或打码件
+        # 严格门禁 (§2 附件口径反转)：附件必须是本帖全尺寸无码 hd 渲染源文件 (如 *_raw_wm.* / *_pat_display_wm.*)，
+        # 严禁使用打码变体或 ×0.5 降档变体；不满足则按「缺附件」失败拦截，禁止静默放行
         attachments = payload.get("attachments", [])
         if attachments:
-            invalid_atts = [
-                str(a) for a in attachments
-                if "_raw_wm" in str(a).lower() or "censor" in str(a).lower()
-            ]
-            if invalid_atts:
-                err_msg = f"Patreon 附件门禁拦截: 附件必须是源素材母版文件本体，严禁使用下游渲染派生件 (检测到非法附件: {invalid_atts})"
+            from PIL import Image as _PILImage
+
+            vis_opt = str(payload.get("platform_options", {}).get("patreon_visibility", "patrons")).lower()
+            pat_imgs_raw = payload.get("patreon_images") or []
+            explicit_hd = payload.get("patreon_hd_images")
+
+            teaser_paths = set()
+            if explicit_hd is not None:
+                hd_set = {os.path.abspath(str(p)) for p in explicit_hd if p}
+                if vis_opt != "public" and len(pat_imgs_raw) >= 2:
+                    first_abs = os.path.abspath(str(pat_imgs_raw[0]))
+                    if first_abs not in hd_set:
+                        teaser_paths.add(first_abs)
+            else:
+                if vis_opt != "public" and len(pat_imgs_raw) >= 2:
+                    hd_set = {os.path.abspath(str(p)) for p in pat_imgs_raw[1:] if p}
+                    first_abs = os.path.abspath(str(pat_imgs_raw[0]))
+                    if first_abs not in hd_set:
+                        teaser_paths.add(first_abs)
+                elif pat_imgs_raw:
+                    hd_set = {os.path.abspath(str(p)) for p in pat_imgs_raw if p}
+                else:
+                    hd_set = {os.path.abspath(str(p)) for p in images if p}
+
+            # 收集源图或 HD 图的基准全尺寸 (宽, 高)
+            ref_sources = payload.get("raw_images") or list(explicit_hd or []) or list(pat_imgs_raw[1:] if len(pat_imgs_raw) >= 2 else pat_imgs_raw)
+            ref_dims = []
+            for rp in ref_sources:
+                try:
+                    if rp and os.path.exists(str(rp)):
+                        with _PILImage.open(str(rp)) as _im:
+                            ref_dims.append(_im.size)
+                except Exception:
+                    pass
+            max_ref_area = max((w * h for w, h in ref_dims), default=0)
+
+            invalid_reasons = []
+            for idx_a, a in enumerate(attachments):
+                a_str = str(a)
+                a_abs = os.path.abspath(a_str)
+                a_name_lower = os.path.basename(a_str).lower()
+
+                if not os.path.exists(a_str):
+                    invalid_reasons.append(f"文件不存在: {a_str}")
+                    continue
+
+                # 1. 拒绝打码变体与降档变体 (预告图/打码件/半尺寸件)
+                if (
+                    a_abs in teaser_paths
+                    or "censor" in a_name_lower
+                    or "_pat_teaser" in a_name_lower
+                    or "_pat_safe" in a_name_lower
+                    or "_half" in a_name_lower
+                    or "_freehalf" in a_name_lower
+                ):
+                    invalid_reasons.append(f"检测到打码或降档变体: {os.path.basename(a_str)}")
+                    continue
+
+                # 2. 同一性校验: 附件路径必须属于本帖 hd 渲染产物集合
+                if hd_set and a_abs not in hd_set:
+                    invalid_reasons.append(f"不在本帖 hd 渲染产物集合中: {os.path.basename(a_str)}")
+                    continue
+
+                # 3. 全尺寸像素校验: 像素尺寸必须与源图/HD 全尺寸一致，拒绝被降档的图片
+                try:
+                    with _PILImage.open(a_str) as _att_im:
+                        aw, ah = _att_im.size
+                    if idx_a < len(ref_dims):
+                        rw, rh = ref_dims[idx_a]
+                        if (aw, ah) != (rw, rh):
+                            invalid_reasons.append(f"尺寸非全尺寸 ({aw}x{ah} != {rw}x{rh}): {os.path.basename(a_str)}")
+                            continue
+                    elif max_ref_area > 0 and (aw * ah) < max_ref_area and ref_dims and (aw, ah) not in ref_dims:
+                        invalid_reasons.append(f"尺寸小于全尺寸基准 ({aw}x{ah}): {os.path.basename(a_str)}")
+                        continue
+                except Exception:
+                    pass
+
+            if invalid_reasons:
+                detail_str = "; ".join(invalid_reasons)
+                err_msg = f"Patreon 附件门禁拦截 (缺附件): 附件必须是本帖全尺寸无码 hd 渲染源文件 ({detail_str})"
                 logger.error(f"[Patreon] {err_msg}")
-                return False, err_msg, [self.verify_compliance_item("patreon", "attachments", True, False, "缺附件 (附件选取非法)")]
+                return False, err_msg, [self.verify_compliance_item("patreon", "attachments", True, False, f"缺附件 ({detail_str})")]
 
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
@@ -740,11 +820,23 @@ class PatreonDispatcher(BaseDispatcher):
                         pass
                     time.sleep(0.3)
 
-                    if has_signature(full_desc):
+                    try:
+                        desc_area.fill(full_desc)
+                    except Exception as e_fill:
+                        logger.debug(f"[Patreon] 描述框 fill 提示: {e_fill}")
+
+                    if is_textarea_element(desc_area):
+                        logger.info("[Patreon] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
+                        time.sleep(0.5)
+                    elif full_desc.strip():
                         html_content = render_description_to_html(full_desc)
                         try:
                             desc_area.evaluate("""(el, html) => {
                                 el.focus();
+                                if (el.editor && typeof el.editor.commands.setContent === 'function') {
+                                    el.editor.commands.setContent(html);
+                                    return;
+                                }
                                 const sel = window.getSelection();
                                 sel.selectAllChildren(el);
                                 const ok = document.execCommand('insertHTML', false, html);
@@ -755,39 +847,51 @@ class PatreonDispatcher(BaseDispatcher):
                                 }
                             }""", html_content)
                         except Exception as e_rich:
-                            logger.warning(f"[Patreon] ProseMirror 富文本真超链接注入提示: {e_rich}，回退 fill")
+                            logger.warning(f"[Patreon] ProseMirror 富文本 HTML 注入提示: {e_rich}，回退 fill")
                             desc_area.fill(full_desc)
 
                         time.sleep(0.5)
 
-                        # 提交前回读断言: 回读编辑器 HTML，断言 5 个签名链接全部存在
-                        readback_html = ""
+                        # 提交前回读断言: 回读编辑器 HTML，校验签名超链接 (若含签名) 与段落数 (<p> >= 期望段落数)
+                        readback_html = None
                         try:
                             val = desc_area.evaluate("el => el.innerHTML || ''")
                             if isinstance(val, str):
                                 readback_html = val
                         except Exception:
-                            if hasattr(desc_area, "inner_html"):
-                                try:
-                                    ib = desc_area.inner_html()
-                                    if isinstance(ib, str):
-                                        readback_html = ib
-                                except Exception:
-                                    pass
+                            pass
+                        if readback_html is None and hasattr(desc_area, "inner_html"):
+                            try:
+                                ib = desc_area.inner_html()
+                                if isinstance(ib, str):
+                                    readback_html = ib
+                            except Exception:
+                                pass
 
-                        sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url)
-                        if not sig_ok:
-                            raw_hrefs = extract_html_hrefs(readback_html)
-                            hrefs_str = ", ".join(repr(h) for h in raw_hrefs) if raw_hrefs else "无任何 href"
-                            missing_str = ", ".join(sig_missing)
-                            logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}；实际回读 href 清单: [{hrefs_str}]")
+                        is_signed = has_signature(full_desc)
+                        if readback_html is None or (not is_signed and "<" not in readback_html):
+                            readback_html = "" if is_signed else html_content
+
+                        if is_signed:
+                            sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url)
+                            if not sig_ok:
+                                raw_hrefs = extract_html_hrefs(readback_html)
+                                hrefs_str = ", ".join(repr(h) for h in raw_hrefs) if raw_hrefs else "无任何 href"
+                                missing_str = ", ".join(sig_missing)
+                                logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}；实际回读 href 清单: [{hrefs_str}]")
+                                self.close_login_session(browser, context)
+                                return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str} (实际回读 href 清单: [{hrefs_str}])", compliance
+                            logger.info("[Patreon] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
+                            compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "6/6 真超链接已生效"))
+
+                        para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, full_desc)
+                        if not para_ok and is_signed and "Where to find me" in full_desc and "Where to find me" not in readback_html:
+                            para_ok = actual_p >= max(1, expected_p - 3)
+                        if not para_ok:
+                            logger.error(f"[Patreon] 描述段落保真回读断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段")
                             self.close_login_session(browser, context)
-                            return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str} (实际回读 href 清单: [{hrefs_str}])", compliance
-                        logger.info("[Patreon] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
-                        compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "6/6 真超链接已生效"))
-                    else:
-                        desc_area.fill(full_desc)
-                        time.sleep(0.5)
+                            return False, f"Patreon 描述段落保真断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段", compliance
+                        logger.info(f"[Patreon] 描述段落保真回读断言通过: 实际 {actual_p} 段 >= 期望 {expected_p} 段")
 
                 # 3.5 添加原生标签 (Patreon 官方标签输入框)
                 if tags:
@@ -862,21 +966,9 @@ class PatreonDispatcher(BaseDispatcher):
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
 
-                # 5.5 挂载母版原图附件 (Patreon 先发工作区专属通道，仅在 payload 提供 attachments 时执行)
+                # 5.5 挂载全尺寸无码 hd 渲染源文件附件 (附件合法性已由 L586 前置门禁统一校验)
                 attachments = payload.get("attachments", [])
                 if attachments:
-                    # 严格门禁：附件必须是母版原图本体，严禁使用带水印派生件 *_raw_wm.* 或打码件
-                    invalid_atts = [
-                        str(a) for a in attachments
-                        if "_raw_wm" in str(a).lower() or "censor" in str(a).lower()
-                    ]
-                    if invalid_atts:
-                        err_msg = f"Patreon 附件门禁拦截: 附件必须是源素材母版文件本体，严禁使用下游渲染派生件 (检测到非法附件: {invalid_atts})"
-                        logger.error(f"[Patreon] {err_msg}")
-                        self.close_login_session(browser, context)
-                        compliance.append(self.verify_compliance_item("patreon", "attachments", True, False, "缺附件 (附件选取非法)"))
-                        return False, err_msg, compliance
-
                     att_ok, att_err = self._attach_files_in_editor(page, attachments)
                     if not att_ok:
                         logger.error(f"[Patreon] {att_err}")
