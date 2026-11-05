@@ -1428,7 +1428,8 @@ def migrate_presets_file(data_dir: Optional[Union[str, Path]] = None) -> Tuple[P
 # ==============================================================================
 
 DEFINITE_TEST_PATTERNS: List[re.Pattern] = [
-    re.compile(r"test", re.IGNORECASE),
+    re.compile(r"(?:^|[_ \-\.\d])test(?:[_ \-\.\d]|$)", re.IGNORECASE),
+    re.compile(r"[a-z0-9]Test(?:\d*|_|\.|$|[A-Z])"),
     re.compile(r"^wave_\d{8}_\d{6}"),
     re.compile(r"mutex[_\s]?art", re.IGNORECASE),
     re.compile(r"alert[_\s]?art", re.IGNORECASE),
@@ -1555,21 +1556,22 @@ def scan_test_artifacts(
         "------------------------------------",
         f"• 确定测试件: {len(definite_files)} 个 ({def_mb:.2f} MB)",
         f"• 疑似测试件 (需人工确认): {len(suspicious_files)} 个 ({susp_mb:.2f} MB)",
-        "",
-        "【确定测试件名单（部分）】" if definite_files else "【确定测试件名单】无",
     ]
-    for item in definite_files[:15]:
-        summary_lines.append(f"  - {item['rel_path']} ({item['reason']})")
-    if len(definite_files) > 15:
-        summary_lines.append(f"  ... 另有 {len(definite_files) - 15} 个确定测试文件")
+
+    detailed_lines = [
+        f"【确定测试件完整名单（共 {len(definite_files)} 个，{def_mb:.2f} MB）】",
+    ]
+    if definite_files:
+        for idx, item in enumerate(definite_files, 1):
+            detailed_lines.append(f"{idx}. {item['rel_path']}  [{item['reason']}] ({item['bytes']} B)")
+    else:
+        detailed_lines.append("  (无)")
 
     if suspicious_files:
-        summary_lines.append("")
-        summary_lines.append("【疑似测试件名单（需人工确认，默认保留）】")
-        for item in suspicious_files[:10]:
-            summary_lines.append(f"  - {item['rel_path']} ({item['reason']})")
-        if len(suspicious_files) > 10:
-            summary_lines.append(f"  ... 另有 {len(suspicious_files) - 10} 个疑似测试文件")
+        detailed_lines.append("")
+        detailed_lines.append(f"【疑似测试件完整名单（需人工确认，共 {len(suspicious_files)} 个，{susp_mb:.2f} MB）】")
+        for idx, item in enumerate(suspicious_files, 1):
+            detailed_lines.append(f"{idx}. {item['rel_path']}  [{item['reason']}] ({item['bytes']} B)")
 
     return {
         "definite_files": definite_files,
@@ -1579,6 +1581,7 @@ def scan_test_artifacts(
         "suspicious_count": len(suspicious_files),
         "suspicious_bytes": susp_bytes,
         "summary_text": "\n".join(summary_lines),
+        "detailed_text": "\n".join(detailed_lines),
     }
 
 

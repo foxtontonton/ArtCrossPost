@@ -2041,6 +2041,9 @@ def test_startup_scan_attended_mode_defer_suppresses_in_session_polls(tmp_path, 
     monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
 
     def fake_exec(msg_box):
+        # 断言启动补发弹窗默认按钮必须为「暂缓」（安全默认）
+        assert msg_box.defaultButton() is not None
+        assert msg_box.defaultButton().text() == "暂缓", f"Default button must be 暂缓, got {msg_box.defaultButton().text()}"
         for btn in msg_box.buttons():
             if btn.text() == "暂缓":
                 msg_box._clicked_btn = btn
@@ -2207,7 +2210,10 @@ def test_scan_test_artifacts_classification(tmp_path):
     archive_hd.mkdir(parents=True, exist_ok=True)
     archive_gif.mkdir(parents=True, exist_ok=True)
 
-    # 1. 确定测试件 - 命名匹配
+    # 1. 确定测试件正例：test_0、lora_and_workflow_test_02、Single_vs_Multi_Test、BskyReuseXVideoTest
+    (archive_gif / "test_0.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "lora_and_workflow_test_02.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "Single_vs_Multi_Test.gif").write_bytes(b"fake_gif_data")
     (archive_gif / "BskyReuseXVideoTest.gif").write_bytes(b"fake_gif_data")
     (archive_gif / "wave_20261105_203204_84dd34_00_censor.gif").write_bytes(b"fake_gif_data")
     (archive_hd / "Mutex_Art.jpg").write_bytes(b"fake_jpg_data")
@@ -2222,29 +2228,48 @@ def test_scan_test_artifacts_classification(tmp_path):
     (cache_dir / "dummy_preview.jpg").write_bytes(b"fake_jpg_data")
     (cache_dir / "sample_card.png").write_bytes(b"fake_png_data")
 
-    # 3. 真实素材件（正常多色图片，真实作品命名）
-    genuine_path = archive_hd / "He_Saved_the_Last_Drop_for_You.png"
-    im_gen = Image.new("RGB", (200, 200))
-    # Fill with varied colors
+    # 3. 词元边界反例（Latest / Protest / Testament / Contest 绝对不得误判为测试件）
     import numpy as np
-    arr = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
-    Image.fromarray(arr).save(genuine_path)
+    for neg_name in ["Latest.png", "Protest.jpg", "Testament.png", "Contest.png"]:
+        neg_p = archive_hd / neg_name
+        arr = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+        Image.fromarray(arr).save(neg_p)
+
+    # 4. 真实素材件（正常多色图片，真实作品命名）
+    genuine_path = archive_hd / "He_Saved_the_Last_Drop_for_You.png"
+    arr_gen = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+    Image.fromarray(arr_gen).save(genuine_path)
 
     # 扫描
     report = scan_test_artifacts(data_dir=data_dir)
-    assert report["definite_count"] == 5, f"Expected 5 definite test files, got {report['definite_count']}"
+    assert report["definite_count"] == 8, f"Expected 8 definite test files, got {report['definite_count']}"
     assert report["suspicious_count"] == 2, f"Expected 2 suspicious files, got {report['suspicious_count']}"
 
     def_names = [f["filename"] for f in report["definite_files"]]
+    # 正例必须全部命中
+    assert "test_0.gif" in def_names
+    assert "lora_and_workflow_test_02.gif" in def_names
+    assert "Single_vs_Multi_Test.gif" in def_names
     assert "BskyReuseXVideoTest.gif" in def_names
     assert "wave_20261105_203204_84dd34_00_censor.gif" in def_names
     assert "Mutex_Art.jpg" in def_names
     assert "Attach_Switch_Three_States.jpg" in def_names
     assert "Solid_Placeholder.png" in def_names
 
+    # 反例绝对不得命中
+    for neg_name in ["Latest.png", "Protest.jpg", "Testament.png", "Contest.png"]:
+        assert neg_name not in def_names, f"Negative sample {neg_name} mistakenly classified as definite!"
+        assert neg_name not in [f["filename"] for f in report["suspicious_files"]], f"Negative sample {neg_name} mistakenly classified as suspicious!"
+
     susp_names = [f["filename"] for f in report["suspicious_files"]]
     assert "dummy_preview.jpg" in susp_names
     assert "sample_card.png" in susp_names
+
+    # 验证 detailed_text 包含全部 8 个确定件名单
+    detailed_text = report.get("detailed_text", "")
+    assert detailed_text, "detailed_text must be provided"
+    for name in def_names:
+        assert name in detailed_text, f"{name} missing from detailed_text"
 
 
 def test_execute_test_artifacts_cleanup_with_pool_pruning(tmp_path):

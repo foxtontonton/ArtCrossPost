@@ -3922,6 +3922,9 @@ class SettingsDialog(QDialog):
             "点击「执行」将彻底删除【确定测试件】，并同步剔除附件池失效引用；\n"
             "【疑似测试件】默认保留不删。点击「取消」则放弃本次清扫。"
         )
+        detailed = report.get("detailed_text", "")
+        if detailed:
+            msg_box.setDetailedText(detailed)
         exec_btn = msg_box.addButton("执行", QMessageBox.AcceptRole)
         cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
         msg_box.setDefaultButton(cancel_btn)
@@ -9879,7 +9882,7 @@ class MainWindow(QMainWindow):
         )
         reissue_btn = msg_box.addButton("补发", QMessageBox.AcceptRole)
         defer_btn = msg_box.addButton("暂缓", QMessageBox.RejectRole)
-        msg_box.setDefaultButton(reissue_btn)
+        msg_box.setDefaultButton(defer_btn)
 
         msg_box.exec_()
         clicked = msg_box.clickedButton()
