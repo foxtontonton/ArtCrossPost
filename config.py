@@ -92,6 +92,9 @@ DEFAULT_CONFIG = {
         "patreon_max_limit_mb": 50.0           # Patreon 单图体积上限
     },
     "publish_concurrency": 2,                 # 并发发布数 (默认 2，各平台独立持久化浏览器实例)
+    "delayed_wave_enabled": False,            # 延迟公开波队列总开关 (默认关)
+    "delayed_wave_default_delay_value": 7,     # 默认延迟数值 (默认 7)
+    "delayed_wave_default_delay_unit": "天",  # 默认延迟单位 (默认 "天")
     "defaults": {
         "is_ai_generated": True,
         "x_sensitive": True,

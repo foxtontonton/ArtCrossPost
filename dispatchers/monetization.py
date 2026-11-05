@@ -434,6 +434,139 @@ class PatreonDispatcher(BaseDispatcher):
 
         return 0
 
+    def _attach_files_in_editor(self, page, attachments: list) -> tuple[bool, str]:
+        """
+        在 Patreon 编辑器中挂载附件 (Insert content → Others → Attachments 通道):
+        - 支持 Playwright expect_file_chooser 与 input[type='file'] 注入
+        - 编辑器回读 Attachments 区块，严格断言各母版文件名存在
+        - 失败响亮报错并返回 (False, 错误原因)
+        """
+        if not attachments:
+            return True, ""
+
+        valid_files = [str(a) for a in attachments if os.path.exists(str(a))]
+        if len(valid_files) != len(attachments):
+            missing = [str(a) for a in attachments if not os.path.exists(str(a))]
+            return False, f"附件源文件不存在: {missing}"
+
+        # 检查是否已有 mock 挂载 (供单元测试加速)
+        if hasattr(page, "_mock_attachments"):
+            for vf in valid_files:
+                page._mock_attachments.append(os.path.basename(vf))
+            return True, f"成功挂载 {len(valid_files)} 个附件 (Mock 模式)"
+
+        logger.info(f"[Patreon] 开始挂载 {len(valid_files)} 个原图附件至编辑器...")
+
+        attached_ok = False
+        try:
+            # 机制 A: 直接查找 Attachments 按钮
+            att_btn = page.query_selector(
+                "button:has-text('Attachments'), div[role='button']:has-text('Attachments'), "
+                "[data-tag*='attachment']:not([data-tag='attachment-row']) button"
+            )
+            # 机制 B: 通过 'Insert content' / '+' 下拉菜单触发
+            if not att_btn:
+                insert_btn = page.query_selector(
+                    "button:has-text('Insert content'), button[aria-label*='Insert' i], "
+                    "button:has-text('+'), div[role='button'][aria-label*='Insert' i]"
+                )
+                if insert_btn:
+                    try:
+                        insert_btn.click()
+                    except Exception:
+                        insert_btn.evaluate("el => el.click()")
+                    time.sleep(0.5)
+
+                    others_btn = page.query_selector(
+                        "button:has-text('Others'), div[role='menuitem']:has-text('Others'), div:has-text('Others')"
+                    )
+                    if others_btn:
+                        try:
+                            others_btn.click()
+                        except Exception:
+                            others_btn.evaluate("el => el.click()")
+                        time.sleep(0.5)
+
+                    att_btn = page.query_selector(
+                        "button:has-text('Attachments'), div[role='menuitem']:has-text('Attachments'), div:has-text('Attachments')"
+                    )
+
+            if att_btn:
+                try:
+                    with page.expect_file_chooser(timeout=8000) as fc_info:
+                        try:
+                            att_btn.click()
+                        except Exception:
+                            att_btn.evaluate("el => el.click()")
+                    fc = fc_info.value
+                    fc.set_files(valid_files)
+                    attached_ok = True
+                    logger.info(f"[Patreon] 机制 A/B 成功: 已通过 FileChooser 注入 {len(valid_files)} 个附件")
+                except Exception as e_fc:
+                    logger.warning(f"[Patreon] FileChooser 捕获失败 ({e_fc})，尝试机制 C...")
+
+            # 机制 C: 直接定位页面中除主媒体外的 input[type='file']
+            if not attached_ok:
+                att_inputs = page.query_selector_all("input[type='file']:not(#mainMedia):not(#photosInput)")
+                if att_inputs:
+                    target_fi = att_inputs[-1]
+                    try:
+                        target_fi.set_input_files(valid_files)
+                        attached_ok = True
+                        logger.info(f"[Patreon] 机制 C 成功: 通过独立 input[type='file'] 注入附件")
+                    except Exception as e_fi:
+                        logger.warning(f"[Patreon] 机制 C 注入异常: {e_fi}")
+        except Exception as e_att:
+            logger.warning(f"[Patreon] 挂载附件尝试异常: {e_att}")
+
+        # 2. 等待上传完成与编辑器回读断言
+        time.sleep(1.0)
+        max_att_wait = time.time() + 30
+        while time.time() < max_att_wait:
+            progress_indicator = page.query_selector(
+                "div[role='progressbar'], div[data-tag='attachment-uploading'], [class*='uploading' i], [class*='spinner' i]"
+            )
+            if not progress_indicator:
+                break
+            time.sleep(1.0)
+
+        # 3. 编辑器回读断言：验证每个附件的母版文件名出现在编辑器 DOM 中
+        expected_basenames = [os.path.basename(f) for f in valid_files]
+        readback_dom_text = ""
+        try:
+            val = page.evaluate("""() => {
+                const els = document.querySelectorAll(
+                    "[data-tag*='attachment'], div[class*='attachment' i], div[role='region'], div.ProseMirror"
+                );
+                return Array.from(els).map(e => e.innerText || '').join('\\n');
+            }""")
+            if isinstance(val, str):
+                readback_dom_text = val
+        except Exception:
+            pass
+
+        if not readback_dom_text:
+            try:
+                rows = page.query_selector_all("[data-tag='attachment-row'], div:has-text('Attachments')")
+                readback_dom_text = "\n".join([(r.inner_text() or "") for r in rows])
+            except Exception:
+                pass
+
+        missing_names = []
+        for bn in expected_basenames:
+            if bn not in readback_dom_text:
+                short_bn = bn[:16] if len(bn) > 16 else bn
+                if short_bn not in readback_dom_text:
+                    missing_names.append(bn)
+
+        if missing_names:
+            err_msg = f"Patreon 附件挂载失败: 编辑器未回读到全部附件 ({missing_names})"
+            logger.error(f"[Patreon] {err_msg}")
+            return False, err_msg
+
+        logger.info(f"[Patreon] 附件回读断言通过: 全部 {len(expected_basenames)} 个母版附件已就绪")
+        return True, ""
+
     def publish(self, payload):
         """
         通过 Playwright 执行 Patreon 原生发布后台:
@@ -444,6 +577,18 @@ class PatreonDispatcher(BaseDispatcher):
         images = payload.get("patreon_images") or payload.get("raw_images", payload.get("images", []))
         if not images:
             return False, "Patreon 发布失败: 未选择图片", []
+
+        # 严格门禁：若指定了附件，附件必须是源素材母版文件本体，严禁使用带水印派生件 *_raw_wm.* 或打码件
+        attachments = payload.get("attachments", [])
+        if attachments:
+            invalid_atts = [
+                str(a) for a in attachments
+                if "_raw_wm" in str(a).lower() or "censor" in str(a).lower()
+            ]
+            if invalid_atts:
+                err_msg = f"Patreon 附件门禁拦截: 附件必须是源素材母版文件本体，严禁使用下游渲染派生件 (检测到非法附件: {invalid_atts})"
+                logger.error(f"[Patreon] {err_msg}")
+                return False, err_msg, [self.verify_compliance_item("patreon", "attachments", True, False, "缺附件 (附件选取非法)")]
 
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
@@ -716,6 +861,30 @@ class PatreonDispatcher(BaseDispatcher):
                     time.sleep(0.3)
                 except Exception as e:
                     logger.warning(f"[Patreon] 设置可见范围异常: {e}")
+
+                # 5.5 挂载母版原图附件 (Patreon 先发工作区专属通道，仅在 payload 提供 attachments 时执行)
+                attachments = payload.get("attachments", [])
+                if attachments:
+                    # 严格门禁：附件必须是母版原图本体，严禁使用带水印派生件 *_raw_wm.* 或打码件
+                    invalid_atts = [
+                        str(a) for a in attachments
+                        if "_raw_wm" in str(a).lower() or "censor" in str(a).lower()
+                    ]
+                    if invalid_atts:
+                        err_msg = f"Patreon 附件门禁拦截: 附件必须是源素材母版文件本体，严禁使用下游渲染派生件 (检测到非法附件: {invalid_atts})"
+                        logger.error(f"[Patreon] {err_msg}")
+                        self.close_login_session(browser, context)
+                        compliance.append(self.verify_compliance_item("patreon", "attachments", True, False, "缺附件 (附件选取非法)"))
+                        return False, err_msg, compliance
+
+                    att_ok, att_err = self._attach_files_in_editor(page, attachments)
+                    if not att_ok:
+                        logger.error(f"[Patreon] {att_err}")
+                        self.close_login_session(browser, context)
+                        compliance.append(self.verify_compliance_item("patreon", "attachments", True, False, f"缺附件: {att_err}"))
+                        return False, att_err, compliance
+
+                    compliance.append(self.verify_compliance_item("patreon", "attachments", True, True, f"{len(attachments)} 个母版文件已成功挂载"))
 
                 # 6. 等待发布按钮激活并提交 (Patreon React 组件在素材加载后异步激活发布按钮)
                 pub_sel = "[data-tag='make-a-post-action-publish'], button:has-text('Publish now'), button:has-text('Publish')"
