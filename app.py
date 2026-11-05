@@ -4464,6 +4464,10 @@ class MainWindow(QMainWindow):
             self._startup_expired_timer.stop()
         if hasattr(self, "_layout_save_timer"):
             self._layout_save_timer.stop()
+        if hasattr(self, "_delayed_wave_timer") and self._delayed_wave_timer:
+            self._delayed_wave_timer.stop()
+        if hasattr(self, "_delayed_wave_worker_thread") and self._delayed_wave_worker_thread and self._delayed_wave_worker_thread.isRunning():
+            self._delayed_wave_worker_thread.wait(2000)
         self._save_window_layout()
         self._sync_config_from_ui()
         super().closeEvent(event)
@@ -9345,6 +9349,9 @@ class MainWindow(QMainWindow):
 
     def _poll_delayed_wave_queue(self):
         """定时轮询或启动扫描到期公开波 (后台线程 + 繁忙互斥)"""
+        enabled = bool(self.config.get("delayed_wave_enabled", False)) or bool(getattr(self, "delayed_wave_enabled", False))
+        if not enabled:
+            return
         if not self.delayed_wave_executor or not self.delayed_wave_manager:
             return
         if self._is_any_publish_busy():
@@ -9393,6 +9400,11 @@ class MainWindow(QMainWindow):
         if enabled:
             if not self.delayed_wave_manager:
                 self._init_delayed_wave_subsystem()
+            else:
+                self.delayed_wave_manager.enabled = True
+            if hasattr(self, "_delayed_wave_timer") and self._delayed_wave_timer:
+                if not self._delayed_wave_timer.isActive():
+                    self._delayed_wave_timer.start()
             if not self.main_tab_widget:
                 self.main_tab_widget = QTabWidget()
                 self.main_tab_widget.setStyleSheet("""
@@ -9429,6 +9441,10 @@ class MainWindow(QMainWindow):
                 self.main_tab_widget.show()
                 self.main_splitter.show()
         else:
+            if hasattr(self, "_delayed_wave_timer") and self._delayed_wave_timer:
+                self._delayed_wave_timer.stop()
+            if hasattr(self, "delayed_wave_manager") and self.delayed_wave_manager:
+                self.delayed_wave_manager.enabled = False
             if self.main_tab_widget:
                 root_layout.removeWidget(self.main_tab_widget)
                 self.main_tab_widget.removeTab(0)
