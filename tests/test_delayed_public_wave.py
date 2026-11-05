@@ -1055,8 +1055,7 @@ def test_delayed_wave_busy_mutex_defers_when_main_publish_running(tmp_path, monk
     assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
-    win = app_mod.MainWindow()
-    win.data_dir = tmp_path
+    win = app_mod.MainWindow(data_dir=tmp_path)
     win.config["delayed_wave_enabled"] = True
     win._init_delayed_wave_subsystem()
 
@@ -1091,8 +1090,7 @@ def test_queue_btn_alert_style_restores_after_clear_or_retry_success(tmp_path, m
     assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
-    win = app_mod.MainWindow()
-    win.data_dir = tmp_path
+    win = app_mod.MainWindow(data_dir=tmp_path)
     win.config["delayed_wave_enabled"] = True
     win._init_delayed_wave_subsystem()
 
@@ -1941,5 +1939,200 @@ def test_patreon_step55_reaches_attach_with_raw_wm_and_pregate_blocks_censor(tmp
     assert ok_bad is False
     assert "缺附件" in msg_bad
     assert len(attach_calls) == 1  # 未新增调用，证明在前置门禁即被拦截
+
+
+# ==============================================================================
+# 19. 公开波启动扫描弹窗提醒与暂缓/补发选择、无人值守穿透
+# ==============================================================================
+
+def test_startup_scan_unattended_mode_auto_polls_without_dialog(tmp_path, monkeypatch):
+    """
+    无人值守场景 (ARTCROSSPOST_UNATTENDED=1 或命令行 --unattended):
+    启动扫描发现到期项时，维持现行自动补发行为，不弹出任何 QMessageBox。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.setenv("ARTCROSSPOST_UNATTENDED", "1")
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    # 登记一个到期任务
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    win.delayed_wave_manager.enroll({"title": "Unattended Task", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+    dialog_called = []
+    monkeypatch.setattr(QMessageBox, "exec_", lambda self: dialog_called.append(True))
+
+    win._startup_scan_delayed_wave_queue()
+
+    assert len(poll_called) == 1
+    assert len(dialog_called) == 0
+
+
+def test_startup_scan_attended_mode_reissue_triggers_poll(tmp_path, monkeypatch):
+    """
+    交互模式启动扫描：发现到期项时弹窗提醒，用户点击「补发」立即调用 _poll_delayed_wave_queue。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.delenv("ARTCROSSPOST_UNATTENDED", raising=False)
+    monkeypatch.delenv("ARTCROSSPOST_SCHEDULED", raising=False)
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    item = win.delayed_wave_manager.enroll({"title": "Interactive Art", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+
+    def fake_exec(msg_box):
+        for btn in msg_box.buttons():
+            if btn.text() == "补发":
+                msg_box._clicked_btn = btn
+                break
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked_btn", None))
+
+    win._startup_scan_delayed_wave_queue()
+
+    assert len(poll_called) == 1
+    assert item.id not in getattr(win, "_deferred_wave_item_ids", set())
+
+
+def test_startup_scan_attended_mode_defer_suppresses_in_session_polls(tmp_path, monkeypatch):
+    """
+    交互模式启动扫描：用户点击「暂缓」则本会话不发；
+    条目在队列中完整保留（下次启动仍可被扫描到），但本会话定时轮询自动过滤排除该项。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.delenv("ARTCROSSPOST_UNATTENDED", raising=False)
+    monkeypatch.delenv("ARTCROSSPOST_SCHEDULED", raising=False)
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    item = win.delayed_wave_manager.enroll({"title": "Deferred Art", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+
+    def fake_exec(msg_box):
+        for btn in msg_box.buttons():
+            if btn.text() == "暂缓":
+                msg_box._clicked_btn = btn
+                break
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked_btn", None))
+
+    win._startup_scan_delayed_wave_queue()
+
+    # 暂缓分支不调用补发
+    assert len(poll_called) == 0
+    assert item.id in win._deferred_wave_item_ids
+
+    # 队列文件中的该条目仍处于 pending 状态，未被删除或标记完成
+    items_in_q = win.delayed_wave_manager.get_items()
+    assert len(items_in_q) == 1
+    assert items_in_q[0].id == item.id
+    assert items_in_q[0].status == "pending"
+
+    # 恢复真实 _poll_delayed_wave_queue，验证本会话后续定时轮询过滤该条目，不启动 worker
+    monkeypatch.undo()
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    worker_started = []
+    monkeypatch.setattr(app_mod, "DelayedWaveWorkerThread", lambda *a, **k: worker_started.append(True))
+
+    win._poll_delayed_wave_queue()
+    assert len(worker_started) == 0  # 因被暂缓，有效待发列表为空，未启动后台线程
+
+
+# ==============================================================================
+# 20. 生产数据零污染隔离断言 (Queue / Config / History)
+# ==============================================================================
+
+def test_prod_data_isolation_and_zero_pollution(monkeypatch, tmp_path):
+    """
+    验证测试环境多重防线：
+    1. save_config / save_window_state 在 PYTEST_CURRENT_TEST 下禁止写入生产 presets.json / window_state.json
+    2. DelayedQueueManager.save_queue / enroll 在测试下严禁写入生产队列与 delayed_assets
+    3. PublishHistoryManager.append_record 在测试下严禁写入生产 publish_history.json
+    4. 模拟 UI 控件各种反勾选与防抖同步，生产配置哈希零变化。
+    """
+    import hashlib
+    import config as cfg_mod
+    import app as app_mod
+    from delayed_wave_manager import DelayedQueueManager, DELAYED_QUEUE_FILE, DELAYED_ASSETS_DIR
+    from history_manager import PublishHistoryManager
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    prod_queue = DELAYED_QUEUE_FILE
+    prod_presets = cfg_mod.PRESETS_FILE
+    prod_history = cfg_mod.DATA_DIR / "publish_history.json"
+
+    def get_file_sha256(p: Path) -> str:
+        if not p.exists():
+            return "NON_EXISTENT"
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    queue_hash_before = get_file_sha256(prod_queue)
+    presets_hash_before = get_file_sha256(prod_presets)
+    history_hash_before = get_file_sha256(prod_history)
+
+    # 1. 尝试直接向生产队列保存
+    mgr = DelayedQueueManager()
+    saved = mgr.save_queue([])
+    assert saved is False, "save_queue must refuse writing to prod in pytest"
+
+    # 尝试在生产 assets_dir 登记
+    with pytest.raises(RuntimeError):
+        mgr.enroll({"title": "LeakTest", "raw_images": []}, 0, ["deviantart"])
+
+    # 2. 尝试向生产 presets 保存
+    cfg_mod.save_config({"leaked_key": 999})
+
+    # 3. 尝试向生产 historyManager 追加记录
+    hm = PublishHistoryManager(cfg_mod.DATA_DIR)
+    hm.append_record("MockArt", [], {"deviantart": (True, "https://leak.url", [])})
+
+    # 4. 模拟默认 MainWindow() 构造并触发 UI 同步配置
+    from PyQt5.QtWidgets import QApplication
+    qapp = QApplication.instance() or QApplication([])
+    win = app_mod.MainWindow()
+    # 模拟切换水印控件并触发配置同步
+    win.watermark_enabled_cb.setChecked(False)
+    win._sync_config_from_ui()
+
+    # 断言生产各关键数据文件完全零变化
+    assert get_file_sha256(prod_queue) == queue_hash_before
+    assert get_file_sha256(prod_presets) == presets_hash_before
+    assert get_file_sha256(prod_history) == history_hash_before
+
 
 

@@ -3,6 +3,7 @@
 ArtCrossPost - Configuration & Presets Manager
 """
 import json
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -218,6 +219,13 @@ def load_config():
     return copy.deepcopy(DEFAULT_CONFIG)
 
 def save_config(config_data):
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            prod_presets = (DATA_DIR / "text_assets" / "presets.json").resolve()
+            if PRESETS_FILE.resolve() == prod_presets:
+                return
+        except Exception:
+            pass
     try:
         PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(PRESETS_FILE, "w", encoding="utf-8") as f:
@@ -235,6 +243,13 @@ def load_window_state():
     return None
 
 def save_window_state(state_data):
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            prod_state = (DATA_DIR / "window_state.json").resolve()
+            if WINDOW_STATE_FILE.resolve() == prod_state:
+                return
+        except Exception:
+            pass
     try:
         with open(WINDOW_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state_data, f, ensure_ascii=False, indent=2)

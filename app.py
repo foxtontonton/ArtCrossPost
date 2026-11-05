@@ -30,6 +30,7 @@ import re
 import numpy as np
 import cv2
 from PIL import Image
+from typing import Optional, Union
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -2099,7 +2100,7 @@ def optimize_raw_gif(input_gif_path, output_gif_path, max_limit_mb=3.8):
     保留原始节奏与循环配置，在不添加任何打码/水印（保持赞助商原图纯净度）的前提下，
     通过调色板自适应阶梯式降级、智能隔帧抽帧与保等比分辨率缩放，严格将体积压缩至 max_limit_mb 以内。
     """
-    from PIL import ImageSequence
+    from PIL import Image, ImageSequence
 
     in_p = Path(input_gif_path)
     out_p = Path(output_gif_path)
@@ -4141,14 +4142,29 @@ class SettingsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __setattr__(self, name, value):
+        if name in ("data_dir", "_data_dir"):
+            val = Path(value)
+            super().__setattr__("data_dir", val)
+            super().__setattr__("_data_dir", val)
+            if hasattr(self, "history_manager") and self.history_manager:
+                self.history_manager.data_dir = val
+                self.history_manager.history_file = val / "publish_history.json"
+            if hasattr(self, "delayed_wave_manager") and self.delayed_wave_manager:
+                self.delayed_wave_manager.queue_file = val / "delayed_queue.json"
+                self.delayed_wave_manager.assets_dir = val / "delayed_assets"
+            return
+        super().__setattr__(name, value)
+
+    def __init__(self, data_dir: Optional[Union[str, Path]] = None):
         super().__init__()
         self.setWindowTitle("ArtCrossPost - 多平台创作同步分发助手 (全尺寸 & 水印打码双核实时预览版)")
         self.setMinimumSize(1260, 780)
 
-        self.data_dir = Path(__file__).resolve().parent / "data"
+        self.data_dir = Path(data_dir) if data_dir else (Path(__file__).resolve().parent / "data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.history_manager = PublishHistoryManager(self.data_dir)
+        self._deferred_wave_item_ids = set()
         self._last_publish_payload = None
         self._last_failed_dispatchers = []
 
@@ -4277,8 +4293,12 @@ class MainWindow(QMainWindow):
 
     def _save_draft(self):
         """P1-6: 自动将当前草稿保存至 data/draft.json"""
-        if os.environ.get("PYTEST_CURRENT_TEST") and self.data_dir == Path(__file__).resolve().parent / "data":
-            return
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                if self.data_dir.resolve() == (Path(__file__).resolve().parent / "data").resolve():
+                    return
+            except Exception:
+                pass
         draft_file = self.data_dir / "draft.json"
         if not hasattr(self, "title_input") or not hasattr(self, "tags_input") or not hasattr(self, "desc_input"):
             return
@@ -4698,8 +4718,17 @@ class MainWindow(QMainWindow):
                 gh = self.preview_splitter.sizes()[1]
                 self.config["thumbnail_gallery_height"] = max(MIN_THUMBNAIL_GALLERY_HEIGHT, min(MAX_THUMBNAIL_GALLERY_HEIGHT, int(round(gh))))
 
-            save_config(self.config)
-            logger.debug("[Config] 界面配置已成功持久化至 presets.json")
+            can_save = True
+            if os.environ.get("PYTEST_CURRENT_TEST"):
+                try:
+                    prod_data = (Path(__file__).resolve().parent / "data").resolve()
+                    if getattr(self, "data_dir", None) and self.data_dir.resolve() == prod_data:
+                        can_save = False
+                except Exception:
+                    pass
+            if can_save:
+                save_config(self.config)
+            logger.debug("[Config] 界面配置已成功同步")
         except Exception as e:
             logger.warning(f"[Config] 同步界面配置失败: {e}")
 
@@ -7162,7 +7191,7 @@ class MainWindow(QMainWindow):
         - max_limit_mb 为 None 时：保留 100% 原始高质量与 256 色调色板 (适用于 DeviantArt 等支持大图的平台)
         - max_limit_mb 有值时：自适应渐进式压缩至指定限制内 (如 X/Twitter 的 13.8MB 限制)
         """
-        from PIL import ImageSequence
+        from PIL import Image, ImageSequence
         import cv2
         import numpy as np
 
@@ -9717,8 +9746,22 @@ class MainWindow(QMainWindow):
 
     def _init_delayed_wave_subsystem(self):
         """初始化延迟公开波管理器、执行器与定时轮询 (仅在开关开启时调用)"""
-        if getattr(self, "delayed_wave_manager", None) is not None:
-            return
+        prod_data = (Path(__file__).resolve().parent / "data").resolve()
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                if self.data_dir.resolve() == prod_data:
+                    return
+            except Exception:
+                pass
+
+        curr_mgr = getattr(self, "delayed_wave_manager", None)
+        if curr_mgr is not None:
+            try:
+                if curr_mgr.queue_file.parent.resolve() == self.data_dir.resolve():
+                    return
+            except Exception:
+                pass
+
         self.delayed_wave_manager = DelayedQueueManager(
             queue_file=self.data_dir / "delayed_queue.json",
             assets_dir=self.data_dir / "delayed_assets",
@@ -9742,7 +9785,71 @@ class MainWindow(QMainWindow):
         self._refresh_queue_btn_alert_style()
         # 启动后扫描一遍队列 (1.5秒后防抖启动，不阻塞UI渲染)
         if not os.environ.get("PYTEST_CURRENT_TEST"):
-            QTimer.singleShot(1500, self._poll_delayed_wave_queue)
+            QTimer.singleShot(1500, self._startup_scan_delayed_wave_queue)
+
+    def _startup_scan_delayed_wave_queue(self):
+        """
+        启动时扫描延迟公开波队列到期项:
+        - 无人值守模式 (环境变量 ARTCROSSPOST_UNATTENDED / ARTCROSSPOST_SCHEDULED 或命令行 --unattended / --scheduled / -s / --silent / --cron):
+          直接执行 _poll_delayed_wave_queue 自动补发，不弹窗。
+        - 正常交互模式:
+          弹窗列出到期条数与标题清单，提供「补发」与「暂缓」选项:
+          - 「补发」: 调用 _poll_delayed_wave_queue 立即执行
+          - 「暂缓」: 将到期项 ID 记入 _deferred_wave_item_ids，本会话内定时轮询跳过这些项，队列文件保留，下次启动再次询问。
+        """
+        enabled = bool(self.config.get("delayed_wave_enabled", False)) or bool(getattr(self, "delayed_wave_enabled", False))
+        if not enabled:
+            return
+        if not getattr(self, "delayed_wave_executor", None) or not getattr(self, "delayed_wave_manager", None):
+            return
+
+        due_items = self.delayed_wave_manager.get_due_items()
+        if not due_items:
+            return
+
+        is_unattended = bool(
+            os.environ.get("ARTCROSSPOST_UNATTENDED")
+            or os.environ.get("ARTCROSSPOST_SCHEDULED")
+            or any(arg in sys.argv for arg in ("--unattended", "--scheduled", "--silent", "-s", "--cron"))
+        )
+
+        if is_unattended:
+            logger.info(f"[DelayedWave] 无人值守模式启动扫描，发现 {len(due_items)} 项到期任务，直接触发自动补发")
+            self._poll_delayed_wave_queue()
+            return
+
+        # 正常交互模式：弹窗确认
+        titles_lines = []
+        for i, it in enumerate(due_items[:10], start=1):
+            plat_str = ",".join(it.platforms) if it.platforms else "无目标平台"
+            titles_lines.append(f"{i}. {it.title or '未命名作品'} [{plat_str}]")
+        if len(due_items) > 10:
+            titles_lines.append(f"... 等共 {len(due_items)} 条任务")
+        titles_text = "\n".join(titles_lines)
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("延迟公开波 - 到期任务启动提醒")
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setText(
+            f"检测到系统中有 {len(due_items)} 条延迟公开任务已到期：\n\n"
+            f"{titles_text}\n\n"
+            "是否立即补发？"
+        )
+        reissue_btn = msg_box.addButton("补发", QMessageBox.AcceptRole)
+        defer_btn = msg_box.addButton("暂缓", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(reissue_btn)
+
+        msg_box.exec_()
+        clicked = msg_box.clickedButton()
+
+        if clicked == reissue_btn:
+            logger.info(f"[DelayedWave] 用户确认补发 {len(due_items)} 项到期任务")
+            self._poll_delayed_wave_queue()
+        else:
+            logger.info(f"[DelayedWave] 用户选择暂缓本会话补发 {len(due_items)} 项到期任务")
+            if not hasattr(self, "_deferred_wave_item_ids") or self._deferred_wave_item_ids is None:
+                self._deferred_wave_item_ids = set()
+            self._deferred_wave_item_ids.update(it.id for it in due_items)
 
     def _refresh_queue_btn_alert_style(self):
         """根据队列中是否存在失败项动态更新或恢复 queue_btn 告警样式"""
@@ -9782,12 +9889,15 @@ class MainWindow(QMainWindow):
             logger.info("[DelayedWave] 检测到主发布或定时发布正在运行，本次公开波执行顺延")
             return
         due_items = self.delayed_wave_manager.get_due_items()
-        if not due_items:
+        deferred = getattr(self, "_deferred_wave_item_ids", set()) or set()
+        effective_items = [it for it in due_items if it.id not in deferred]
+        if not effective_items:
             return
         self._is_delayed_wave_running = True
         worker = DelayedWaveWorkerThread(
             executor=self.delayed_wave_executor,
             mode="poll",
+            exclude_ids=deferred,
             parent=self,
         )
         self._delayed_wave_worker_thread = worker

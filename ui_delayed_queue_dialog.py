@@ -288,6 +288,8 @@ class DelayedQueueDialog(QDialog):
         def _on_done(finished_item, ok: bool, errors: dict):
             if parent_win is not None and hasattr(parent_win, "_is_delayed_wave_running"):
                 parent_win._is_delayed_wave_running = False
+            if ok and parent_win is not None and hasattr(parent_win, "_deferred_wave_item_ids"):
+                parent_win._deferred_wave_item_ids.discard(finished_item.id)
             self.refresh_table()
             self.queue_updated_signal.emit()
             if only_failed:
