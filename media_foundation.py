@@ -178,6 +178,19 @@ def get_year_month_str(now: Optional[Union[datetime, float]] = None) -> str:
     return dt.strftime("%Y-%m")
 
 
+_PYTEST_SANDBOX_DIR: Optional[Path] = None
+
+
+def get_pytest_sandbox_dir() -> Path:
+    """Return an isolated sandbox directory for test media cache & archive."""
+    global _PYTEST_SANDBOX_DIR
+    if _PYTEST_SANDBOX_DIR is None:
+        import tempfile
+        _PYTEST_SANDBOX_DIR = Path(tempfile.gettempdir()) / "artcrosspost_pytest_sandbox"
+        _PYTEST_SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+    return _PYTEST_SANDBOX_DIR
+
+
 def get_monthly_dir(
     root_dir: Union[str, Path],
     category: Optional[str] = None,
@@ -191,6 +204,17 @@ def get_monthly_dir(
     """
     ym = get_year_month_str(now)
     base = Path(root_dir)
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            resolved_base = base.resolve()
+            if resolved_base == prod_data or prod_data in resolved_base.parents:
+                rel_to_prod = resolved_base.relative_to(prod_data)
+                base = get_pytest_sandbox_dir() / rel_to_prod
+        except Exception:
+            pass
+
     if base.name == ym and _MONTH_DIR_RE.match(base.name):
         month_dir = base
     else:
@@ -272,6 +296,16 @@ def archive_file_by_role(
         from config import DATA_DIR
         base_archive_dir = DATA_DIR / "archive"
     archive_root_path = Path(base_archive_dir)
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            resolved_arch = archive_root_path.resolve()
+            if resolved_arch == prod_data or prod_data in resolved_arch.parents:
+                rel_to_prod = resolved_arch.relative_to(prod_data)
+                archive_root_path = get_pytest_sandbox_dir() / rel_to_prod
+        except Exception:
+            pass
 
     src_hash = compute_file_sha256(src)
     target_cat_dir = get_monthly_archive_dir(category, base_archive_dir=archive_root_path, now=now)
@@ -372,6 +406,14 @@ def update_patreon_bundle_pool_index(
     Does not copy files; stores only archive paths.
     """
     pool_path = Path(pool_file)
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            if pool_path.resolve() == prod_data or prod_data in pool_path.resolve().parents:
+                pool_path = get_pytest_sandbox_dir() / pool_path.resolve().relative_to(prod_data)
+        except Exception:
+            pass
     pool_path.parent.mkdir(parents=True, exist_ok=True)
 
     entries: List[Dict[str, Any]] = []
@@ -451,6 +493,17 @@ def archive_publish_run_outputs(
             else:
                 from config import DATA_DIR
                 pool_file = DATA_DIR / "patreon_bundle_pool.json"
+
+        if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            try:
+                from config import DATA_DIR
+                prod_data = DATA_DIR.resolve()
+                if base_archive_dir and (Path(base_archive_dir).resolve() == prod_data or prod_data in Path(base_archive_dir).resolve().parents):
+                    base_archive_dir = get_pytest_sandbox_dir() / Path(base_archive_dir).resolve().relative_to(prod_data)
+                if pool_file and (Path(pool_file).resolve() == prod_data or prod_data in Path(pool_file).resolve().parents):
+                    pool_file = get_pytest_sandbox_dir() / Path(pool_file).resolve().relative_to(prod_data)
+            except Exception:
+                pass
 
         role_map: Dict[str, str] = dict(payload.get("_media_roles") or {})
         title = str(payload.get("title") or "artwork")
@@ -869,6 +922,14 @@ def run_scheduled_cleanup(
         from config import DATA_DIR
         data_dir = DATA_DIR
     data_root = Path(data_dir)
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            if data_root.resolve() == prod_data or prod_data in data_root.resolve().parents:
+                data_root = get_pytest_sandbox_dir()
+        except Exception:
+            pass
     cache_dir = data_root / "cache"
     delayed_assets_dir = data_root / "delayed_assets"
     queue_file = data_root / "delayed_queue.json"
@@ -1186,6 +1247,14 @@ def execute_legacy_cache_cleanup(
         from config import DATA_DIR
         base_archive_dir = DATA_DIR / "archive"
     archive_root = Path(base_archive_dir)
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            if archive_root.resolve() == prod_data or prod_data in archive_root.resolve().parents:
+                archive_root = get_pytest_sandbox_dir() / "archive"
+        except Exception:
+            pass
 
     deleted_count = 0
     deleted_bytes = 0
@@ -1352,3 +1421,270 @@ def migrate_presets_file(data_dir: Optional[Union[str, Path]] = None) -> Tuple[P
             return old_presets, False
 
     return new_presets, True
+
+
+# ==============================================================================
+# §7. 测试残留文件清扫报告与执行 (Test Artifacts Cleanup)
+# ==============================================================================
+
+DEFINITE_TEST_PATTERNS: List[re.Pattern] = [
+    re.compile(r"(?:^|[_ \-\.\d])test(?:[_ \-\.\d]|$)", re.IGNORECASE),
+    re.compile(r"[a-z0-9]Test(?:\d*|_|\.|$|[A-Z])"),
+    re.compile(r"^wave_\d{8}_\d{6}"),
+    re.compile(r"mutex[_\s]?art", re.IGNORECASE),
+    re.compile(r"alert[_\s]?art", re.IGNORECASE),
+    re.compile(r"Attach_Switch_Three_States", re.IGNORECASE),
+    re.compile(r"Two_Phase_Wave_Art", re.IGNORECASE),
+    re.compile(r"TabA_Unified_Post", re.IGNORECASE),
+    re.compile(r"Scheduled_Patreon_Post", re.IGNORECASE),
+    re.compile(r"Snapshot_Clean_Title", re.IGNORECASE),
+    re.compile(r"History_Fallback_Artwork", re.IGNORECASE),
+    re.compile(r"WM_Gate_Tab_A", re.IGNORECASE),
+    re.compile(r"hero_anim", re.IGNORECASE),
+    re.compile(r"MinimalSetTest", re.IGNORECASE),
+    re.compile(r"Normal_Title", re.IGNORECASE),
+    re.compile(r"Very_Long_Title", re.IGNORECASE),
+    re.compile(r"Condition_Test", re.IGNORECASE),
+    re.compile(r"Censor_Test", re.IGNORECASE),
+    re.compile(r"XOptCleanupTest", re.IGNORECASE),
+]
+
+SUSPICIOUS_TEST_PATTERNS: List[re.Pattern] = [
+    re.compile(r"dummy", re.IGNORECASE),
+    re.compile(r"sample", re.IGNORECASE),
+    re.compile(r"placeholder", re.IGNORECASE),
+    re.compile(r"fake", re.IGNORECASE),
+    re.compile(r"temp", re.IGNORECASE),
+    re.compile(r"tmp", re.IGNORECASE),
+]
+
+
+def is_solid_color_placeholder(path: Path) -> bool:
+    """Detect if an image is a 1-color placeholder synthetic fixture."""
+    if path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+        return False
+    try:
+        with Image.open(path) as im:
+            ext = im.getextrema()
+            if im.mode == "RGB":
+                return ext[0][0] == ext[0][1] and ext[1][0] == ext[1][1] and ext[2][0] == ext[2][1]
+            elif im.mode == "RGBA":
+                return ext[0][0] == ext[0][1] and ext[1][0] == ext[1][1] and ext[2][0] == ext[2][1] and ext[3][0] == ext[3][1]
+            elif im.mode == "L":
+                return ext[0] == ext[1]
+    except Exception:
+        pass
+    return False
+
+
+def scan_test_artifacts(
+    data_dir: Optional[Union[str, Path]] = None,
+    cache_dir: Optional[Union[str, Path]] = None,
+    archive_dir: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """
+    Scan cache and archive trees for test fixtures across two tiers:
+    1. 'definite_files': Definite test artifacts (contains test, wave_* prefix, mutex/alert art, known fixtures, solid color placeholders).
+    2. 'suspicious_files': Needs manual review (dummy/sample/temp keywords). Default NOT deleted.
+    """
+    if data_dir is None:
+        from config import DATA_DIR
+        data_dir = DATA_DIR
+    data_root = Path(data_dir)
+    c_root = Path(cache_dir) if cache_dir is not None else (data_root / "cache")
+    a_root = Path(archive_dir) if archive_dir is not None else (data_root / "archive")
+
+    definite_files: List[Dict[str, Any]] = []
+    suspicious_files: List[Dict[str, Any]] = []
+
+    for root_dir in [c_root, a_root]:
+        if not root_dir.exists():
+            continue
+        for p in root_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(data_root))
+            except Exception:
+                rel = p.name
+            f_size = p.stat().st_size
+
+            # 1. Definite pattern match
+            matched_reason = None
+            for pat in DEFINITE_TEST_PATTERNS:
+                if pat.search(p.name):
+                    matched_reason = f"匹配测试特征: {pat.pattern}"
+                    break
+
+            if matched_reason is None and is_solid_color_placeholder(p):
+                matched_reason = "纯色占位测试小文件"
+
+            if matched_reason:
+                definite_files.append({
+                    "path": str(p),
+                    "rel_path": rel,
+                    "filename": p.name,
+                    "reason": matched_reason,
+                    "bytes": f_size,
+                })
+                continue
+
+            # 2. Suspicious pattern match
+            susp_reason = None
+            for pat in SUSPICIOUS_TEST_PATTERNS:
+                if pat.search(p.name):
+                    susp_reason = f"疑似关键字: {pat.pattern}"
+                    break
+
+            if susp_reason:
+                suspicious_files.append({
+                    "path": str(p),
+                    "rel_path": rel,
+                    "filename": p.name,
+                    "reason": susp_reason,
+                    "bytes": f_size,
+                })
+
+    def_bytes = sum(f["bytes"] for f in definite_files)
+    susp_bytes = sum(f["bytes"] for f in suspicious_files)
+
+    def_mb = def_bytes / (1024 * 1024)
+    susp_mb = susp_bytes / (1024 * 1024)
+
+    summary_lines = [
+        "🧪 测试文件清扫报告",
+        "------------------------------------",
+        f"• 确定测试件: {len(definite_files)} 个 ({def_mb:.2f} MB)",
+        f"• 疑似测试件 (需人工确认): {len(suspicious_files)} 个 ({susp_mb:.2f} MB)",
+    ]
+
+    detailed_lines = [
+        f"【确定测试件完整名单（共 {len(definite_files)} 个，{def_mb:.2f} MB）】",
+    ]
+    if definite_files:
+        for idx, item in enumerate(definite_files, 1):
+            detailed_lines.append(f"{idx}. {item['rel_path']}  [{item['reason']}] ({item['bytes']} B)")
+    else:
+        detailed_lines.append("  (无)")
+
+    if suspicious_files:
+        detailed_lines.append("")
+        detailed_lines.append(f"【疑似测试件完整名单（需人工确认，共 {len(suspicious_files)} 个，{susp_mb:.2f} MB）】")
+        for idx, item in enumerate(suspicious_files, 1):
+            detailed_lines.append(f"{idx}. {item['rel_path']}  [{item['reason']}] ({item['bytes']} B)")
+
+    return {
+        "definite_files": definite_files,
+        "suspicious_files": suspicious_files,
+        "definite_count": len(definite_files),
+        "definite_bytes": def_bytes,
+        "suspicious_count": len(suspicious_files),
+        "suspicious_bytes": susp_bytes,
+        "summary_text": "\n".join(summary_lines),
+        "detailed_text": "\n".join(detailed_lines),
+    }
+
+
+def execute_test_artifacts_cleanup(
+    scan_report: Dict[str, Any],
+    confirmed: bool = False,
+    pool_file: Optional[Union[str, Path]] = None,
+    data_dir: Optional[Union[str, Path]] = None,
+    delete_suspicious: bool = False,
+) -> Dict[str, Any]:
+    """
+    Execute cleanup of test artifacts identified in scan_report:
+    - Only deletes if confirmed is True.
+    - Always deletes 'definite_files'.
+    - 'suspicious_files' are only deleted if delete_suspicious is True (default False).
+    - If `patreon_bundle_pool.json` references deleted files, removes paths from entries
+      and prunes entries that become empty or reference deleted files.
+    """
+    if not confirmed:
+        return {
+            "executed": False,
+            "deleted_count": 0,
+            "deleted_bytes": 0,
+            "pool_entries_removed": 0,
+            "pool_refs_pruned": 0,
+            "summary_message": "清扫已取消：未获用户确认",
+        }
+
+    if data_dir is None:
+        from config import DATA_DIR
+        data_dir = DATA_DIR
+    data_root = Path(data_dir)
+
+    if pool_file is None:
+        pool_file = data_root / "patreon_bundle_pool.json"
+    pool_path = Path(pool_file)
+
+    to_delete = list(scan_report.get("definite_files", []))
+    if delete_suspicious:
+        to_delete.extend(scan_report.get("suspicious_files", []))
+
+    deleted_paths: List[str] = []
+    deleted_count = 0
+    deleted_bytes = 0
+
+    deleted_path_set = set()
+    for item in to_delete:
+        fp_str = item.get("path") if isinstance(item, dict) else str(item)
+        fp = Path(fp_str)
+        if fp.exists() and fp.is_file():
+            try:
+                sz = fp.stat().st_size
+                fp.unlink()
+                deleted_count += 1
+                deleted_bytes += sz
+                deleted_paths.append(str(fp))
+                deleted_path_set.add(str(fp.resolve()))
+                deleted_path_set.add(fp.name)
+            except Exception as e:
+                logger.warning(f"删除测试文件失败 {fp}: {e}")
+
+    # Prune patreon_bundle_pool.json if present
+    pool_entries_removed = 0
+    pool_refs_pruned = 0
+    if pool_path.exists():
+        try:
+            with open(pool_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            entries = loaded if isinstance(loaded, list) else (loaded.get("items", []) if isinstance(loaded, dict) else [])
+            updated_entries = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                orig_imgs = entry.get("images", [])
+                orig_vids = entry.get("videos", [])
+                new_imgs = [p for p in orig_imgs if str(Path(p).resolve()) not in deleted_path_set and Path(p).name not in deleted_path_set]
+                new_vids = [p for p in orig_vids if str(Path(p).resolve()) not in deleted_path_set and Path(p).name not in deleted_path_set]
+                pruned_in_entry = (len(orig_imgs) - len(new_imgs)) + (len(orig_vids) - len(new_vids))
+                pool_refs_pruned += pruned_in_entry
+                if not new_imgs and not new_vids:
+                    pool_entries_removed += 1
+                else:
+                    entry["images"] = new_imgs
+                    entry["videos"] = new_vids
+                    updated_entries.append(entry)
+            with open(pool_path, "w", encoding="utf-8") as f:
+                json.dump(updated_entries, f, ensure_ascii=False, indent=2)
+            logger.info(f"Patreon 附件池索引更新：剔除条目 {pool_entries_removed} 个，清理引用 {pool_refs_pruned} 个")
+        except Exception as e:
+            logger.warning(f"更新 patreon_bundle_pool.json 失败: {e}")
+
+    pool_note = ""
+    if pool_entries_removed > 0 or pool_refs_pruned > 0:
+        pool_note = f"；Patreon 附件池已同步剔除 {pool_entries_removed} 条测试条目 ({pool_refs_pruned} 个引用)"
+
+    msg = f"清扫完成：已安全删除 {deleted_count} 个测试文件 ({deleted_bytes / (1024*1024):.2f} MB){pool_note}"
+    logger.info(f"🧪 {msg}")
+    return {
+        "executed": True,
+        "deleted_count": deleted_count,
+        "deleted_bytes": deleted_bytes,
+        "pool_entries_removed": pool_entries_removed,
+        "pool_refs_pruned": pool_refs_pruned,
+        "deleted_paths": deleted_paths,
+        "summary_message": msg,
+    }

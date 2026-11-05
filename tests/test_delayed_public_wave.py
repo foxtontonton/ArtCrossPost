@@ -1055,8 +1055,7 @@ def test_delayed_wave_busy_mutex_defers_when_main_publish_running(tmp_path, monk
     assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
-    win = app_mod.MainWindow()
-    win.data_dir = tmp_path
+    win = app_mod.MainWindow(data_dir=tmp_path)
     win.config["delayed_wave_enabled"] = True
     win._init_delayed_wave_subsystem()
 
@@ -1091,8 +1090,7 @@ def test_queue_btn_alert_style_restores_after_clear_or_retry_success(tmp_path, m
     assert qapp is not None
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
-    win = app_mod.MainWindow()
-    win.data_dir = tmp_path
+    win = app_mod.MainWindow(data_dir=tmp_path)
     win.config["delayed_wave_enabled"] = True
     win._init_delayed_wave_subsystem()
 
@@ -1941,5 +1939,410 @@ def test_patreon_step55_reaches_attach_with_raw_wm_and_pregate_blocks_censor(tmp
     assert ok_bad is False
     assert "缺附件" in msg_bad
     assert len(attach_calls) == 1  # 未新增调用，证明在前置门禁即被拦截
+
+
+# ==============================================================================
+# 19. 公开波启动扫描弹窗提醒与暂缓/补发选择、无人值守穿透
+# ==============================================================================
+
+def test_startup_scan_unattended_mode_auto_polls_without_dialog(tmp_path, monkeypatch):
+    """
+    无人值守场景 (ARTCROSSPOST_UNATTENDED=1 或命令行 --unattended):
+    启动扫描发现到期项时，维持现行自动补发行为，不弹出任何 QMessageBox。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.setenv("ARTCROSSPOST_UNATTENDED", "1")
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    # 登记一个到期任务
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    win.delayed_wave_manager.enroll({"title": "Unattended Task", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+    dialog_called = []
+    monkeypatch.setattr(QMessageBox, "exec_", lambda self: dialog_called.append(True))
+
+    win._startup_scan_delayed_wave_queue()
+
+    assert len(poll_called) == 1
+    assert len(dialog_called) == 0
+
+
+def test_startup_scan_attended_mode_reissue_triggers_poll(tmp_path, monkeypatch):
+    """
+    交互模式启动扫描：发现到期项时弹窗提醒，用户点击「补发」立即调用 _poll_delayed_wave_queue。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.delenv("ARTCROSSPOST_UNATTENDED", raising=False)
+    monkeypatch.delenv("ARTCROSSPOST_SCHEDULED", raising=False)
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    item = win.delayed_wave_manager.enroll({"title": "Interactive Art", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+
+    def fake_exec(msg_box):
+        for btn in msg_box.buttons():
+            if btn.text() == "补发":
+                msg_box._clicked_btn = btn
+                break
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked_btn", None))
+
+    win._startup_scan_delayed_wave_queue()
+
+    assert len(poll_called) == 1
+    assert item.id not in getattr(win, "_deferred_wave_item_ids", set())
+
+
+def test_startup_scan_attended_mode_defer_suppresses_in_session_polls(tmp_path, monkeypatch):
+    """
+    交互模式启动扫描：用户点击「暂缓」则本会话不发；
+    条目在队列中完整保留（下次启动仍可被扫描到），但本会话定时轮询自动过滤排除该项。
+    """
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import app as app_mod
+
+    qapp = QApplication.instance() or QApplication([])
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    monkeypatch.delenv("ARTCROSSPOST_UNATTENDED", raising=False)
+    monkeypatch.delenv("ARTCROSSPOST_SCHEDULED", raising=False)
+
+    win = app_mod.MainWindow(data_dir=tmp_path)
+    win.config["delayed_wave_enabled"] = True
+    win._init_delayed_wave_subsystem()
+
+    dummy_img = tmp_path / "art.jpg"
+    Image.new("RGB", (50, 50)).save(dummy_img, "JPEG")
+    item = win.delayed_wave_manager.enroll({"title": "Deferred Art", "raw_images": [str(dummy_img)]}, -10, ["deviantart"])
+
+    poll_called = []
+    monkeypatch.setattr(win, "_poll_delayed_wave_queue", lambda: poll_called.append(True))
+
+    def fake_exec(msg_box):
+        # 断言启动补发弹窗默认按钮必须为「暂缓」（安全默认）
+        assert msg_box.defaultButton() is not None
+        assert msg_box.defaultButton().text() == "暂缓", f"Default button must be 暂缓, got {msg_box.defaultButton().text()}"
+        for btn in msg_box.buttons():
+            if btn.text() == "暂缓":
+                msg_box._clicked_btn = btn
+                break
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec_", fake_exec)
+    monkeypatch.setattr(QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked_btn", None))
+
+    win._startup_scan_delayed_wave_queue()
+
+    # 暂缓分支不调用补发
+    assert len(poll_called) == 0
+    assert item.id in win._deferred_wave_item_ids
+
+    # 队列文件中的该条目仍处于 pending 状态，未被删除或标记完成
+    items_in_q = win.delayed_wave_manager.get_items()
+    assert len(items_in_q) == 1
+    assert items_in_q[0].id == item.id
+    assert items_in_q[0].status == "pending"
+
+    # 恢复真实 _poll_delayed_wave_queue，验证本会话后续定时轮询过滤该条目，不启动 worker
+    monkeypatch.undo()
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    worker_started = []
+    monkeypatch.setattr(app_mod, "DelayedWaveWorkerThread", lambda *a, **k: worker_started.append(True))
+
+    win._poll_delayed_wave_queue()
+    assert len(worker_started) == 0  # 因被暂缓，有效待发列表为空，未启动后台线程
+
+
+# ==============================================================================
+# 20. 生产数据零污染隔离断言 (Queue / Config / History / Cache / Archive / Logs)
+# ==============================================================================
+
+def test_prod_data_isolation_and_zero_pollution(monkeypatch, tmp_path):
+    """
+    验证测试环境多重防线：
+    1. save_config / save_window_state 在 PYTEST_CURRENT_TEST 下禁止写入生产 presets.json / window_state.json
+    2. DelayedQueueManager.save_queue / enroll 在测试下严禁写入生产队列与 delayed_assets
+    3. PublishHistoryManager.append_record 在测试下严禁写入生产 publish_history.json
+    4. 媒体渲染与归档产物严禁落入生产 cache / archive 目录
+    5. logger 严禁在测试下向生产 data/logs 写入
+    6. 模拟 UI 控件各种反勾选与防抖同步，生产配置哈希零变化
+    7. 全量测试断言：整个 data/ 目录树（包括所有子目录及文件清单与逐个 SHA-256）零污染、零变化。
+    """
+    import os
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    import config as cfg_mod
+    import app as app_mod
+    from logger import logger
+    from delayed_wave_manager import DelayedQueueManager, DELAYED_QUEUE_FILE, DELAYED_ASSETS_DIR
+    from history_manager import PublishHistoryManager
+    from media_foundation import (
+        get_monthly_cache_dir,
+        get_monthly_archive_dir,
+        archive_file_by_role,
+        archive_publish_run_outputs,
+        run_scheduled_cleanup,
+    )
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+
+    # 快照整个 data/ 目录树的所有文件清单与 SHA-256 哈希
+    def snapshot_data_tree(root_dir: Path) -> dict:
+        files = []
+        for r, _, fs in os.walk(root_dir):
+            for f in fs:
+                files.append(Path(r) / f)
+        def _h(p: Path):
+            try:
+                rel = str(p.relative_to(root_dir))
+                return rel, hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                return str(p.relative_to(root_dir)), "ERR"
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            return dict(ex.map(_h, files))
+
+    before_tree = snapshot_data_tree(cfg_mod.DATA_DIR)
+
+    # 1. 尝试直接向生产队列保存
+    mgr = DelayedQueueManager()
+    saved = mgr.save_queue([])
+    assert saved is False, "save_queue must refuse writing to prod in pytest"
+
+    # 尝试在生产 assets_dir 登记
+    with pytest.raises(RuntimeError):
+        mgr.enroll({"title": "LeakTest", "raw_images": []}, 0, ["deviantart"])
+
+    # 2. 尝试向生产 presets 保存
+    cfg_mod.save_config({"leaked_key": 999})
+
+    # 3. 尝试向生产 historyManager 追加记录
+    hm = PublishHistoryManager(cfg_mod.DATA_DIR)
+    hm.append_record("MockArt", [], {"deviantart": (True, "https://leak.url", [])})
+
+    # 4. 尝试向生产 cache / archive 归档
+    test_img = tmp_path / "probe_artwork.jpg"
+    im = Image.new("RGB", (64, 64), color=(128, 64, 32))
+    im.save(test_img, "JPEG")
+
+    c_dir = get_monthly_cache_dir(cfg_mod.CACHE_DIR)
+    assert not str(c_dir.resolve()).startswith(str(cfg_mod.CACHE_DIR.resolve())), "cache must redirect away from prod"
+
+    a_dir = get_monthly_archive_dir("hd_images", base_archive_dir=cfg_mod.ARCHIVE_DIR)
+    assert not str(a_dir.resolve()).startswith(str(cfg_mod.ARCHIVE_DIR.resolve())), "archive must redirect away from prod"
+
+    arch_res = archive_file_by_role(test_img, "hd_images", base_archive_dir=cfg_mod.ARCHIVE_DIR)
+    assert arch_res is not None
+    assert not str(arch_res.resolve()).startswith(str(cfg_mod.ARCHIVE_DIR.resolve())), "archived file must not drop in prod"
+
+    # 尝试发布产物自动归档
+    archive_publish_run_outputs(
+        {"title": "ProdLeakTest", "_media_roles": {str(test_img): "hd_images"}},
+        publish_results={"deviantart": (True, "https://da.url", [])},
+        base_archive_dir=cfg_mod.ARCHIVE_DIR,
+        data_dir=cfg_mod.DATA_DIR,
+    )
+
+    # 尝试触发自动清理日志状态
+    run_scheduled_cleanup(data_dir=cfg_mod.DATA_DIR, force=True)
+
+    # 5. 模拟默认 MainWindow() 构造并触发 UI 同步配置
+    from PyQt5.QtWidgets import QApplication
+    qapp = QApplication.instance() or QApplication([])
+    win = app_mod.MainWindow()
+    win.watermark_enabled_cb.setChecked(False)
+    win._sync_config_from_ui()
+
+    # 6. 触发 logger 输出
+    logger.info("Probe log line to test logger isolation")
+
+    # 全量比对整个 data/ 目录树
+    after_tree = snapshot_data_tree(cfg_mod.DATA_DIR)
+
+    added = set(after_tree) - set(before_tree)
+    removed = set(before_tree) - set(after_tree)
+    modified = [f for f in (set(before_tree) & set(after_tree)) if before_tree[f] != after_tree[f]]
+
+    assert not added, f"Production data/ tree was polluted with new files: {added}"
+    assert not removed, f"Production data/ tree files were unexpectedly removed: {removed}"
+    assert not modified, f"Production data/ tree files were unexpectedly modified: {modified}"
+
+
+# ==============================================================================
+# 21. 测试文件清扫 (scan_test_artifacts & execute_test_artifacts_cleanup)
+# ==============================================================================
+
+def test_scan_test_artifacts_classification(tmp_path):
+    """
+    验证 scan_test_artifacts 两档分类：
+    1. 确定测试件：含 test（不区分大小写）、wave_前缀、mutex/alert art、已知 fixture 名字、单色占位图
+    2. 疑似测试件：dummy、sample、fake、temp
+    3. 真实素材件：不匹配任何特征且多色彩正常图片
+    """
+    from media_foundation import scan_test_artifacts, execute_test_artifacts_cleanup
+
+    data_dir = tmp_path / "data"
+    cache_dir = data_dir / "cache" / "2026-11"
+    archive_hd = data_dir / "archive" / "2026-11" / "hd_images"
+    archive_gif = data_dir / "archive" / "2026-11" / "hd_gif"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_hd.mkdir(parents=True, exist_ok=True)
+    archive_gif.mkdir(parents=True, exist_ok=True)
+
+    # 1. 确定测试件正例：test_0、lora_and_workflow_test_02、Single_vs_Multi_Test、BskyReuseXVideoTest
+    (archive_gif / "test_0.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "lora_and_workflow_test_02.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "Single_vs_Multi_Test.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "BskyReuseXVideoTest.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "wave_20261105_203204_84dd34_00_censor.gif").write_bytes(b"fake_gif_data")
+    (archive_hd / "Mutex_Art.jpg").write_bytes(b"fake_jpg_data")
+    (archive_hd / "Attach_Switch_Three_States.jpg").write_bytes(b"fake_jpg_data")
+
+    # 确定测试件 - 单色占位图
+    solid_img_path = archive_hd / "Solid_Placeholder.png"
+    im_solid = Image.new("RGB", (64, 64), color=(255, 0, 0))
+    im_solid.save(solid_img_path)
+
+    # 2. 疑似测试件
+    (cache_dir / "dummy_preview.jpg").write_bytes(b"fake_jpg_data")
+    (cache_dir / "sample_card.png").write_bytes(b"fake_png_data")
+
+    # 3. 词元边界反例（Latest / Protest / Testament / Contest 绝对不得误判为测试件）
+    import numpy as np
+    for neg_name in ["Latest.png", "Protest.jpg", "Testament.png", "Contest.png"]:
+        neg_p = archive_hd / neg_name
+        arr = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+        Image.fromarray(arr).save(neg_p)
+
+    # 4. 真实素材件（正常多色图片，真实作品命名）
+    genuine_path = archive_hd / "He_Saved_the_Last_Drop_for_You.png"
+    arr_gen = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+    Image.fromarray(arr_gen).save(genuine_path)
+
+    # 扫描
+    report = scan_test_artifacts(data_dir=data_dir)
+    assert report["definite_count"] == 8, f"Expected 8 definite test files, got {report['definite_count']}"
+    assert report["suspicious_count"] == 2, f"Expected 2 suspicious files, got {report['suspicious_count']}"
+
+    def_names = [f["filename"] for f in report["definite_files"]]
+    # 正例必须全部命中
+    assert "test_0.gif" in def_names
+    assert "lora_and_workflow_test_02.gif" in def_names
+    assert "Single_vs_Multi_Test.gif" in def_names
+    assert "BskyReuseXVideoTest.gif" in def_names
+    assert "wave_20261105_203204_84dd34_00_censor.gif" in def_names
+    assert "Mutex_Art.jpg" in def_names
+    assert "Attach_Switch_Three_States.jpg" in def_names
+    assert "Solid_Placeholder.png" in def_names
+
+    # 反例绝对不得命中
+    for neg_name in ["Latest.png", "Protest.jpg", "Testament.png", "Contest.png"]:
+        assert neg_name not in def_names, f"Negative sample {neg_name} mistakenly classified as definite!"
+        assert neg_name not in [f["filename"] for f in report["suspicious_files"]], f"Negative sample {neg_name} mistakenly classified as suspicious!"
+
+    susp_names = [f["filename"] for f in report["suspicious_files"]]
+    assert "dummy_preview.jpg" in susp_names
+    assert "sample_card.png" in susp_names
+
+    # 验证 detailed_text 包含全部 8 个确定件名单
+    detailed_text = report.get("detailed_text", "")
+    assert detailed_text, "detailed_text must be provided"
+    for name in def_names:
+        assert name in detailed_text, f"{name} missing from detailed_text"
+
+
+def test_execute_test_artifacts_cleanup_with_pool_pruning(tmp_path):
+    """
+    验证 execute_test_artifacts_cleanup 执行行为：
+    1. confirmed=False -> 不删除任何文件
+    2. confirmed=True, delete_suspicious=False -> 仅删除确定测试件，疑似件与真实件原样保留
+    3. patreon_bundle_pool.json 引用了被删文件时同步剔除引用与空条目
+    """
+    import json
+    from media_foundation import scan_test_artifacts, execute_test_artifacts_cleanup
+
+    data_dir = tmp_path / "data"
+    archive_hd = data_dir / "archive" / "2026-11" / "hd_images"
+    archive_hd.mkdir(parents=True, exist_ok=True)
+
+    t1 = archive_hd / "GifReuseTest.png"
+    t1.write_bytes(b"test1")
+    t2 = archive_hd / "Mutex_Art.jpg"
+    t2.write_bytes(b"test2")
+    susp = archive_hd / "temp_preview.jpg"
+    susp.write_bytes(b"susp1")
+    gen = archive_hd / "Buried_Between_My_Pecs.png"
+    gen.write_bytes(b"genuine_artwork_bytes")
+
+    # 构建 patreon_bundle_pool.json
+    pool_file = data_dir / "patreon_bundle_pool.json"
+    pool_data = [
+        {
+            "id": "pat_test_1",
+            "title": "GifReuseTest",
+            "month": "2026-11",
+            "images": [str(t1)],
+            "videos": [],
+        },
+        {
+            "id": "pat_mixed_2",
+            "title": "MixedPost",
+            "month": "2026-11",
+            "images": [str(t2), str(gen)],
+            "videos": [],
+        },
+    ]
+    pool_file.write_text(json.dumps(pool_data, ensure_ascii=False), encoding="utf-8")
+
+    report = scan_test_artifacts(data_dir=data_dir)
+    assert report["definite_count"] == 2
+    assert report["suspicious_count"] == 1
+
+    # 1. 未获确认
+    unconf_res = execute_test_artifacts_cleanup(report, confirmed=False, data_dir=data_dir)
+    assert unconf_res["executed"] is False
+    assert t1.exists()
+
+    # 2. 确认执行（delete_suspicious=False）
+    res = execute_test_artifacts_cleanup(report, confirmed=True, data_dir=data_dir, delete_suspicious=False)
+    assert res["executed"] is True
+    assert res["deleted_count"] == 2
+    assert not t1.exists()
+    assert not t2.exists()
+    assert susp.exists(), "Suspicious file must NOT be deleted by default"
+    assert gen.exists(), "Genuine file must NOT be deleted"
+
+    # 3. 验证 pool 更新
+    updated_pool = json.loads(pool_file.read_text(encoding="utf-8"))
+    # pat_test_1 全被删 -> 条目被移除
+    assert len(updated_pool) == 1
+    # pat_mixed_2 中 t2 被移除，保留 gen
+    assert updated_pool[0]["id"] == "pat_mixed_2"
+    assert updated_pool[0]["images"] == [str(gen)]
+    assert res["pool_entries_removed"] == 1
+    assert res["pool_refs_pruned"] == 2
+
+
 
 

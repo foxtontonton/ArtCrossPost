@@ -4,6 +4,8 @@ ArtCrossPost - Bluesky Dispatcher (AT Protocol 官方开放 API 路线)
 支持通过 com.atproto/app.bsky 官方 XRPC 接口完成登录凭据管理、自适应字素簇截断/串推、
 多图 Blob 上传、NSFW 成人分级 self-labels、AI 话题标签 Facets 标注及 P0-1 严格真成功回读断言。
 """
+import os
+import sys
 import json
 import logging
 import re
@@ -1210,8 +1212,18 @@ class BlueskyDispatcher(BaseDispatcher):
                     from video_engine import convert_gif_to_mp4
                     first_gif = gif_candidates[0]
                     converted_source_media = str(first_gif)
-                    from config import CACHE_DIR
-                    cache_dir = Path(CACHE_DIR)
+                    cache_dir = (self.data_dir / "cache") if hasattr(self, "data_dir") and self.data_dir else None
+                    if cache_dir is None:
+                        from config import CACHE_DIR
+                        cache_dir = Path(CACHE_DIR)
+                    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+                        try:
+                            from config import DATA_DIR
+                            from media_foundation import get_pytest_sandbox_dir
+                            if Path(cache_dir).resolve() == DATA_DIR.resolve() or DATA_DIR.resolve() in Path(cache_dir).resolve().parents:
+                                cache_dir = get_pytest_sandbox_dir() / "cache"
+                        except Exception:
+                            pass
                     cache_dir.mkdir(parents=True, exist_ok=True)
                     mp4_path = cache_dir / f"bsky_video_{Path(first_gif).stem}.mp4"
                     try:

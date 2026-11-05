@@ -216,6 +216,13 @@ class DelayedQueueManager:
 
     def save_queue(self, items: list[DelayedQueueItem]) -> bool:
         """安全持久化队列列表"""
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                if self.queue_file.resolve() == DELAYED_QUEUE_FILE.resolve():
+                    logger.warning(f"[DelayedWave] 拦截在测试环境下向生产队列写入: {self.queue_file}")
+                    return False
+            except Exception:
+                pass
         try:
             self.queue_file.parent.mkdir(parents=True, exist_ok=True)
             data = [item.to_dict() for item in items]
@@ -241,6 +248,15 @@ class DelayedQueueManager:
         - 脱钩源草稿与源文件
         - 写入 data/delayed_queue.json
         """
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                if self.assets_dir.resolve() == DELAYED_ASSETS_DIR.resolve():
+                    logger.warning(f"[DelayedWave] 拦截在测试环境下向生产素材目录登记: {self.assets_dir}")
+                    raise RuntimeError(f"Cannot enroll into production assets dir during pytest: {self.assets_dir}")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
         now = datetime.now()
         due_time = now + timedelta(seconds=float(delay_seconds))
         item_id = f"wave_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"

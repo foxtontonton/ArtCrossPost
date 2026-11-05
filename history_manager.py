@@ -4,6 +4,7 @@ ArtCrossPost - Publish History & Image Fingerprint Manager (P1-2)
 """
 import json
 import hashlib
+import os
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
@@ -68,6 +69,13 @@ class PublishHistoryManager:
         self._ensure_file()
 
     def _ensure_file(self):
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                prod_history = (Path(__file__).resolve().parent / "data" / "publish_history.json").resolve()
+                if self.history_file.resolve() == prod_history:
+                    return
+            except Exception:
+                pass
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if not self.history_file.exists():
             try:
@@ -144,6 +152,15 @@ class PublishHistoryManager:
             "image_fingerprints": fingerprints,
             "platforms": platforms_data
         }
+
+        # 测试环境下严禁写入生产 publish_history.json
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                prod_history = (Path(__file__).resolve().parent / "data" / "publish_history.json").resolve()
+                if self.history_file.resolve() == prod_history:
+                    return record
+            except Exception:
+                pass
 
         # 读取并追加写入
         all_records = []

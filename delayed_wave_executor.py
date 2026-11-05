@@ -181,6 +181,7 @@ class DelayedWaveWorkerThread(QThread):
         mode: str = "poll",
         item: Optional[DelayedQueueItem] = None,
         only_failed: bool = False,
+        exclude_ids: Optional[set[str]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -188,6 +189,7 @@ class DelayedWaveWorkerThread(QThread):
         self.mode = mode
         self.item = item
         self.only_failed = only_failed
+        self.exclude_ids = set(exclude_ids) if exclude_ids else set()
 
     def run(self):
         try:
@@ -195,7 +197,7 @@ class DelayedWaveWorkerThread(QThread):
                 ok, errors = self.executor.execute_item(self.item, only_failed=self.only_failed)
                 self.item_finished_signal.emit(self.item, ok, errors)
             else:
-                cnt = self.executor.process_due_items()
+                cnt = self.executor.process_due_items(exclude_ids=self.exclude_ids)
                 self.poll_finished_signal.emit(cnt)
         except Exception as e:
             logger.error(f"[DelayedWaveWorkerThread] 后台线程执行异常: {e}")
@@ -962,15 +964,22 @@ class DelayedWaveExecutor:
         logger.info(f"[DelayedWave] 队列项 {item.id} 执行完毕: 成功={all_success}, 状态={final_status}, 异常平台={list(errors.keys())}")
         return all_success, errors
 
-    def process_due_items(self, current_time: Optional[datetime] = None) -> int:
+    def process_due_items(
+        self,
+        current_time: Optional[datetime] = None,
+        exclude_ids: Optional[set[str]] = None,
+    ) -> int:
         """
         扫描并串行执行所有到期队列项:
         - 逾期项打印日志注明「逾期补发 + 原定时间」
+        - 过滤 exclude_ids (如启动时用户选择「暂缓」的队列项)
         - 同一时刻多项到期时串行执行，避免会话打架
         - 返回执行的项目数
         """
         now = current_time or datetime.now()
         due_items = self.manager.get_due_items(current_time=now)
+        if exclude_ids:
+            due_items = [it for it in due_items if it.id not in exclude_ids]
         if not due_items:
             return 0
 
