@@ -88,6 +88,7 @@ from ui_delayed_queue_dialog import DelayedQueueDialog
 from media_foundation import (
     ARCHIVE_CATEGORIES,
     archive_publish_run_outputs,
+    execute_archive_re_sort,
     execute_legacy_cache_cleanup,
     execute_test_artifacts_cleanup,
     get_monthly_archive_dir,
@@ -98,6 +99,7 @@ from media_foundation import (
     run_scheduled_cleanup,
     sanitize_ascii_filename,
     sanitize_ascii_stem,
+    scan_archive_categories,
     scan_legacy_cache,
     scan_test_artifacts,
 )
@@ -3867,6 +3869,11 @@ class SettingsDialog(QDialog):
         self.test_cleanup_btn.setObjectName("secondaryBtn")
         self.test_cleanup_btn.clicked.connect(self._on_test_cleanup_clicked)
         cleanup_btn_row.addWidget(self.test_cleanup_btn)
+
+        self.archive_resort_btn = QPushButton("🗂️ 归档分类复检")
+        self.archive_resort_btn.setObjectName("secondaryBtn")
+        self.archive_resort_btn.clicked.connect(self._on_archive_resort_clicked)
+        cleanup_btn_row.addWidget(self.archive_resort_btn)
         cleanup_btn_row.addStretch()
 
         layout.addLayout(cleanup_btn_row)
@@ -3940,6 +3947,36 @@ class SettingsDialog(QDialog):
             if self.main_window:
                 self.main_window.notify(done_msg, level="success")
             QMessageBox.information(self, "清扫完成", done_msg)
+
+    def _on_archive_resort_clicked(self):
+        data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+        report = scan_archive_categories(archive_root=data_dir / "archive", data_dir=data_dir)
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("归档分类复检报告")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText(
+            f"{report.get('summary_text', '')}\n\n"
+            "点击「执行」将搬动错桶文件至正确归档分类，并彻底删除误归档的中间件；\n"
+            "点击「取消」则放弃本次复检并保持原状。"
+        )
+        detailed = report.get("detailed_text", "")
+        if detailed:
+            msg_box.setDetailedText(detailed)
+        exec_btn = msg_box.addButton("执行", QMessageBox.AcceptRole)
+        cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.exec_()
+        if msg_box.clickedButton() is exec_btn:
+            exec_res = execute_archive_re_sort(
+                report,
+                archive_root=data_dir / "archive",
+                data_dir=data_dir,
+                confirmed=True,
+            )
+            done_msg = exec_res.get("summary_message", "归档分类复检完成")
+            if self.main_window:
+                self.main_window.notify(done_msg, level="success")
+            QMessageBox.information(self, "归档复检完成", done_msg)
 
     def _on_comfyui_dir_changed(self, text):
         val = (text or "").strip()

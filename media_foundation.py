@@ -3,10 +3,11 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from PIL import Image
 from logger import get_logger
@@ -342,6 +343,200 @@ def archive_file_by_role(
     return dest_path
 
 
+_BASE_KEY_STRIP_RE = re.compile(
+    r"(?:_\d+)?(?:"
+    r"_censored_clean|_censored_wm|_censored|_censor|"
+    r"_raw_wm|_pat_display_wm|_pat_teaser|_freehalf|_xopt|_bsky_comp|"
+    r"_kofi_censor|_pat_censor|_da_censor|_bsky_censor|"
+    r"_da_wm|_kofi_wm|_x_video|_bsky_video|_render|video_render|"
+    r"_teaser|_half|_low|_wm|_hd|_orig|_clean|_da|_x|_bsky|_preview|_thumb"
+    r")+(?:_\d+)?$",
+    re.IGNORECASE,
+)
+
+
+def get_media_base_key(file_path: Union[str, Path]) -> str:
+    """Extract common base key from media filename, stripping platform/render markers and indexes."""
+    stem = Path(file_path).stem.lower()
+    if stem.startswith("bsky_video_"):
+        stem = stem[len("bsky_video_"):]
+    elif stem.startswith("x_video_"):
+        stem = stem[len("x_video_"):]
+    cleaned = _BASE_KEY_STRIP_RE.sub("", stem).strip("._")
+    return cleaned or Path(file_path).stem.lower()
+
+
+def _build_sibling_max_dims(files: List[Path]) -> Dict[str, Tuple[int, int]]:
+    """Index maximum (w, h) dimensions per base_key across sibling images/GIFs."""
+    dims: Dict[str, Tuple[int, int]] = {}
+    for p in files:
+        if p.suffix.lower() not in (IMAGE_EXTS | GIF_EXTS):
+            continue
+        try:
+            with Image.open(p) as im:
+                w, h = im.size
+            base_key = get_media_base_key(p)
+            prev = dims.get(base_key)
+            if prev is None or (w * h > prev[0] * prev[1]):
+                dims[base_key] = (w, h)
+        except Exception:
+            continue
+    return dims
+
+
+def _build_sibling_max_bytes(files: List[Path]) -> Dict[str, int]:
+    """Index maximum file size in bytes per base_key across sibling video files."""
+    sizes: Dict[str, int] = {}
+    for p in files:
+        if p.suffix.lower() not in VIDEO_EXTS:
+            continue
+        try:
+            sz = p.stat().st_size
+            base_key = get_media_base_key(p)
+            prev = sizes.get(base_key)
+            if prev is None or sz > prev:
+                sizes[base_key] = sz
+        except Exception:
+            continue
+    return sizes
+
+
+def classify_media_file(
+    file_path: Union[str, Path],
+    sibling_max_dims: Optional[Dict[str, Tuple[int, int]]] = None,
+    sibling_max_bytes: Optional[Dict[str, int]] = None,
+    default_quality: Optional[str] = None,
+) -> str:
+    """
+    §1.1 Unified media classification function (Single Source of Truth).
+    Priority order: intermediate -> low/render -> hd/original -> size fallback.
+    Returns one of:
+      - 'hd_images', 'low_images'
+      - 'hd_gif', 'low_gif'
+      - 'mp4_originals', 'mp4_renders'
+      - 'intermediate'
+      - 'unrecognized'
+    """
+    p = Path(file_path)
+    ext = p.suffix.lower()
+    name_lower = p.name.lower()
+    base_key = get_media_base_key(p)
+
+    # 1. MP4
+    if ext in VIDEO_EXTS:
+        # Step 1: Render tags
+        is_render_tag = (
+            "_x_video" in name_lower
+            or name_lower.startswith("x_video")
+            or name_lower.startswith("bsky_video")
+            or "_bsky_video" in name_lower
+            or "_wm" in name_lower
+            or "_render" in name_lower
+            or "video_render" in name_lower
+            or "_xopt" in name_lower
+        )
+        if is_render_tag:
+            return "mp4_renders"
+
+        # Step 2: Sibling volume reference
+        if sibling_max_bytes is not None:
+            max_bytes = sibling_max_bytes.get(base_key)
+            try:
+                sz = p.stat().st_size
+                if max_bytes is not None and sz < max_bytes:
+                    return "mp4_renders"
+                return "mp4_originals"
+            except Exception:
+                if default_quality == "render":
+                    return "mp4_renders"
+                return "mp4_originals"
+
+        # If sibling_max_bytes is None, inspect siblings in the same directory if p exists
+        if p.exists() and p.is_file():
+            try:
+                parent_mp4s = [
+                    f for f in p.parent.iterdir()
+                    if f.is_file() and f.suffix.lower() in VIDEO_EXTS and get_media_base_key(f) == base_key
+                ]
+                if len(parent_mp4s) > 1:
+                    max_sz = max(f.stat().st_size for f in parent_mp4s)
+                    if p.stat().st_size < max_sz:
+                        return "mp4_renders"
+                    return "mp4_originals"
+            except Exception:
+                pass
+
+        if default_quality == "render":
+            return "mp4_renders"
+        return "mp4_originals"
+
+    # 2. GIF
+    if ext in GIF_EXTS:
+        # Step 1: Intermediate
+        if "censor" in name_lower:
+            return "intermediate"
+
+        # Step 2: Low GIF
+        if any(tag in name_lower for tag in ("_xopt", "_pat_teaser", "_freehalf", "_teaser", "_half", "_low")):
+            return "low_gif"
+
+        # Step 3: Full-size uncensored vs low dimensions
+        try:
+            with Image.open(p) as im:
+                w, h = im.size
+            if sibling_max_dims:
+                ref_dim = sibling_max_dims.get(base_key)
+                if ref_dim and (w < ref_dim[0] * 0.75 or h < ref_dim[1] * 0.75):
+                    return "low_gif"
+            return "hd_gif"
+        except Exception:
+            if any(tag in name_lower for tag in ("_da_wm", "_raw_wm", "_hd")) or default_quality == "hd":
+                return "hd_gif"
+            if default_quality == "low":
+                return "low_gif"
+            if p.exists() and p.is_file():
+                return "unrecognized"
+            return "hd_gif"
+
+    # 3. Static Images
+    if ext in IMAGE_EXTS:
+        # Step 1: Intermediate
+        if "censor" in name_lower and not any(tag in name_lower for tag in ("_freehalf", "_xopt", "_pat_teaser")):
+            return "intermediate"
+
+        # Step 2: Low images
+        if any(tag in name_lower for tag in ("_freehalf", "_xopt", "_pat_teaser", "_bsky_comp", "_teaser", "_low", "_da.", "_x.", "_bsky.")):
+            return "low_images"
+
+        # Step 3: HD images
+        if "_raw_wm" in name_lower or "_pat_display_wm" in name_lower:
+            return "hd_images"
+
+        # Step 4: Dimensions check
+        try:
+            with Image.open(p) as im:
+                w, h = im.size
+            if sibling_max_dims:
+                ref_dim = sibling_max_dims.get(base_key)
+                if ref_dim and (w < ref_dim[0] * 0.75 or h < ref_dim[1] * 0.75):
+                    return "low_images"
+                if ref_dim and (w == ref_dim[0] and h == ref_dim[1] or (w * h >= ref_dim[0] * ref_dim[1] * 0.95)):
+                    return "hd_images"
+            if max(w, h) >= 1600:
+                return "hd_images"
+            return "low_images"
+        except Exception:
+            if default_quality == "hd":
+                return "hd_images"
+            if default_quality == "low":
+                return "low_images"
+            if p.exists() and p.is_file():
+                return "unrecognized"
+            return "hd_images"
+
+    return "unrecognized"
+
+
 def classify_role_for_sent_file(
     file_path: Union[str, Path],
     role_map: Optional[Dict[str, str]] = None,
@@ -350,7 +545,7 @@ def classify_role_for_sent_file(
     """
     Determine the archive category for a file sent in the pipeline.
     Prioritizes explicit pipeline role registered in `role_map`;
-    falls back to role context (`default_quality` + media type).
+    falls back to unified media file classification.
     """
     p = Path(file_path)
     str_p = str(p)
@@ -365,31 +560,9 @@ def classify_role_for_sent_file(
         except Exception:
             pass
 
-    ext = p.suffix.lower()
-    name_lower = p.name.lower()
-
-    if ext in VIDEO_EXTS:
-        if default_quality == "original" or "raw" in name_lower or "orig" in name_lower:
-            return "mp4_originals"
-        return "mp4_renders"
-
-    if ext in GIF_EXTS:
-        if default_quality == "hd" or "_raw_wm" in name_lower or "_hd" in name_lower:
-            if "_pat_teaser" not in name_lower and "_freehalf" not in name_lower and "_teaser" not in name_lower:
-                return "hd_gif"
-        return "low_gif"
-
-    if ext in IMAGE_EXTS:
-        if default_quality == "hd" or "_raw_wm" in name_lower or "_pat_display_wm" in name_lower:
-            if (
-                "_freehalf" not in name_lower
-                and "_xopt" not in name_lower
-                and "_pat_teaser" not in name_lower
-                and "_bsky_comp" not in name_lower
-            ):
-                return "hd_images"
-        return "low_images"
-
+    cat = classify_media_file(p, default_quality=default_quality)
+    if cat in ARCHIVE_CATEGORIES:
+        return cat
     return None
 
 
@@ -730,6 +903,8 @@ def migrate_legacy_bundle_pool(
                 source_hashes[res_key] = compute_file_sha256(fp)
 
         # Copy all legacy files into archive by category & month
+        sibling_dims = _build_sibling_max_dims(all_legacy_files)
+        sibling_bytes = _build_sibling_max_bytes(all_legacy_files)
         migrated_path_map: Dict[str, Path] = {}
         for fp in all_legacy_files:
             # Infer month from parent directory if YYYY-MM
@@ -739,13 +914,20 @@ def migrate_legacy_bundle_pool(
             else:
                 month_dt = datetime.fromtimestamp(fp.stat().st_mtime)
 
-            ext = fp.suffix.lower()
-            if ext in VIDEO_EXTS:
-                cat = "mp4_originals"
-            elif ext in GIF_EXTS:
-                cat = "hd_gif"
-            else:
-                cat = "hd_images"
+            cat = classify_media_file(
+                fp,
+                sibling_max_dims=sibling_dims,
+                sibling_max_bytes=sibling_bytes,
+                default_quality="hd",
+            )
+            if cat not in ARCHIVE_CATEGORIES:
+                ext = fp.suffix.lower()
+                if ext in VIDEO_EXTS:
+                    cat = "mp4_originals"
+                elif ext in GIF_EXTS:
+                    cat = "hd_gif"
+                else:
+                    cat = "hd_images"
 
             archived_p = archive_file_by_role(
                 fp,
@@ -814,92 +996,10 @@ DELAYED_ASSETS_RETENTION_DAYS = 30
 def infer_cache_file_category(
     file_path: Union[str, Path],
     sibling_max_dims: Optional[Dict[str, Tuple[int, int]]] = None,
+    sibling_max_bytes: Optional[Dict[str, int]] = None,
 ) -> str:
-    """
-    Classify a file in `data/cache/` by suffix + filename markers + pixel dimensions.
-    Returns one of:
-      - `"low_images"`, `"low_gif"`
-      - `"intermediate"` (e.g. `*_censored_wm.*` full-size intermediates)
-      - `"hd_images"`, `"hd_gif"`
-      - `"mp4_renders"`, `"mp4_originals"`
-      - `"unrecognized"`
-    """
-    p = Path(file_path)
-    ext = p.suffix.lower()
-    name_lower = p.name.lower()
-
-    if ext in VIDEO_EXTS:
-        if any(tag in name_lower for tag in ("_x_video", "_bsky_video", "_wm", "_render", "video_render")):
-            return "mp4_renders"
-        return "mp4_originals"
-
-    if ext in GIF_EXTS:
-        if any(tag in name_lower for tag in ("_pat_teaser", "_freehalf", "_teaser", "_half", "_low")):
-            return "low_gif"
-        try:
-            with Image.open(p) as im:
-                w, h = im.size
-            if sibling_max_dims:
-                base_key = re.sub(r"(_\d+)?(_raw_wm|_censored_wm|_pat_teaser|_freehalf|_teaser)?$", "", p.stem.lower())
-                ref_dim = sibling_max_dims.get(base_key)
-                if ref_dim and (w < ref_dim[0] * 0.75 or h < ref_dim[1] * 0.75):
-                    return "low_gif"
-            return "hd_gif"
-        except Exception:
-            return "unrecognized"
-
-    if ext in IMAGE_EXTS:
-        if "_censored_wm" in name_lower and not any(t in name_lower for t in ("_freehalf", "_xopt", "_pat_teaser")):
-            return "intermediate"
-        if any(tag in name_lower for tag in ("_freehalf", "_xopt", "_pat_teaser", "_bsky_comp", "_teaser", "_low", "_da.", "_x.", "_bsky.")):
-            return "low_images"
-        if "_raw_wm" in name_lower or "_pat_display_wm" in name_lower:
-            return "hd_images"
-        try:
-            with Image.open(p) as im:
-                w, h = im.size
-        except Exception:
-            return "unrecognized"
-
-        if sibling_max_dims:
-            base_key = re.sub(
-                r"(_\d+)?(_raw_wm|_censored_wm|_pat_teaser|_freehalf|_xopt|_bsky_comp|_pat_display_wm)?$",
-                "",
-                p.stem.lower(),
-            )
-            ref_dim = sibling_max_dims.get(base_key)
-            if ref_dim and (w < ref_dim[0] * 0.75 or h < ref_dim[1] * 0.75):
-                return "low_images"
-            if ref_dim and w == ref_dim[0] and h == ref_dim[1]:
-                return "hd_images"
-
-        # Default heuristic by pixel resolution if no marker/sibling matched
-        if max(w, h) >= 1600:
-            return "hd_images"
-        return "low_images"
-
-    return "unrecognized"
-
-
-def _build_sibling_max_dims(files: List[Path]) -> Dict[str, Tuple[int, int]]:
-    dims: Dict[str, Tuple[int, int]] = {}
-    for p in files:
-        if p.suffix.lower() not in (IMAGE_EXTS | GIF_EXTS):
-            continue
-        try:
-            with Image.open(p) as im:
-                w, h = im.size
-            base_key = re.sub(
-                r"(_\d+)?(_raw_wm|_censored_wm|_pat_teaser|_freehalf|_xopt|_bsky_comp|_pat_display_wm|_teaser)?$",
-                "",
-                p.stem.lower(),
-            )
-            prev = dims.get(base_key)
-            if prev is None or (w * h > prev[0] * prev[1]):
-                dims[base_key] = (w, h)
-        except Exception:
-            continue
-    return dims
+    """Classify a file in cache/archive using the unified classification engine."""
+    return classify_media_file(file_path, sibling_max_dims=sibling_max_dims, sibling_max_bytes=sibling_max_bytes)
 
 
 def run_scheduled_cleanup(
@@ -973,12 +1073,13 @@ def run_scheduled_cleanup(
     if cache_dir.exists():
         all_cache_files = [p for p in cache_dir.rglob("*") if p.is_file()]
         sibling_dims = _build_sibling_max_dims(all_cache_files)
+        sibling_bytes = _build_sibling_max_bytes(all_cache_files)
 
         for fp in all_cache_files:
             try:
                 st_stat = fp.stat()
                 age_days = (now_ts - st_stat.st_mtime) / 86400.0
-                cat = infer_cache_file_category(fp, sibling_dims)
+                cat = classify_media_file(fp, sibling_max_dims=sibling_dims, sibling_max_bytes=sibling_bytes)
                 retention_days = (
                     LOW_RETENTION_DAYS if cat in ("low_images", "low_gif") else DEFAULT_CACHE_RETENTION_DAYS
                 )
@@ -1141,6 +1242,7 @@ def scan_legacy_cache(
 
     all_files = sorted([p for p in cache_root_path.rglob("*") if p.is_file()])
     sibling_dims = _build_sibling_max_dims(all_files)
+    sibling_bytes = _build_sibling_max_bytes(all_files)
 
     for fp in all_files:
         try:
@@ -1155,7 +1257,7 @@ def scan_legacy_cache(
             f_bytes = 0
             ym = get_year_month_str()
 
-        cat = infer_cache_file_category(fp, sibling_dims)
+        cat = classify_media_file(fp, sibling_max_dims=sibling_dims, sibling_max_bytes=sibling_bytes)
         if cat not in by_category:
             cat = "unrecognized"
 
@@ -1687,4 +1789,400 @@ def execute_test_artifacts_cleanup(
         "pool_refs_pruned": pool_refs_pruned,
         "deleted_paths": deleted_paths,
         "summary_message": msg,
+    }
+
+
+# ==============================================================================
+# §2. 已归档复检（archive re-sort）
+# ==============================================================================
+
+def scan_archive_categories(
+    archive_root: Optional[Union[str, Path]] = None,
+    data_dir: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
+    """
+    §2 Scan `data/archive/` whole tree and re-evaluate each file with unified classifier.
+    Returns categorized move, delete (intermediate), and unrecognized plans with
+    human-readable summary and full detailed item list.
+    """
+    if archive_root is None:
+        if data_dir is None:
+            from config import DATA_DIR
+            data_dir = DATA_DIR
+        archive_root = Path(data_dir) / "archive"
+    archive_root = Path(archive_root)
+
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            if archive_root.resolve() == prod_data or prod_data in archive_root.resolve().parents:
+                archive_root = get_pytest_sandbox_dir() / archive_root.resolve().relative_to(prod_data)
+        except Exception:
+            pass
+
+    to_move: List[Dict[str, Any]] = []
+    to_delete_intermediate: List[Dict[str, Any]] = []
+    unrecognized: List[Dict[str, Any]] = []
+    correct_count = 0
+    correct_bytes = 0
+    total_files = 0
+    total_bytes = 0
+
+    if not archive_root.exists():
+        return {
+            "archive_dir": str(archive_root),
+            "total_files": 0,
+            "total_bytes": 0,
+            "correct_count": 0,
+            "correct_bytes": 0,
+            "to_move": [],
+            "to_delete_intermediate": [],
+            "unrecognized": [],
+            "summary_text": "归档目录为空，无需复检。",
+            "detailed_text": "",
+        }
+
+    all_files = sorted([p for p in archive_root.rglob("*") if p.is_file()])
+    total_files = len(all_files)
+
+    # Group files by month
+    by_month: Dict[str, List[Path]] = {}
+    for fp in all_files:
+        try:
+            rel = fp.relative_to(archive_root)
+            parts = rel.parts
+            if len(parts) >= 2 and _MONTH_DIR_RE.match(parts[0]):
+                ym = parts[0]
+            else:
+                ym = datetime.fromtimestamp(fp.stat().st_mtime).strftime("%Y-%m")
+        except Exception:
+            ym = get_year_month_str()
+        by_month.setdefault(ym, []).append(fp)
+
+    for ym, month_files in sorted(by_month.items()):
+        sibling_dims = _build_sibling_max_dims(month_files)
+        sibling_bytes = _build_sibling_max_bytes(month_files)
+
+        for fp in month_files:
+            try:
+                st = fp.stat()
+                sz = st.st_size
+            except Exception:
+                sz = 0
+            total_bytes += sz
+
+            # Current bucket is the parent folder name
+            curr_cat = fp.parent.name
+            target_cat = classify_media_file(
+                fp,
+                sibling_max_dims=sibling_dims,
+                sibling_max_bytes=sibling_bytes,
+            )
+
+            rel_str = str(fp.relative_to(archive_root))
+
+            if target_cat == "intermediate":
+                to_delete_intermediate.append({
+                    "path": fp,
+                    "rel_path": rel_str,
+                    "month": ym,
+                    "current_cat": curr_cat,
+                    "target_cat": "intermediate",
+                    "size": sz,
+                    "reason": "误归档中间件 (含打码/渲染标记)",
+                })
+            elif target_cat == "unrecognized":
+                unrecognized.append({
+                    "path": fp,
+                    "rel_path": rel_str,
+                    "month": ym,
+                    "current_cat": curr_cat,
+                    "target_cat": "unrecognized",
+                    "size": sz,
+                    "reason": "未识别扩展名或格式损坏",
+                })
+            elif target_cat in ARCHIVE_CATEGORIES:
+                if target_cat == curr_cat:
+                    correct_count += 1
+                    correct_bytes += sz
+                else:
+                    to_move.append({
+                        "path": fp,
+                        "rel_path": rel_str,
+                        "month": ym,
+                        "current_cat": curr_cat,
+                        "target_cat": target_cat,
+                        "target_dir": archive_root / ym / target_cat,
+                        "size": sz,
+                        "reason": f"应归入 {target_cat}",
+                    })
+            else:
+                unrecognized.append({
+                    "path": fp,
+                    "rel_path": rel_str,
+                    "month": ym,
+                    "current_cat": curr_cat,
+                    "target_cat": "unrecognized",
+                    "size": sz,
+                    "reason": "未知分类结果",
+                })
+
+    # Summary text
+    move_bytes = sum(item["size"] for item in to_move)
+    del_bytes = sum(item["size"] for item in to_delete_intermediate)
+    unrec_bytes = sum(item["size"] for item in unrecognized)
+
+    lines = [
+        f"归档分类复检报告 (扫描全量 {total_files} 个文件, {total_bytes / 1024 / 1024:.2f} MB):",
+        f"  - 正确就位：{correct_count} 项 ({correct_bytes / 1024 / 1024:.2f} MB)",
+    ]
+
+    move_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for item in to_move:
+        key = f"{item['current_cat']} → {item['target_cat']}"
+        move_groups.setdefault(key, []).append(item)
+
+    if to_move:
+        lines.append(f"  - 需搬动错桶：{len(to_move)} 项 ({move_bytes / 1024 / 1024:.2f} MB)")
+        for grp, items in sorted(move_groups.items()):
+            g_bytes = sum(it["size"] for it in items)
+            lines.append(f"      • {grp}: {len(items)} 项 ({g_bytes / 1024 / 1024:.2f} MB)")
+    else:
+        lines.append("  - 需搬动错桶：0 项")
+
+    if to_delete_intermediate:
+        lines.append(
+            f"  - 误归档中间件（确认后将彻底删除）：{len(to_delete_intermediate)} 项 ({del_bytes / 1024 / 1024:.2f} MB)"
+        )
+    else:
+        lines.append("  - 误归档中间件：0 项")
+
+    if unrecognized:
+        lines.append(f"  - 未识别文件（保持不动）：{len(unrecognized)} 项 ({unrec_bytes / 1024 / 1024:.2f} MB)")
+
+    summary_text = "\n".join(lines)
+
+    # Detailed text
+    detail_lines = []
+    if to_move:
+        detail_lines.append(f"【需搬动至正确类别（共 {len(to_move)} 项，{move_bytes / 1024 / 1024:.2f} MB）】")
+        for i, item in enumerate(to_move, 1):
+            detail_lines.append(
+                f"{i}. [{item['month']}] {item['current_cat']} → {item['target_cat']}: "
+                f"{Path(item['rel_path']).name} ({item['size'] / 1024 / 1024:.2f} MB)"
+            )
+        detail_lines.append("")
+
+    if to_delete_intermediate:
+        detail_lines.append(
+            f"【误归档中间件（确认后将彻底删除，共 {len(to_delete_intermediate)} 项，{del_bytes / 1024 / 1024:.2f} MB）】"
+        )
+        for i, item in enumerate(to_delete_intermediate, 1):
+            detail_lines.append(
+                f"{i}. [{item['month']}] {item['current_cat']}: "
+                f"{Path(item['rel_path']).name} ({item['size'] / 1024 / 1024:.2f} MB)"
+            )
+        detail_lines.append("")
+
+    if unrecognized:
+        detail_lines.append(f"【未识别文件（保持原样不作改动，共 {len(unrecognized)} 项）】")
+        for i, item in enumerate(unrecognized, 1):
+            detail_lines.append(
+                f"{i}. [{item['month']}] {item['rel_path']} ({item['size'] / 1024 / 1024:.2f} MB)"
+            )
+        detail_lines.append("")
+
+    detailed_text = "\n".join(detail_lines).strip()
+
+    return {
+        "archive_dir": str(archive_root),
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "correct_count": correct_count,
+        "correct_bytes": correct_bytes,
+        "to_move": to_move,
+        "to_delete_intermediate": to_delete_intermediate,
+        "unrecognized": unrecognized,
+        "summary_text": summary_text,
+        "detailed_text": detailed_text,
+    }
+
+
+def execute_archive_re_sort(
+    scan_report: Optional[Dict[str, Any]] = None,
+    archive_root: Optional[Union[str, Path]] = None,
+    data_dir: Optional[Union[str, Path]] = None,
+    confirmed: bool = False,
+) -> Dict[str, Any]:
+    """
+    §2 Execute archive re-sorting:
+    - `confirmed=False`: safe dry-run, returns zero changes.
+    - `confirmed=True`:
+      1. Moves wrong-bucket files into correct `<YYYY-MM>/<category>/` directory,
+         preserving files without overwriting via `resolve_non_colliding_path`.
+      2. Deletes misarchived intermediate files (`*_censor.*`, `*_censored_clean.*`).
+      3. Leaves unrecognized files untouched.
+      4. Synchronizes path updates and deletions in `data/patreon_bundle_pool.json`.
+    """
+    if not confirmed:
+        return {
+            "executed": False,
+            "reason": "unconfirmed",
+            "moved_count": 0,
+            "moved_bytes": 0,
+            "deleted_count": 0,
+            "deleted_bytes": 0,
+            "untouched_count": len(scan_report.get("unrecognized", [])) if scan_report else 0,
+        }
+
+    if archive_root is None:
+        if data_dir is None:
+            from config import DATA_DIR
+            data_dir = DATA_DIR
+        archive_root = Path(data_dir) / "archive"
+    archive_root = Path(archive_root)
+
+    if data_dir is None:
+        from config import DATA_DIR
+        data_dir = DATA_DIR
+    data_dir_path = Path(data_dir)
+
+    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        try:
+            from config import DATA_DIR
+            prod_data = DATA_DIR.resolve()
+            if archive_root.resolve() == prod_data or prod_data in archive_root.resolve().parents:
+                archive_root = get_pytest_sandbox_dir() / archive_root.resolve().relative_to(prod_data)
+            if data_dir_path.resolve() == prod_data or prod_data in data_dir_path.resolve().parents:
+                data_dir_path = get_pytest_sandbox_dir()
+        except Exception:
+            pass
+
+    if scan_report is None:
+        scan_report = scan_archive_categories(archive_root=archive_root, data_dir=data_dir_path)
+
+    to_move = scan_report.get("to_move", [])
+    to_delete = scan_report.get("to_delete_intermediate", [])
+
+    moved_count = 0
+    moved_bytes = 0
+    deleted_count = 0
+    deleted_bytes = 0
+    errors: List[str] = []
+
+    pool_path = data_dir_path / "patreon_bundle_pool.json"
+    moved_path_replacements: Dict[str, str] = {}
+    deleted_paths: Set[str] = set()
+
+    # 1. Move wrong bucket files
+    for item in to_move:
+        src = Path(item["path"])
+        if not src.exists():
+            continue
+        target_dir = Path(item["target_dir"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / src.name
+
+        try:
+            src_hash = compute_file_sha256(src)
+            dest = resolve_non_colliding_path(target_file, source_sha256=src_hash)
+            if dest == target_file and target_file.exists():
+                src.unlink()
+            else:
+                shutil.move(str(src), str(dest))
+            moved_count += 1
+            moved_bytes += item.get("size", 0)
+            moved_path_replacements[str(src.resolve())] = str(dest.resolve())
+            moved_path_replacements[str(src)] = str(dest)
+        except Exception as e:
+            err = f"移动文件失败 {src} -> {target_dir}: {e}"
+            logger.error(err)
+            errors.append(err)
+
+    # 2. Delete misarchived intermediates
+    for item in to_delete:
+        src = Path(item["path"])
+        if not src.exists():
+            continue
+        try:
+            src.unlink()
+            deleted_count += 1
+            deleted_bytes += item.get("size", 0)
+            deleted_paths.add(str(src.resolve()))
+            deleted_paths.add(str(src))
+        except Exception as e:
+            err = f"删除中间件失败 {src}: {e}"
+            logger.error(err)
+            errors.append(err)
+
+    # 3. Synchronize pool index if pool_path exists
+    pool_entries_removed = 0
+    pool_refs_pruned = 0
+    if pool_path.exists():
+        try:
+            with open(pool_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            entries = loaded if isinstance(loaded, list) else (loaded.get("items", []) if isinstance(loaded, dict) else [])
+            updated_entries = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                orig_imgs = entry.get("images", [])
+                orig_vids = entry.get("videos", [])
+                new_imgs = []
+                for p_str in orig_imgs:
+                    p_res = str(Path(p_str).resolve())
+                    if p_str in deleted_paths or p_res in deleted_paths:
+                        pool_refs_pruned += 1
+                        continue
+                    if p_str in moved_path_replacements:
+                        new_imgs.append(moved_path_replacements[p_str])
+                    elif p_res in moved_path_replacements:
+                        new_imgs.append(moved_path_replacements[p_res])
+                    else:
+                        new_imgs.append(p_str)
+
+                new_vids = []
+                for p_str in orig_vids:
+                    p_res = str(Path(p_str).resolve())
+                    if p_str in deleted_paths or p_res in deleted_paths:
+                        pool_refs_pruned += 1
+                        continue
+                    if p_str in moved_path_replacements:
+                        new_vids.append(moved_path_replacements[p_str])
+                    elif p_res in moved_path_replacements:
+                        new_vids.append(moved_path_replacements[p_res])
+                    else:
+                        new_vids.append(p_str)
+
+                if not new_imgs and not new_vids:
+                    pool_entries_removed += 1
+                else:
+                    entry["images"] = new_imgs
+                    entry["videos"] = new_vids
+                    updated_entries.append(entry)
+
+            with open(pool_path, "w", encoding="utf-8") as f:
+                json.dump(updated_entries, f, ensure_ascii=False, indent=2)
+            logger.info(f"Patreon 附件池索引更新：同步搬移引用并剔除失效引用 {pool_refs_pruned} 个")
+        except Exception as e:
+            logger.warning(f"更新 patreon_bundle_pool.json 失败: {e}")
+
+    summary_msg = (
+        f"归档分类复检完成：已搬移 {moved_count} 个错桶文件 ({moved_bytes / (1024*1024):.2f} MB)，"
+        f"已彻底删除 {deleted_count} 个误归档中间件 ({deleted_bytes / (1024*1024):.2f} MB)。"
+    )
+    logger.info(f"🗂️ {summary_msg}")
+
+    return {
+        "executed": True,
+        "moved_count": moved_count,
+        "moved_bytes": moved_bytes,
+        "deleted_count": deleted_count,
+        "deleted_bytes": deleted_bytes,
+        "pool_entries_removed": pool_entries_removed,
+        "pool_refs_pruned": pool_refs_pruned,
+        "errors": errors,
+        "summary_message": summary_msg,
     }
