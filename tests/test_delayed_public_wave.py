@@ -2073,7 +2073,7 @@ def test_startup_scan_attended_mode_defer_suppresses_in_session_polls(tmp_path, 
 
 
 # ==============================================================================
-# 20. 生产数据零污染隔离断言 (Queue / Config / History)
+# 20. 生产数据零污染隔离断言 (Queue / Config / History / Cache / Archive / Logs)
 # ==============================================================================
 
 def test_prod_data_isolation_and_zero_pollution(monkeypatch, tmp_path):
@@ -2082,28 +2082,45 @@ def test_prod_data_isolation_and_zero_pollution(monkeypatch, tmp_path):
     1. save_config / save_window_state 在 PYTEST_CURRENT_TEST 下禁止写入生产 presets.json / window_state.json
     2. DelayedQueueManager.save_queue / enroll 在测试下严禁写入生产队列与 delayed_assets
     3. PublishHistoryManager.append_record 在测试下严禁写入生产 publish_history.json
-    4. 模拟 UI 控件各种反勾选与防抖同步，生产配置哈希零变化。
+    4. 媒体渲染与归档产物严禁落入生产 cache / archive 目录
+    5. logger 严禁在测试下向生产 data/logs 写入
+    6. 模拟 UI 控件各种反勾选与防抖同步，生产配置哈希零变化
+    7. 全量测试断言：整个 data/ 目录树（包括所有子目录及文件清单与逐个 SHA-256）零污染、零变化。
     """
+    import os
     import hashlib
+    from concurrent.futures import ThreadPoolExecutor
     import config as cfg_mod
     import app as app_mod
+    from logger import logger
     from delayed_wave_manager import DelayedQueueManager, DELAYED_QUEUE_FILE, DELAYED_ASSETS_DIR
     from history_manager import PublishHistoryManager
+    from media_foundation import (
+        get_monthly_cache_dir,
+        get_monthly_archive_dir,
+        archive_file_by_role,
+        archive_publish_run_outputs,
+        run_scheduled_cleanup,
+    )
 
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
 
-    prod_queue = DELAYED_QUEUE_FILE
-    prod_presets = cfg_mod.PRESETS_FILE
-    prod_history = cfg_mod.DATA_DIR / "publish_history.json"
+    # 快照整个 data/ 目录树的所有文件清单与 SHA-256 哈希
+    def snapshot_data_tree(root_dir: Path) -> dict:
+        files = []
+        for r, _, fs in os.walk(root_dir):
+            for f in fs:
+                files.append(Path(r) / f)
+        def _h(p: Path):
+            try:
+                rel = str(p.relative_to(root_dir))
+                return rel, hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                return str(p.relative_to(root_dir)), "ERR"
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            return dict(ex.map(_h, files))
 
-    def get_file_sha256(p: Path) -> str:
-        if not p.exists():
-            return "NON_EXISTENT"
-        return hashlib.sha256(p.read_bytes()).hexdigest()
-
-    queue_hash_before = get_file_sha256(prod_queue)
-    presets_hash_before = get_file_sha256(prod_presets)
-    history_hash_before = get_file_sha256(prod_history)
+    before_tree = snapshot_data_tree(cfg_mod.DATA_DIR)
 
     # 1. 尝试直接向生产队列保存
     mgr = DelayedQueueManager()
@@ -2121,18 +2138,186 @@ def test_prod_data_isolation_and_zero_pollution(monkeypatch, tmp_path):
     hm = PublishHistoryManager(cfg_mod.DATA_DIR)
     hm.append_record("MockArt", [], {"deviantart": (True, "https://leak.url", [])})
 
-    # 4. 模拟默认 MainWindow() 构造并触发 UI 同步配置
+    # 4. 尝试向生产 cache / archive 归档
+    test_img = tmp_path / "probe_artwork.jpg"
+    im = Image.new("RGB", (64, 64), color=(128, 64, 32))
+    im.save(test_img, "JPEG")
+
+    c_dir = get_monthly_cache_dir(cfg_mod.CACHE_DIR)
+    assert not str(c_dir.resolve()).startswith(str(cfg_mod.CACHE_DIR.resolve())), "cache must redirect away from prod"
+
+    a_dir = get_monthly_archive_dir("hd_images", base_archive_dir=cfg_mod.ARCHIVE_DIR)
+    assert not str(a_dir.resolve()).startswith(str(cfg_mod.ARCHIVE_DIR.resolve())), "archive must redirect away from prod"
+
+    arch_res = archive_file_by_role(test_img, "hd_images", base_archive_dir=cfg_mod.ARCHIVE_DIR)
+    assert arch_res is not None
+    assert not str(arch_res.resolve()).startswith(str(cfg_mod.ARCHIVE_DIR.resolve())), "archived file must not drop in prod"
+
+    # 尝试发布产物自动归档
+    archive_publish_run_outputs(
+        {"title": "ProdLeakTest", "_media_roles": {str(test_img): "hd_images"}},
+        publish_results={"deviantart": (True, "https://da.url", [])},
+        base_archive_dir=cfg_mod.ARCHIVE_DIR,
+        data_dir=cfg_mod.DATA_DIR,
+    )
+
+    # 尝试触发自动清理日志状态
+    run_scheduled_cleanup(data_dir=cfg_mod.DATA_DIR, force=True)
+
+    # 5. 模拟默认 MainWindow() 构造并触发 UI 同步配置
     from PyQt5.QtWidgets import QApplication
     qapp = QApplication.instance() or QApplication([])
     win = app_mod.MainWindow()
-    # 模拟切换水印控件并触发配置同步
     win.watermark_enabled_cb.setChecked(False)
     win._sync_config_from_ui()
 
-    # 断言生产各关键数据文件完全零变化
-    assert get_file_sha256(prod_queue) == queue_hash_before
-    assert get_file_sha256(prod_presets) == presets_hash_before
-    assert get_file_sha256(prod_history) == history_hash_before
+    # 6. 触发 logger 输出
+    logger.info("Probe log line to test logger isolation")
+
+    # 全量比对整个 data/ 目录树
+    after_tree = snapshot_data_tree(cfg_mod.DATA_DIR)
+
+    added = set(after_tree) - set(before_tree)
+    removed = set(before_tree) - set(after_tree)
+    modified = [f for f in (set(before_tree) & set(after_tree)) if before_tree[f] != after_tree[f]]
+
+    assert not added, f"Production data/ tree was polluted with new files: {added}"
+    assert not removed, f"Production data/ tree files were unexpectedly removed: {removed}"
+    assert not modified, f"Production data/ tree files were unexpectedly modified: {modified}"
+
+
+# ==============================================================================
+# 21. 测试文件清扫 (scan_test_artifacts & execute_test_artifacts_cleanup)
+# ==============================================================================
+
+def test_scan_test_artifacts_classification(tmp_path):
+    """
+    验证 scan_test_artifacts 两档分类：
+    1. 确定测试件：含 test（不区分大小写）、wave_前缀、mutex/alert art、已知 fixture 名字、单色占位图
+    2. 疑似测试件：dummy、sample、fake、temp
+    3. 真实素材件：不匹配任何特征且多色彩正常图片
+    """
+    from media_foundation import scan_test_artifacts, execute_test_artifacts_cleanup
+
+    data_dir = tmp_path / "data"
+    cache_dir = data_dir / "cache" / "2026-11"
+    archive_hd = data_dir / "archive" / "2026-11" / "hd_images"
+    archive_gif = data_dir / "archive" / "2026-11" / "hd_gif"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    archive_hd.mkdir(parents=True, exist_ok=True)
+    archive_gif.mkdir(parents=True, exist_ok=True)
+
+    # 1. 确定测试件 - 命名匹配
+    (archive_gif / "BskyReuseXVideoTest.gif").write_bytes(b"fake_gif_data")
+    (archive_gif / "wave_20261105_203204_84dd34_00_censor.gif").write_bytes(b"fake_gif_data")
+    (archive_hd / "Mutex_Art.jpg").write_bytes(b"fake_jpg_data")
+    (archive_hd / "Attach_Switch_Three_States.jpg").write_bytes(b"fake_jpg_data")
+
+    # 确定测试件 - 单色占位图
+    solid_img_path = archive_hd / "Solid_Placeholder.png"
+    im_solid = Image.new("RGB", (64, 64), color=(255, 0, 0))
+    im_solid.save(solid_img_path)
+
+    # 2. 疑似测试件
+    (cache_dir / "dummy_preview.jpg").write_bytes(b"fake_jpg_data")
+    (cache_dir / "sample_card.png").write_bytes(b"fake_png_data")
+
+    # 3. 真实素材件（正常多色图片，真实作品命名）
+    genuine_path = archive_hd / "He_Saved_the_Last_Drop_for_You.png"
+    im_gen = Image.new("RGB", (200, 200))
+    # Fill with varied colors
+    import numpy as np
+    arr = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+    Image.fromarray(arr).save(genuine_path)
+
+    # 扫描
+    report = scan_test_artifacts(data_dir=data_dir)
+    assert report["definite_count"] == 5, f"Expected 5 definite test files, got {report['definite_count']}"
+    assert report["suspicious_count"] == 2, f"Expected 2 suspicious files, got {report['suspicious_count']}"
+
+    def_names = [f["filename"] for f in report["definite_files"]]
+    assert "BskyReuseXVideoTest.gif" in def_names
+    assert "wave_20261105_203204_84dd34_00_censor.gif" in def_names
+    assert "Mutex_Art.jpg" in def_names
+    assert "Attach_Switch_Three_States.jpg" in def_names
+    assert "Solid_Placeholder.png" in def_names
+
+    susp_names = [f["filename"] for f in report["suspicious_files"]]
+    assert "dummy_preview.jpg" in susp_names
+    assert "sample_card.png" in susp_names
+
+
+def test_execute_test_artifacts_cleanup_with_pool_pruning(tmp_path):
+    """
+    验证 execute_test_artifacts_cleanup 执行行为：
+    1. confirmed=False -> 不删除任何文件
+    2. confirmed=True, delete_suspicious=False -> 仅删除确定测试件，疑似件与真实件原样保留
+    3. patreon_bundle_pool.json 引用了被删文件时同步剔除引用与空条目
+    """
+    import json
+    from media_foundation import scan_test_artifacts, execute_test_artifacts_cleanup
+
+    data_dir = tmp_path / "data"
+    archive_hd = data_dir / "archive" / "2026-11" / "hd_images"
+    archive_hd.mkdir(parents=True, exist_ok=True)
+
+    t1 = archive_hd / "GifReuseTest.png"
+    t1.write_bytes(b"test1")
+    t2 = archive_hd / "Mutex_Art.jpg"
+    t2.write_bytes(b"test2")
+    susp = archive_hd / "temp_preview.jpg"
+    susp.write_bytes(b"susp1")
+    gen = archive_hd / "Buried_Between_My_Pecs.png"
+    gen.write_bytes(b"genuine_artwork_bytes")
+
+    # 构建 patreon_bundle_pool.json
+    pool_file = data_dir / "patreon_bundle_pool.json"
+    pool_data = [
+        {
+            "id": "pat_test_1",
+            "title": "GifReuseTest",
+            "month": "2026-11",
+            "images": [str(t1)],
+            "videos": [],
+        },
+        {
+            "id": "pat_mixed_2",
+            "title": "MixedPost",
+            "month": "2026-11",
+            "images": [str(t2), str(gen)],
+            "videos": [],
+        },
+    ]
+    pool_file.write_text(json.dumps(pool_data, ensure_ascii=False), encoding="utf-8")
+
+    report = scan_test_artifacts(data_dir=data_dir)
+    assert report["definite_count"] == 2
+    assert report["suspicious_count"] == 1
+
+    # 1. 未获确认
+    unconf_res = execute_test_artifacts_cleanup(report, confirmed=False, data_dir=data_dir)
+    assert unconf_res["executed"] is False
+    assert t1.exists()
+
+    # 2. 确认执行（delete_suspicious=False）
+    res = execute_test_artifacts_cleanup(report, confirmed=True, data_dir=data_dir, delete_suspicious=False)
+    assert res["executed"] is True
+    assert res["deleted_count"] == 2
+    assert not t1.exists()
+    assert not t2.exists()
+    assert susp.exists(), "Suspicious file must NOT be deleted by default"
+    assert gen.exists(), "Genuine file must NOT be deleted"
+
+    # 3. 验证 pool 更新
+    updated_pool = json.loads(pool_file.read_text(encoding="utf-8"))
+    # pat_test_1 全被删 -> 条目被移除
+    assert len(updated_pool) == 1
+    # pat_mixed_2 中 t2 被移除，保留 gen
+    assert updated_pool[0]["id"] == "pat_mixed_2"
+    assert updated_pool[0]["images"] == [str(gen)]
+    assert res["pool_entries_removed"] == 1
+    assert res["pool_refs_pruned"] == 2
+
 
 
 

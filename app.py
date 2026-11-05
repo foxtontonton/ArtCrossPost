@@ -89,6 +89,7 @@ from media_foundation import (
     ARCHIVE_CATEGORIES,
     archive_publish_run_outputs,
     execute_legacy_cache_cleanup,
+    execute_test_artifacts_cleanup,
     get_monthly_archive_dir,
     get_monthly_cache_dir,
     migrate_legacy_bundle_pool,
@@ -98,6 +99,7 @@ from media_foundation import (
     sanitize_ascii_filename,
     sanitize_ascii_stem,
     scan_legacy_cache,
+    scan_test_artifacts,
 )
 
 
@@ -3860,6 +3862,11 @@ class SettingsDialog(QDialog):
         self.legacy_cache_btn.setObjectName("secondaryBtn")
         self.legacy_cache_btn.clicked.connect(self._on_legacy_cache_cleanup_clicked)
         cleanup_btn_row.addWidget(self.legacy_cache_btn)
+
+        self.test_cleanup_btn = QPushButton("🧪 测试文件清扫报告")
+        self.test_cleanup_btn.setObjectName("secondaryBtn")
+        self.test_cleanup_btn.clicked.connect(self._on_test_cleanup_clicked)
+        cleanup_btn_row.addWidget(self.test_cleanup_btn)
         cleanup_btn_row.addStretch()
 
         layout.addLayout(cleanup_btn_row)
@@ -3903,6 +3910,33 @@ class SettingsDialog(QDialog):
             if self.main_window:
                 self.main_window.notify(done_msg, level="success")
             QMessageBox.information(self, "存量分拣完成", done_msg)
+
+    def _on_test_cleanup_clicked(self):
+        data_dir = self.main_window.data_dir if self.main_window else (Path(__file__).resolve().parent / "data")
+        report = scan_test_artifacts(data_dir=data_dir)
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("测试文件清扫报告")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText(
+            f"{report.get('summary_text', '')}\n\n"
+            "点击「执行」将彻底删除【确定测试件】，并同步剔除附件池失效引用；\n"
+            "【疑似测试件】默认保留不删。点击「取消」则放弃本次清扫。"
+        )
+        exec_btn = msg_box.addButton("执行", QMessageBox.AcceptRole)
+        cancel_btn = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.setDefaultButton(cancel_btn)
+        msg_box.exec_()
+        if msg_box.clickedButton() is exec_btn:
+            exec_res = execute_test_artifacts_cleanup(
+                report,
+                confirmed=True,
+                data_dir=data_dir,
+                delete_suspicious=False,
+            )
+            done_msg = exec_res.get("summary_message", "测试文件清扫完成")
+            if self.main_window:
+                self.main_window.notify(done_msg, level="success")
+            QMessageBox.information(self, "清扫完成", done_msg)
 
     def _on_comfyui_dir_changed(self, text):
         val = (text or "").strip()
@@ -4161,8 +4195,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ArtCrossPost - 多平台创作同步分发助手 (全尺寸 & 水印打码双核实时预览版)")
         self.setMinimumSize(1260, 780)
 
-        self.data_dir = Path(data_dir) if data_dir else (Path(__file__).resolve().parent / "data")
+        if data_dir:
+            self.data_dir = Path(data_dir)
+        elif os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            from media_foundation import get_pytest_sandbox_dir
+            self.data_dir = get_pytest_sandbox_dir()
+        else:
+            self.data_dir = Path(__file__).resolve().parent / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir = self.data_dir / "cache"
+        self.archive_dir = self.data_dir / "archive"
         self.history_manager = PublishHistoryManager(self.data_dir)
         self._deferred_wave_item_ids = set()
         self._last_publish_payload = None

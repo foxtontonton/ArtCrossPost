@@ -49,6 +49,8 @@ class DailyFileHandler(logging.FileHandler):
         super().__init__(str(log_path), encoding=encoding)
 
     def emit(self, record):
+        if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            return
         now_date = datetime.now().strftime("%Y-%m-%d")
         if now_date != self.current_date:
             self.current_date = now_date
@@ -66,7 +68,9 @@ def init_root_logger():
     if _ROOT_LOGGER_INITIALIZED:
         return
 
-    _cleanup_expired_logs(LOGS_DIR, keep_days=7)
+    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
+    if not is_test:
+        _cleanup_expired_logs(LOGS_DIR, keep_days=7)
 
     root_logger = logging.getLogger("ArtCrossPost")
     root_logger.setLevel(logging.DEBUG)
@@ -79,11 +83,12 @@ def init_root_logger():
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # 2. 每日滚动文件处理器 (DEBUG 及以上)
-    file_handler = DailyFileHandler(LOGS_DIR, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
+    # 2. 每日滚动文件处理器 (DEBUG 及以上) - 测试环境下严禁写入生产 logs/
+    if not is_test:
+        file_handler = DailyFileHandler(LOGS_DIR, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
     _ROOT_LOGGER_INITIALIZED = True
 
