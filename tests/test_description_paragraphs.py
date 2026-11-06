@@ -25,6 +25,7 @@ def mock_main_window(tmp_path, qapp, monkeypatch):
         win = MainWindow()
         win.data_dir = tmp_path
         win.notify = MagicMock()
+        win.config["signature_template"] = CANONICAL_SIGNATURE_TEMPLATE
 
         yield win
 

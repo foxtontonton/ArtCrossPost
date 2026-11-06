@@ -34,6 +34,8 @@ try:
         verify_paragraphs_in_html,
         is_textarea_element,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 except ImportError:
     from ..signature_utils import (
@@ -43,6 +45,8 @@ except ImportError:
         verify_paragraphs_in_html,
         is_textarea_element,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 
 try:
@@ -1238,6 +1242,7 @@ class CivitaiDispatcher(BaseDispatcher):
         """
         title = (payload.get("title") or "").strip()
         desc = (payload.get("description") or "").strip()
+        sig_template = payload.get("sig_template") or payload.get("signature_template")
         tags = payload.get("tags") or []
         x_video_paths = payload.get("x_video_paths") or payload.get("platform_options", {}).get("x_video_paths") or {}
 
@@ -1362,7 +1367,10 @@ class CivitaiDispatcher(BaseDispatcher):
                             logger.info("[Civitai] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
                             time.sleep(0.5)
                         elif desc.strip():
-                            html_content = render_description_to_html(desc)
+                            try:
+                                html_content = render_description_to_html(desc, sig_template=sig_template)
+                            except TypeError:
+                                html_content = render_description_to_html(desc)
                             try:
                                 desc_box.evaluate("""(el, html) => {
                                     el.focus();
@@ -1401,12 +1409,12 @@ class CivitaiDispatcher(BaseDispatcher):
                                 except Exception:
                                     pass
 
-                            is_signed = has_signature(desc)
+                            is_signed = has_signature(desc, sig_template=sig_template)
                             if readback_html is None or (not is_signed and "<" not in readback_html):
                                 readback_html = "" if is_signed else html_content
 
                             if is_signed:
-                                sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
+                                sig_ok, sig_missing = verify_signature_links_in_html(readback_html, sig_template=sig_template)
                                 if not sig_ok:
                                     missing_str = ", ".join(sig_missing)
                                     logger.error(f"[Civitai] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
@@ -1414,11 +1422,15 @@ class CivitaiDispatcher(BaseDispatcher):
                                         self.delete_orphan_draft(page, detected_draft_id)
                                     context.close()
                                     return False, f"Civitai 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}", compliance
-                                logger.info("[Civitai] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
-                                compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, "6/6 真超链接已生效"))
+                                expected_links_count = len(extract_markdown_links(sig_template)) if sig_template and extract_markdown_links(sig_template) else len(CANONICAL_SIGNATURE_LINKS)
+                                logger.info(f"[Civitai] 描述签名真超链接回读断言全部通过 ({expected_links_count}/{expected_links_count} 链接已生效)")
+                                compliance.append(self.verify_compliance_item("civitai", "signature_links", True, True, f"{expected_links_count}/{expected_links_count} 真超链接已生效"))
 
-                            para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc)
-                            if not para_ok and is_signed and "Where to find me" in desc and "Where to find me" not in readback_html:
+                            para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc, sig_template=sig_template)
+                            first_sig_line = next((line.strip() for line in (sig_template or "").splitlines() if line.strip()), "Where to find me")
+                            sig_marker_in_desc = ("Where to find me" in desc) or (first_sig_line in desc)
+                            sig_marker_in_html = ("Where to find me" in readback_html) or (first_sig_line in readback_html)
+                            if not para_ok and is_signed and sig_marker_in_desc and not sig_marker_in_html:
                                 para_ok = actual_p >= max(1, expected_p - 3)
                             if not para_ok:
                                 logger.error(f"[Civitai] 描述段落保真回读断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段")

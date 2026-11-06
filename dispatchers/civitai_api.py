@@ -783,7 +783,11 @@ def publish_via_api(
         notes.append(tool_note)
 
     # 2. 描述转换为 HTML
-    detail_html = render_description_to_html(desc)
+    sig_template = payload.get("sig_template") or payload.get("signature_template")
+    try:
+        detail_html = render_description_to_html(desc, sig_template=sig_template)
+    except TypeError:
+        detail_html = render_description_to_html(desc)
 
     client = CivitaiApiClient(api_key=api_key)
 

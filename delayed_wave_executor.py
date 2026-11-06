@@ -28,6 +28,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from censor_engine import CensorEngine, map_strength_to_blur_ksize, map_strength_to_mosaic_size
 from config import load_config
+from signature_utils import CANONICAL_SIGNATURE_TEMPLATE
 from delayed_wave_manager import DelayedQueueItem, DelayedQueueManager, downscale_image_half
 from history_manager import PublishHistoryManager
 from media_foundation import (
@@ -757,9 +758,18 @@ class DelayedWaveExecutor:
             if mp4_orig:
                 media_roles[str(mp4_orig)] = "mp4_originals"
 
+        sig_tpl = (
+            snapshot.get("sig_template")
+            or snapshot.get("signature_template")
+            or cfg.get("signature_template")
+            or CANONICAL_SIGNATURE_TEMPLATE
+        )
+
         payload = {
             "title": snapshot.get("title", item.title),
             "description": snapshot.get("description", ""),
+            "sig_template": sig_tpl,
+            "signature_template": sig_tpl,
             "short_text": snapshot.get("short_text", ""),
             "tags": snapshot.get("tags", []),
             "is_nsfw": snapshot.get("is_nsfw", False),

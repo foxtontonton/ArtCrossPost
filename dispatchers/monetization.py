@@ -28,6 +28,8 @@ try:
         is_textarea_element,
         extract_html_hrefs,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 except ImportError:
     from ..signature_utils import (
@@ -38,6 +40,8 @@ except ImportError:
         is_textarea_element,
         extract_html_hrefs,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 
 logger = get_logger("Monetization")
@@ -673,6 +677,7 @@ class PatreonDispatcher(BaseDispatcher):
         import re as _re
         title = _re.sub(r"[\r\n\t]+", " ", (payload.get("title", "") or "")).strip() or "New Creation"
         desc = payload.get("patreon_description") or payload.get("description", "")
+        sig_template = payload.get("sig_template") or payload.get("signature_template")
         # DA 帖子 URL 透传替换 (需求三 9: 剥除查询参数与锚点)
         da_post_url = payload.get("da_post_url")
         if da_post_url:
@@ -829,7 +834,10 @@ class PatreonDispatcher(BaseDispatcher):
                         logger.info("[Patreon] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
                         time.sleep(0.5)
                     elif full_desc.strip():
-                        html_content = render_description_to_html(full_desc)
+                        try:
+                            html_content = render_description_to_html(full_desc, sig_template=sig_template)
+                        except TypeError:
+                            html_content = render_description_to_html(full_desc)
                         try:
                             desc_area.evaluate("""(el, html) => {
                                 el.focus();
@@ -868,12 +876,12 @@ class PatreonDispatcher(BaseDispatcher):
                             except Exception:
                                 pass
 
-                        is_signed = has_signature(full_desc)
+                        is_signed = has_signature(full_desc, sig_template=sig_template)
                         if readback_html is None or (not is_signed and "<" not in readback_html):
                             readback_html = "" if is_signed else html_content
 
                         if is_signed:
-                            sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url)
+                            sig_ok, sig_missing = verify_signature_links_in_html(readback_html, da_post_url=da_post_url, sig_template=sig_template)
                             if not sig_ok:
                                 raw_hrefs = extract_html_hrefs(readback_html)
                                 hrefs_str = ", ".join(repr(h) for h in raw_hrefs) if raw_hrefs else "无任何 href"
@@ -881,11 +889,15 @@ class PatreonDispatcher(BaseDispatcher):
                                 logger.error(f"[Patreon] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}；实际回读 href 清单: [{hrefs_str}]")
                                 self.close_login_session(browser, context)
                                 return False, f"Patreon 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str} (实际回读 href 清单: [{hrefs_str}])", compliance
-                            logger.info("[Patreon] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
-                            compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, "6/6 真超链接已生效"))
+                            expected_links_count = len(extract_markdown_links(sig_template)) if sig_template and extract_markdown_links(sig_template) else len(CANONICAL_SIGNATURE_LINKS)
+                            logger.info(f"[Patreon] 描述签名真超链接回读断言全部通过 ({expected_links_count}/{expected_links_count} 链接已生效)")
+                            compliance.append(self.verify_compliance_item("patreon", "signature_links", True, True, f"{expected_links_count}/{expected_links_count} 真超链接已生效"))
 
-                        para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, full_desc)
-                        if not para_ok and is_signed and "Where to find me" in full_desc and "Where to find me" not in readback_html:
+                        para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, full_desc, sig_template=sig_template)
+                        first_sig_line = next((line.strip() for line in (sig_template or "").splitlines() if line.strip()), "Where to find me")
+                        sig_marker_in_desc = ("Where to find me" in full_desc) or (first_sig_line in full_desc)
+                        sig_marker_in_html = ("Where to find me" in readback_html) or (first_sig_line in readback_html)
+                        if not para_ok and is_signed and sig_marker_in_desc and not sig_marker_in_html:
                             para_ok = actual_p >= max(1, expected_p - 3)
                         if not para_ok:
                             logger.error(f"[Patreon] 描述段落保真回读断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段")

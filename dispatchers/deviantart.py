@@ -34,6 +34,8 @@ try:
         verify_paragraphs_in_html,
         is_textarea_element,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 except ImportError:
     from ..signature_utils import (
@@ -43,6 +45,8 @@ except ImportError:
         verify_paragraphs_in_html,
         is_textarea_element,
         has_signature,
+        extract_markdown_links,
+        CANONICAL_SIGNATURE_LINKS,
     )
 
 logger = get_logger("DeviantArt")
@@ -982,7 +986,8 @@ class DeviantArtDispatcher(BaseDispatcher):
         self, page, context, images, title, desc, tags=None,
         is_mature=False, mature_level="moderate", is_ai=False,
         gallery="", compliance=None, thumb_wait_timeout=60,
-        keep_preset_description=None, _tags=None
+        keep_preset_description=None, _tags=None,
+        sig_template=None, **kwargs
     ):
         if tags is None and _tags is not None:
             tags = _tags
@@ -1200,7 +1205,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                 if is_textarea_element(desc_area):
                     logger.info("[DeviantArt] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
                 elif desc_to_fill.strip():
-                    html_content = render_description_to_html(desc_to_fill)
+                    try:
+                        html_content = render_description_to_html(desc_to_fill, sig_template=sig_template)
+                    except TypeError:
+                        html_content = render_description_to_html(desc_to_fill)
                     try:
                         desc_area.evaluate("""(el, html) => {
                             el.focus();
@@ -1238,22 +1246,26 @@ class DeviantArtDispatcher(BaseDispatcher):
                         except Exception:
                             pass
 
-                    is_signed = has_signature(desc_to_fill)
+                    is_signed = has_signature(desc_to_fill, sig_template=sig_template)
                     if readback_html is None or (not is_signed and "<" not in readback_html):
                         readback_html = "" if is_signed else html_content
 
                     if is_signed:
-                        sig_ok, sig_missing = verify_signature_links_in_html(readback_html)
+                        sig_ok, sig_missing = verify_signature_links_in_html(readback_html, sig_template=sig_template)
                         if not sig_ok:
                             missing_str = ", ".join(sig_missing)
                             logger.error(f"[DeviantArt] 描述签名超链接回读断言失败: 缺少以下链接未生效: {missing_str}")
                             return False, f"DeviantArt 描述签名超链接断言失败: 缺少以下超链接未生效: {missing_str}。发布已中止，草稿保留在 Studio。"
-                        logger.info("[DeviantArt] 描述签名 6 个真超链接回读断言全部通过 (6/6 链接已生效)")
+                        expected_links_count = len(extract_markdown_links(sig_template)) if sig_template and extract_markdown_links(sig_template) else len(CANONICAL_SIGNATURE_LINKS)
+                        logger.info(f"[DeviantArt] 描述签名真超链接回读断言全部通过 ({expected_links_count}/{expected_links_count} 链接已生效)")
                         if compliance is not None and isinstance(compliance, list):
-                            compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, "6/6 真超链接已生效"))
+                            compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, f"{expected_links_count}/{expected_links_count} 真超链接已生效"))
 
-                    para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc_to_fill)
-                    if not para_ok and is_signed and "Where to find me" in desc_to_fill and "Where to find me" not in readback_html:
+                    para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc_to_fill, sig_template=sig_template)
+                    first_sig_line = next((line.strip() for line in (sig_template or "").splitlines() if line.strip()), "Where to find me")
+                    sig_marker_in_desc = ("Where to find me" in desc_to_fill) or (first_sig_line in desc_to_fill)
+                    sig_marker_in_html = ("Where to find me" in readback_html) or (first_sig_line in readback_html)
+                    if not para_ok and is_signed and sig_marker_in_desc and not sig_marker_in_html:
                         para_ok = actual_p >= max(1, expected_p - 3)
                     if not para_ok:
                         logger.error(f"[DeviantArt] 描述段落保真回读断言失败: 期望 >= {expected_p} 段 (<p>)，实际回读 {actual_p} 段")
@@ -2096,6 +2108,7 @@ class DeviantArtDispatcher(BaseDispatcher):
         mature_level = "moderate" if da_mature_opt == "moderate" else "strict"
         is_ai = payload.get("platform_options", {}).get("deviantart_ai", payload.get("platform_options", {}).get("is_ai_generated", payload.get("is_ai", False)))
         gallery = payload.get("platform_options", {}).get("deviantart_gallery", "").strip()
+        sig_template = payload.get("sig_template") or payload.get("signature_template")
 
         keep_preset = payload.get("deviantart_keep_preset_description")
         if keep_preset is None:
@@ -2143,13 +2156,21 @@ class DeviantArtDispatcher(BaseDispatcher):
                     sub_ok, sub_msg = self._submit_deviation(
                         page, context, images, title, desc, tags,
                         is_mature, mature_level, is_ai, gallery, compliance,
-                        keep_preset_description=keep_preset
+                        keep_preset_description=keep_preset,
+                        sig_template=sig_template
                     )
                 except TypeError:
-                    sub_ok, sub_msg = self._submit_deviation(
-                        page, context, images, title, desc, tags,
-                        is_mature, mature_level, is_ai, gallery, compliance
-                    )
+                    try:
+                        sub_ok, sub_msg = self._submit_deviation(
+                            page, context, images, title, desc, tags,
+                            is_mature, mature_level, is_ai, gallery, compliance,
+                            keep_preset_description=keep_preset
+                        )
+                    except TypeError:
+                        sub_ok, sub_msg = self._submit_deviation(
+                            page, context, images, title, desc, tags,
+                            is_mature, mature_level, is_ai, gallery, compliance
+                        )
                 if not sub_ok:
                     self.close_login_session(browser, context, page)
                     compliance.append(

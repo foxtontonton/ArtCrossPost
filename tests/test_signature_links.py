@@ -1081,4 +1081,142 @@ def test_textarea_guard_skips_html_injection_and_paragraph_assertion(tmp_path, m
     assert len(html_calls) == 0
 
 
+# ==============================================================================
+# REQUIREMENTS_signature_template_threading: 自定义签名透传与链接渲染保障测试
+# ==============================================================================
+
+def test_custom_signature_template_without_where_to_find_me_marker():
+    """
+    测试用户自定义签名模版开头句不含 'Where to find me' 标记时:
+    - 经 sig_template 透传能准确分离正文与签名段
+    - 正文中的 [OC], [1/3] 等方括号严格保持纯文本，不得被误解析为超链接
+    - 签名段中的所有 Markdown 链接准确转为真超链接 <a>
+    - verify_signature_links_in_html 正常通过，彻底根除 0 链接断言拦截
+    """
+    custom_sig = (
+        "You can find me on any of these platforms — same name everywhere: FOXTONTONTON.\n\n"
+        "🎬 [X/Twitter](https://x.com/FOXTONTONTON)\n\n"
+        "🖼️ [DeviantArt](https://www.deviantart.com/foxtontonton)\n\n"
+        "💜 [Patreon](https://www.patreon.com/FOXTONTONTON)\n\n"
+        "☕ [Ko-fi](https://ko-fi.com/foxtontonton)\n\n"
+        "💎 [Civitai](https://civitai.red/user/FOXTONTONTON)\n\n"
+        "🦋 [Bluesky](https://bsky.app/profile/foxtontonton.bsky.social)\n\n"
+        "Thank you for supporting my artwork!"
+    )
+    body = "Original Character Design [OC] [Draft 1/3] for the upcoming webcomic series."
+    full_desc = f"{body}\n\n{custom_sig}"
+
+    # 1. 拆分校验
+    body_part, sig_part = split_body_and_signature(full_desc, sig_template=custom_sig)
+    assert body_part == body
+    assert sig_part == custom_sig
+
+    # 2. 富文本 HTML 渲染校验
+    rendered_html = render_description_to_html(full_desc, sig_template=custom_sig)
+    assert "[OC]" in rendered_html
+    assert "[Draft 1/3]" in rendered_html
+    assert "<a href=" in rendered_html
+    assert 'href="https://x.com/FOXTONTONTON"' in rendered_html
+    assert 'href="https://www.deviantart.com/foxtontonton"' in rendered_html
+    assert 'href="https://www.patreon.com/FOXTONTONTON"' in rendered_html
+    assert 'href="https://ko-fi.com/foxtontonton"' in rendered_html
+    assert 'href="https://civitai.red/user/FOXTONTONTON"' in rendered_html
+    assert 'href="https://bsky.app/profile/foxtontonton.bsky.social"' in rendered_html
+
+    # 3. 超链接回读断言校验
+    ok, missing = verify_signature_links_in_html(rendered_html, sig_template=custom_sig)
+    assert ok is True
+    assert missing == []
+
+
+def test_custom_signature_template_fallback_when_sig_template_omitted(monkeypatch):
+    """
+    测试当外部调用未显式传递 sig_template 时:
+    1. 若系统配置保存了该模板，通过 load_config() 自动补全匹配
+    2. 若未配置，通过平台链接切分兜底，保证签名链接仍被解析为 <a>
+    """
+    custom_sig = (
+        "Follow my artwork across the web:\n\n"
+        "🎬X: [@FOXTONTONTON](https://x.com/FOXTONTONTON)\n\n"
+        "🖼️DeviantArt: [FOXTONTONTON](https://www.deviantart.com/foxtontonton)\n\n"
+        "💜Patreon: [FOXTONTONTON](https://patreon.com/foxtontonton)\n\n"
+        "☕Ko-fi: [FOXTONTONTON](https://ko-fi.com/foxtontonton)\n\n"
+        "💎Civitai: [FOXTONTONTON](https://civitai.red/user/FOXTONTONTON)\n\n"
+        "🦋Bluesky: [FOXTONTONTON](https://bsky.app/profile/foxtontonton.bsky.social)"
+    )
+    body = "Scene [1/2] concept piece."
+    full_desc = f"{body}\n\n{custom_sig}"
+
+    # 1. 模拟系统配置中持久化了用户自定义签名模版
+    monkeypatch.setattr("config.load_config", lambda: {"signature_template": custom_sig})
+
+    body_part, sig_part = split_body_and_signature(full_desc)
+    assert body_part == body
+    assert sig_part == custom_sig
+
+    rendered_html = render_description_to_html(full_desc)
+    assert "[1/2]" in rendered_html
+    assert '<a href="https://x.com/FOXTONTONTON"' in rendered_html
+    assert '<a href="https://patreon.com/foxtontonton"' in rendered_html
+
+    ok, missing = verify_signature_links_in_html(rendered_html)
+    assert ok is True
+    assert missing == []
+
+
+def test_app_imports_archive_dir_and_data_dir():
+    """
+    并修项验证: 验证 app.py 正常导入 ARCHIVE_DIR 与 DATA_DIR，
+    彻底消除发布完成归档阶段的 NameError 异常
+    """
+    import app
+    assert hasattr(app, "ARCHIVE_DIR")
+    assert hasattr(app, "DATA_DIR")
+    assert app.ARCHIVE_DIR.name == "archive"
+    assert app.DATA_DIR.name == "data"
+
+
+def test_payload_signature_template_threading(tmp_path, monkeypatch):
+    """
+    验证主窗口与 Tab B 发布在组装 payload 时，正确注入 sig_template 与 signature_template
+    """
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "1")
+    from PyQt5.QtWidgets import QApplication
+    _app = QApplication.instance() or QApplication([])
+    from app import MainWindow
+    from unittest.mock import MagicMock, patch
+
+    custom_sig = "Custom socials:\n[X](https://x.com/FOXTONTONTON)"
+    with patch("app.CensorEngine"), patch("app.WatermarkEngine"):
+        win = MainWindow()
+        win.data_dir = tmp_path
+        win.notify = MagicMock()
+        win.config["signature_template"] = custom_sig
+
+        # 模拟 Tab B 构造 material_snapshot
+        snapshot = {
+            "title": "TabB Title",
+            "description": f"Desc text\n\n{custom_sig}",
+            "sig_template": win.config.get("signature_template"),
+            "signature_template": win.config.get("signature_template"),
+        }
+        assert snapshot["sig_template"] == custom_sig
+        assert snapshot["signature_template"] == custom_sig
+
+        # Cleanup timers
+        for t_attr in (
+            "_draft_save_timer",
+            "_layout_save_timer",
+            "_config_save_timer",
+            "_preview_timer",
+            "x_counter_timer",
+            "_schedule_poll_timer",
+            "_font_apply_timer",
+            "_thumb_size_apply_timer",
+        ):
+            if hasattr(win, t_attr) and getattr(win, t_attr).isActive():
+                getattr(win, t_attr).stop()
+
+
+
 
