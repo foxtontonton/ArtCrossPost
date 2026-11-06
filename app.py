@@ -2628,8 +2628,18 @@ class PublishThread(QThread):
                         flags=_re.IGNORECASE
                     )
 
-            # 第二阶段: 剩余平台并发发布
+            # 两阶段链接替换后，对包含 Bluesky 的分发核算终稿字素 (防长 URL 导致超限)
+            st_final = self.payload.get("short_text")
             phase2_dispatchers = [d for d in valid_dispatchers if d != da_disp]
+            if st_final and any(d.name == "bluesky" for d in phase2_dispatchers):
+                from dispatchers.bluesky import count_graphemes, MAX_GRAPHEMES
+                st_graphemes = count_graphemes(st_final)
+                if st_graphemes > MAX_GRAPHEMES:
+                    logger.warning(
+                        f"[PublishThread] 替换 DA 当帖链接后 Bluesky 终稿字素超限: {st_graphemes}/{MAX_GRAPHEMES}"
+                    )
+
+            # 第二阶段: 剩余平台并发发布
             phase2_total = len(phase2_dispatchers)
             if phase2_total > 0:
                 p2_concurrency = max(1, min(phase2_total, int(concurrency)))
