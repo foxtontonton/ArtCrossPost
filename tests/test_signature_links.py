@@ -237,15 +237,21 @@ from dispatchers.monetization import PatreonDispatcher
 
 def _create_mock_da_desc_area(html_content, preset_text=""):
     mock_el = MagicMock()
+    injected = [False]
     def fake_eval(script, *args):
         s = str(script)
+        if "insertHTML" in s or "setContent" in s or "innerHTML =" in s:
+            injected[0] = True
+            return "execCommand"
         if "innerHTML" in s:
+            if not injected[0]:
+                return preset_text
             return html_content
         if "innerText" in s or "textContent" in s:
             return preset_text
         return "execCommand"
     mock_el.evaluate.side_effect = fake_eval
-    mock_el.inner_html.return_value = html_content
+    mock_el.inner_html.side_effect = lambda: html_content if injected[0] else preset_text
     mock_el.inner_text.return_value = preset_text
     return mock_el
 
@@ -770,10 +776,15 @@ def test_paragraph_assertion_function_unit():
     assert expected_p == 3
     assert "<br>" in rendered_unsigned
 
-    # 编辑器尾随空 <p></p> (4 >= 3) 同样通过
+    # 段落断言改数非空段：编辑器尾随空段 <p><br></p> 不增加非空段计数 (3 >= 3 依然通过)
     ok_extra, actual_extra, _ = verify_paragraphs_in_html(rendered_unsigned + "<p><br></p>", unsigned_desc)
     assert ok_extra is True
-    assert actual_extra == 4
+    assert actual_extra == 3
+
+    # 若追加实质非空段落，非空段计数增加为 4
+    ok_nonempty, actual_nonempty, _ = verify_paragraphs_in_html(rendered_unsigned + "<p>Extra paragraph content</p>", unsigned_desc)
+    assert ok_nonempty is True
+    assert actual_nonempty == 4
 
     # 塌陷成单个 <p> 必须判失败
     collapsed_html = "<p>Paragraph 1 line A Paragraph 1 line B Paragraph 2 Paragraph 3</p>"

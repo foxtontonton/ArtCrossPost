@@ -9,6 +9,7 @@ ArtCrossPost - DeviantArt Dispatcher (对齐 DA 投稿后台原生设置)
 """
 import os
 import re
+import html
 import time
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
@@ -35,6 +36,10 @@ try:
         is_textarea_element,
         has_signature,
         extract_markdown_links,
+        extract_html_hrefs,
+        normalize_url,
+        _url_path_identity,
+        SIGNATURE_HEADER_MARKERS,
         CANONICAL_SIGNATURE_LINKS,
     )
 except ImportError:
@@ -46,6 +51,10 @@ except ImportError:
         is_textarea_element,
         has_signature,
         extract_markdown_links,
+        extract_html_hrefs,
+        normalize_url,
+        _url_path_identity,
+        SIGNATURE_HEADER_MARKERS,
         CANONICAL_SIGNATURE_LINKS,
     )
 
@@ -551,10 +560,24 @@ class DeviantArtDispatcher(BaseDispatcher):
         except Exception as e_clean:
             logger.warning(f"[DeviantArt] 清理孤儿草稿过程提示: {e_clean}")
 
+    @staticmethod
+    def _is_empty_preset(preset_str: Optional[str]) -> bool:
+        """
+        判断预设内容是否为空 (兼容纯文本与富文本 HTML，忽略空段落、间距断行与空白实体)
+        """
+        if not preset_str:
+            return True
+        text_only = re.sub(r"<[^>]+>", "", str(preset_str))
+        text_only = html.unescape(text_only).replace("\xa0", " ").strip()
+        # 若无实质文本且不含图片或超链接标签，则视为空预设
+        if not text_only and "<img" not in str(preset_str).lower() and "<a" not in str(preset_str).lower():
+            return True
+        return False
+
     def read_existing_description(self, desc_area) -> Optional[str]:
         """
-        从 DA 描述框中读出现有预设内容 (tiptap 取 innerText，textarea 取 value)。
-        成功读取返回文本字符串 (可能包含前导/尾随空白)；定位不到或读取异常返回 None。
+        从 DA 描述框中读出现有预设内容 (tiptap 优先取 innerHTML 以保全富文本与超链接，textarea 取 value)。
+        成功读取返回 HTML 或纯文本字符串；定位不到或读取异常返回 None。
         """
         if not desc_area:
             return None
@@ -565,7 +588,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                     if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
                         return el.value || '';
                     }
-                    return el.innerText || el.textContent || '';
+                    return el.innerHTML || el.innerText || el.textContent || '';
                 }""")
                 if isinstance(val, str):
                     return val
@@ -573,6 +596,10 @@ class DeviantArtDispatcher(BaseDispatcher):
                     return str(val)
 
             # 兼容 mock 环境或无 evaluate 情况
+            if hasattr(desc_area, "inner_html"):
+                html_txt = desc_area.inner_html()
+                if isinstance(html_txt, str):
+                    return html_txt
             if hasattr(desc_area, "inner_text"):
                 txt = desc_area.inner_text()
                 if isinstance(txt, str):
@@ -1132,6 +1159,8 @@ class DeviantArtDispatcher(BaseDispatcher):
         program_desc = (desc or "").strip()
         desc_source = "仅程序描述"
         desc_to_fill = None
+        preset_html_to_merge = None
+        preset_links_to_assert = []
 
         if not desc_area:
             logger.warning("[DeviantArt] 未读到预设描述: 描述输入框未定位")
@@ -1146,40 +1175,75 @@ class DeviantArtDispatcher(BaseDispatcher):
                     desc_source = "仅程序描述"
                 else:
                     desc_source = "仅程序描述"
+            elif self._is_empty_preset(raw_preset):
+                # 读出为空或纯空白
+                logger.info("[DeviantArt] 未读到预设描述: 描述框内现有文本为空")
+                if program_desc:
+                    desc_to_fill = program_desc
+                    desc_source = "仅程序描述"
+                    logger.info(f"[DeviantArt] 描述框无预设文本，直接填入程序描述: '{program_desc[:40]}...'")
+                else:
+                    desc_source = "仅程序描述"
             else:
-                preset_text = raw_preset.strip()
-                if not preset_text:
-                    # 读出为空或纯空白
-                    logger.info("[DeviantArt] 未读到预设描述: 描述框内现有文本为空")
+                # 描述框内存在非空预设内容
+                if not keep_preset_description:
+                    # 开关关闭 → 恢复现行为 (程序描述直接替换)
                     if program_desc:
                         desc_to_fill = program_desc
                         desc_source = "仅程序描述"
-                        logger.info(f"[DeviantArt] 描述框无预设文本，直接填入程序描述: '{program_desc[:40]}...'")
+                        logger.info("[DeviantArt] 保留预设描述开关已关闭，按现行为直接替换描述 (仅程序描述)")
                     else:
-                        desc_source = "仅程序描述"
+                        desc_source = "预设保留"
+                        logger.info("[DeviantArt] 保留预设描述开关已关闭且程序描述为空，保留表单现有文本")
                 else:
-                    # 框里有预设文本
-                    if not keep_preset_description:
-                        # 开关关闭 → 恢复现行为 (程序描述直接替换)
-                        if program_desc:
-                            desc_to_fill = program_desc
-                            desc_source = "仅程序描述"
-                            logger.info("[DeviantArt] 保留预设描述开关已关闭，按现行为直接替换描述 (仅程序描述)")
-                        else:
-                            desc_source = "预设保留"
-                            logger.info("[DeviantArt] 保留预设描述开关已关闭且程序描述为空，保留表单现有文本")
+                    # 开关开启 (默认)
+                    # 1. 残留检测 (只警告不改预设，绝不擅自篡改或截断预设内容)
+                    has_residue = False
+                    residue_reasons = []
+                    for marker in SIGNATURE_HEADER_MARKERS:
+                        if marker in raw_preset:
+                            has_residue = True
+                            residue_reasons.append(f"签名标头标记 '{marker}'")
+                            break
+                    for plat, target_url in CANONICAL_SIGNATURE_LINKS:
+                        if target_url in raw_preset or _url_path_identity(target_url)[1] in raw_preset:
+                            has_residue = True
+                            residue_reasons.append(f"平台引流链接 {plat} ({target_url})")
+                            break
+                    if sig_template:
+                        first_sig_line = next((line.strip() for line in sig_template.splitlines() if line.strip()), None)
+                        if first_sig_line and first_sig_line in raw_preset:
+                            has_residue = True
+                            residue_reasons.append(f"自定义签名首行 '{first_sig_line}'")
+                    if has_residue:
+                        logger.warning(
+                            f"[DeviantArt] 预设描述中检测到疑似历史残留内容 ({'; '.join(residue_reasons)})，按规约保留原样不作篡改"
+                        )
+
+                    # 2. 提取预设原有超链接用于后续保全断言
+                    preset_links = extract_html_hrefs(raw_preset)
+                    preset_links_to_assert = list(dict.fromkeys(preset_links))
+
+                    if program_desc:
+                        # 框里有预设内容 + 程序描述非空 → HTML 层合并 (程序在前，预设在后，段间补空段落 spacer)
+                        preset_html_to_merge = raw_preset.strip()
+                        if "<p" not in preset_html_to_merge and "<div" not in preset_html_to_merge and "<br" not in preset_html_to_merge and "<a" not in preset_html_to_merge:
+                            preset_html_to_merge = render_description_to_html(preset_html_to_merge)
+
+                        # 纯文本表示 (用于 Playwright fill 激活与 textarea 守卫)
+                        preset_plain = render_description_to_plain_text(raw_preset)
+                        if "<" in preset_plain:
+                            preset_plain = re.sub(r"<[^>]+>", "", preset_plain)
+                        preset_plain = html.unescape(preset_plain).strip()
+                        desc_to_fill = f"{program_desc}\n\n{preset_plain}"
+
+                        desc_source = "拼接"
+                        logger.info("[DeviantArt] 描述框存在预设内容且程序描述非空，已执行 HTML 层合并 (程序在前，预设在后)")
                     else:
-                        # 开关开启 (默认)
-                        if program_desc:
-                            # 框里有预设文本 + 程序描述非空 → 拼接后填入，顺序固定为：程序描述 + "\n\n" + 预设描述 (程序在前，预设在后)
-                            desc_to_fill = f"{program_desc}\n\n{preset_text}"
-                            desc_source = "拼接"
-                            logger.info(f"[DeviantArt] 描述框存在预设文本且程序描述非空，已执行拼接填入 (程序在前，预设在后)")
-                        else:
-                            # 框里有预设文本 + 程序描述为空 → 不碰描述框 (现行为，保留)
-                            desc_to_fill = None
-                            desc_source = "预设保留"
-                            logger.info(f"[DeviantArt] 描述框存在预设文本且程序描述为空，保留表单预设描述不触碰描述框: '{preset_text[:40]}...'")
+                        # 框里有预设内容 + 程序描述为空 → 不碰描述框
+                        desc_to_fill = None
+                        desc_source = "预设保留"
+                        logger.info(f"[DeviantArt] 描述框存在预设内容且程序描述为空，保留表单预设描述不触碰描述框: '{raw_preset[:40]}...'")
 
             if desc_to_fill is not None:
                 try:
@@ -1205,10 +1269,17 @@ class DeviantArtDispatcher(BaseDispatcher):
                 if is_textarea_element(desc_area):
                     logger.info("[DeviantArt] 目标描述框为 <textarea> 纯文本元素，跳过 HTML 注入与段落断言")
                 elif desc_to_fill.strip():
-                    try:
-                        html_content = render_description_to_html(desc_to_fill, sig_template=sig_template)
-                    except TypeError:
-                        html_content = render_description_to_html(desc_to_fill)
+                    if desc_source == "拼接" and preset_html_to_merge:
+                        try:
+                            prog_html = render_description_to_html(program_desc, sig_template=sig_template)
+                        except TypeError:
+                            prog_html = render_description_to_html(program_desc)
+                        html_content = f"{prog_html}<p><br></p>{preset_html_to_merge}"
+                    else:
+                        try:
+                            html_content = render_description_to_html(desc_to_fill, sig_template=sig_template)
+                        except TypeError:
+                            html_content = render_description_to_html(desc_to_fill)
                     try:
                         desc_area.evaluate("""(el, html) => {
                             el.focus();
@@ -1246,7 +1317,7 @@ class DeviantArtDispatcher(BaseDispatcher):
                         except Exception:
                             pass
 
-                    is_signed = has_signature(desc_to_fill, sig_template=sig_template)
+                    is_signed = has_signature(program_desc if desc_source == "拼接" else desc_to_fill, sig_template=sig_template)
                     if readback_html is None or (not is_signed and "<" not in readback_html):
                         readback_html = "" if is_signed else html_content
 
@@ -1260,6 +1331,33 @@ class DeviantArtDispatcher(BaseDispatcher):
                         logger.info(f"[DeviantArt] 描述签名真超链接回读断言全部通过 ({expected_links_count}/{expected_links_count} 链接已生效)")
                         if compliance is not None and isinstance(compliance, list):
                             compliance.append(self.verify_compliance_item("deviantart", "signature_links", True, True, f"{expected_links_count}/{expected_links_count} 真超链接已生效"))
+
+                    # 预设超链接保全断言 (拼接时断言预设中的所有 <a> 链接在注入后 100% 依然存在)
+                    if desc_source == "拼接" and preset_links_to_assert:
+                        raw_rb_hrefs = extract_html_hrefs(readback_html)
+                        norm_rb_hrefs = [normalize_url(h) for h in raw_rb_hrefs]
+                        rb_identities = [_url_path_identity(h) for h in raw_rb_hrefs]
+
+                        missing_preset_links = []
+                        for plink in preset_links_to_assert:
+                            norm_plink = normalize_url(plink)
+                            p_netloc, p_path = _url_path_identity(plink)
+                            matched = norm_plink in norm_rb_hrefs
+                            if not matched and p_path:
+                                for rb_net, rb_path in rb_identities:
+                                    if rb_path == p_path and (not rb_net or p_netloc in rb_net or rb_net in p_netloc):
+                                        matched = True
+                                        break
+                            if not matched:
+                                missing_preset_links.append(plink)
+
+                        if missing_preset_links:
+                            missing_str = ", ".join(missing_preset_links)
+                            logger.error(f"[DeviantArt] 预设描述超链接保全断言失败: 预设中以下超链接在注入后丢失: {missing_str}")
+                            return False, f"DeviantArt 预设描述超链接保全断言失败: 预设中以下超链接在注入后丢失: {missing_str}。发布已中止，草稿保留在 Studio。"
+                        logger.info(f"[DeviantArt] 预设描述超链接保全断言全部通过 ({len(preset_links_to_assert)}/{len(preset_links_to_assert)} 预设链接已保全)")
+                        if compliance is not None and isinstance(compliance, list):
+                            compliance.append(self.verify_compliance_item("deviantart", "preset_links_preserved", True, True, f"{len(preset_links_to_assert)}/{len(preset_links_to_assert)} 预设超链接已保全"))
 
                     para_ok, actual_p, expected_p = verify_paragraphs_in_html(readback_html, desc_to_fill, sig_template=sig_template)
                     first_sig_line = next((line.strip() for line in (sig_template or "").splitlines() if line.strip()), "Where to find me")
@@ -1924,7 +2022,6 @@ class DeviantArtDispatcher(BaseDispatcher):
             except Exception as dte:
                 logger.debug(f"[DeviantArt] Studio 点击 Drafts 标签页提示: {dte}")
 
-            import re
             clean_title = title.strip()
             safe_slug = re.sub(r'[\\/*?:"<>|\s]+', '_', clean_title)
             keywords_to_check = [clean_title]

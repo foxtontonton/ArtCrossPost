@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QThread
-from signature_utils import render_description_to_html, CANONICAL_SIGNATURE_TEMPLATE
+from signature_utils import render_description_to_html, CANONICAL_SIGNATURE_TEMPLATE, count_html_paragraphs, verify_paragraphs_in_html
 
 
 @pytest.fixture(scope="session")
@@ -104,19 +104,23 @@ class TestDescriptionParagraphs:
         assert loaded_desc == original_desc
 
     def test_render_to_html_paragraph_count_equals_block_count(self, mock_main_window):
-        """测试经 _get_description_text 取值后接 render_description_to_html，<p> 数严格等于段落数"""
+        """测试经 _get_description_text 取值后接 render_description_to_html，段间补空段落且非空 <p> 数严格等于段落数"""
         win = mock_main_window
         win.desc_input.setPlainText("Scene one description.\nScene two description.\nScene three description.")
         desc = win._get_description_text()
 
         html = render_description_to_html(desc)
-        assert html.count("<p>") == 3
+        # 段间补充空段落 (<p><br></p>) 作为间距段，总 <p> 数为 3 非空段 + 2 间距段 = 5
+        assert html.count("<p>") == 5
+        assert "<p><br></p>" in html
+        # 段落断言改数非空段：统计非空段数严格等于 3
+        assert count_html_paragraphs(html) == 3
         assert "<p>Scene one description.</p>" in html
         assert "<p>Scene two description.</p>" in html
         assert "<p>Scene three description.</p>" in html
 
     def test_render_to_html_with_signature_preserves_all_paragraphs(self, mock_main_window):
-        """测试正文段落加引流签名渲染：正文各段与签名各段均独立成 <p>"""
+        """测试正文段落加引流签名渲染：正文各段与签名各段均独立成 <p>，段间补充空段落间距"""
         win = mock_main_window
         win.desc_input.setPlainText("Chapter 1: The Awakening.\nChapter 2: The Journey.")
         win._append_signature()
@@ -126,6 +130,8 @@ class TestDescriptionParagraphs:
 
         assert "<p>Chapter 1: The Awakening.</p>" in html
         assert "<p>Chapter 2: The Journey.</p>" in html
+        assert "<p><br></p>" in html
+        assert count_html_paragraphs(html) == 2 + 9
         assert 'href="https://patreon.com/foxtontonton"' in html
         assert 'href="https://www.deviantart.com/foxtontonton"' in html
 
