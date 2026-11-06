@@ -17,7 +17,9 @@ from x_text_utils import (
     truncate_x_text,
     split_into_x_threads,
     DEFAULT_X_DA_LINK,
-    DEFAULT_X_NSFW_NOTICE
+    DEFAULT_X_NSFW_NOTICE,
+    get_missing_hashtags,
+    append_hashtags_with_dual_budget
 )
 
 
@@ -288,3 +290,58 @@ class TestSplitIntoXThreads:
         assert url_found is True
         for c in chunks:
             assert calculate_x_char_count(c) <= limit
+
+
+class TestShortTextTagGuardUtilities:
+    """测试短文案标签守卫工具函数 (get_missing_hashtags 与 append_hashtags_with_dual_budget)"""
+
+    def test_get_missing_hashtags_normal_and_ai(self):
+        text = "Check out my new artwork! #anime"
+        tags = ["anime", "catsuit", "latex"]
+        missing = get_missing_hashtags(text, tags, is_ai=True, add_ai_tags=True)
+        assert "#anime" not in missing
+        assert "#catsuit" in missing
+        assert "#latex" in missing
+        assert "#AIArt" in missing
+        assert "#GenerativeArt" in missing
+
+    def test_get_missing_hashtags_all_present_case_insensitive(self):
+        text = "Art post #Catsuit #LATEX #aiart #generativeart"
+        tags = ["catsuit", "latex"]
+        missing = get_missing_hashtags(text, tags, is_ai=True, add_ai_tags=True)
+        assert missing == []
+
+    def test_get_missing_hashtags_empty_tags(self):
+        text = "Pure manual text"
+        assert get_missing_hashtags(text, [], is_ai=False) == []
+        assert get_missing_hashtags(text, None, is_ai=False) == []
+
+    def test_append_hashtags_with_dual_budget_all_fit(self):
+        base = "My manual short text"
+        tags = ["#anime", "#girl", "#AIArt"]
+        res, added = append_hashtags_with_dual_budget(base, tags, x_limit=280, bsky_limit=300)
+        assert added == ["#anime", "#girl", "#AIArt"]
+        assert res == "My manual short text\n\n#anime #girl #AIArt"
+        assert calculate_x_char_count(res) <= 280
+
+    def test_append_hashtags_with_dual_budget_tight_budget_prioritizes_ai(self):
+        # 构造接近 280 限制的基础文本 (250 字符)
+        base = "A" * 250
+        tags = ["#very_long_tag_one", "#very_long_tag_two", "#AIArt"]
+        res, added = append_hashtags_with_dual_budget(base, tags, x_limit=280, bsky_limit=300)
+        assert "#AIArt" in added
+        assert calculate_x_char_count(res) <= 280
+
+    def test_append_hashtags_with_dual_budget_empty_base(self):
+        tags = ["#tag1", "#tag2"]
+        res, added = append_hashtags_with_dual_budget("", tags)
+        assert added == ["#tag1", "#tag2"]
+        assert res == "#tag1 #tag2"
+
+    def test_append_hashtags_with_dual_budget_already_over_limit(self):
+        base = "B" * 285
+        tags = ["#tag1"]
+        res, added = append_hashtags_with_dual_budget(base, tags, x_limit=280)
+        assert added == []
+        assert res == base
+

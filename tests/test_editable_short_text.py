@@ -602,3 +602,140 @@ class TestGatekeeperCaliber:
         assert "310" in win.x_limit_msg_lbl.text()
         assert "30" in win.x_limit_msg_lbl.text()
         assert win._last_publish_payload is None
+
+
+class TestShortTextTagGuard:
+    """⑧ 短文案标签守卫测试 (REQUIREMENTS_short_text_tag_guard)"""
+
+    def test_guard_skips_when_not_manual(self, mock_main_window):
+        """短文案未置脏 (自动组装) 时守卫不拦截不修改"""
+        win = mock_main_window
+        win.short_text_dirty = False
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        ok, res = win._apply_short_text_tag_guard(
+            box_text="Auto assembled text without explicit tags",
+            tags_val=["anime", "illustration"],
+            is_ai=False,
+            platform_options={},
+            selected=selected,
+        )
+        assert ok is True
+        assert res == "Auto assembled text without explicit tags"
+
+    def test_guard_skips_when_tags_already_merged(self, mock_main_window):
+        """手动文本已包含全部标签时守卫不拦截不修改"""
+        win = mock_main_window
+        win.short_text_dirty = True
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        manual_text = "Check out my new art! #anime #illustration"
+        ok, res = win._apply_short_text_tag_guard(
+            box_text=manual_text,
+            tags_val=["anime", "illustration"],
+            is_ai=False,
+            platform_options={},
+            selected=selected,
+        )
+        assert ok is True
+        assert res == manual_text
+
+    def test_guard_skips_when_no_microblog_platform_selected(self, mock_main_window):
+        """仅选择非短文案平台 (如 DeviantArt) 时守卫不介入"""
+        win = mock_main_window
+        win.short_text_dirty = True
+        selected = [DummyDispatcher("deviantart", "DeviantArt", "/")]
+        ok, res = win._apply_short_text_tag_guard(
+            box_text="Manual text without tags",
+            tags_val=["anime"],
+            is_ai=False,
+            platform_options={},
+            selected=selected,
+        )
+        assert ok is True
+        assert res == "Manual text without tags"
+
+    def test_guard_manual_unmerged_user_appends(self, mock_main_window):
+        """手动文本且标签未并入时，用户选择一键追加 -> 双预算追加并更新 UI"""
+        win = mock_main_window
+        win.x_preview_text_edit.setPlainText("Custom manual post copy")
+        win.short_text_dirty = True
+        win._mock_tag_guard_response = "append"
+
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        ok, res = win._apply_short_text_tag_guard(
+            box_text="Custom manual post copy",
+            tags_val=["latex", "catsuit"],
+            is_ai=True,
+            platform_options={"bluesky_ai_hashtags": True},
+            selected=selected,
+        )
+
+        assert ok is True
+        assert "Custom manual post copy\n\n#latex #catsuit #AIArt #GenerativeArt" == res
+        assert win.x_preview_text_edit.toPlainText() == res
+        # 置脏标记保持为 True
+        assert win.short_text_dirty is True
+
+    def test_guard_manual_unmerged_user_ignores(self, mock_main_window):
+        """手动文本且标签未并入时，用户选择保持原样 -> 不追加标签，直接发布"""
+        win = mock_main_window
+        win.x_preview_text_edit.setPlainText("Custom manual copy without tags")
+        win.short_text_dirty = True
+        win._mock_tag_guard_response = "ignore"
+
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        ok, res = win._apply_short_text_tag_guard(
+            box_text="Custom manual copy without tags",
+            tags_val=["tag1"],
+            is_ai=False,
+            platform_options={},
+            selected=selected,
+        )
+
+        assert ok is True
+        assert res == "Custom manual copy without tags"
+        assert win.x_preview_text_edit.toPlainText() == "Custom manual copy without tags"
+
+    def test_guard_manual_unmerged_user_cancels(self, mock_main_window):
+        """手动文本且标签未并入时，用户选择取消发布 -> 守卫中止发布流程"""
+        win = mock_main_window
+        win.x_preview_text_edit.setPlainText("Custom manual copy")
+        win.short_text_dirty = True
+        win._mock_tag_guard_response = "cancel"
+
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        ok, res = win._apply_short_text_tag_guard(
+            box_text="Custom manual copy",
+            tags_val=["tag1"],
+            is_ai=False,
+            platform_options={},
+            selected=selected,
+        )
+
+        assert ok is False
+        assert res == "Custom manual copy"
+
+    def test_guard_scheduled_snapshot_only_warns_no_popup(self, mock_main_window, caplog):
+        """定时发布中即使短文案为手动且标签未并入，也仅记录警告免弹窗放行"""
+        win = mock_main_window
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        scheduled_snapshot = {
+            "short_text": "Scheduled manual copy without tags",
+            "short_text_dirty": True,
+            "tags": ["scheduled_tag"],
+        }
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            ok, res = win._apply_short_text_tag_guard(
+                box_text="Scheduled manual copy without tags",
+                tags_val=["scheduled_tag"],
+                is_ai=False,
+                platform_options={},
+                selected=selected,
+                scheduled_snapshot=scheduled_snapshot,
+            )
+
+        assert ok is True
+        assert res == "Scheduled manual copy without tags"
+        assert "定时发布检测到短文案为手动编辑且标签未并入" in caplog.text
+

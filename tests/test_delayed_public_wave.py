@@ -2343,6 +2343,44 @@ def test_execute_test_artifacts_cleanup_with_pool_pruning(tmp_path):
     assert res["pool_entries_removed"] == 1
     assert res["pool_refs_pruned"] == 2
 
+def test_delayed_wave_short_text_unmerged_tags_only_warns_no_popup(tmp_path, caplog):
+    """
+    公开波短文案标签守卫测试：
+    短文案为手动编辑且标签未并入时，公开波只记录警告不弹窗阻断，继续正常执行分发。
+    """
+    import logging
+    mgr = DelayedQueueManager(queue_file=tmp_path / "queue.json", assets_dir=tmp_path / "assets")
+    src = tmp_path / "art_source.png"
+    Image.new("RGB", (100, 100), color=(50, 60, 70)).save(src)
 
+    item = mgr.enroll(
+        {
+            "title": "Wave Manual Tag Test",
+            "description": "Desc",
+            "raw_images": [str(src)],
+            "short_text": "Manual short text without tags",
+            "short_text_dirty": True,
+            "tags": ["latex", "warrior"],
+            "is_ai": False,
+        },
+        delay_seconds=0,
+        target_platforms=["x_twitter"],
+    )
 
+    disp_x = DummyDispatcher("x_twitter", "X (Twitter)", succeed=True)
+    executor = DelayedWaveExecutor(
+        manager=mgr,
+        dispatchers_factory=lambda: [disp_x],
+        config_provider=lambda: {"censor": {"enabled": False}, "watermark": {"enabled": False}},
+        cache_dir=tmp_path / "cache",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ok, errs = executor.execute_item(item)
+
+    assert ok is True
+    assert "公开波检测到短文案为手动编辑且标签未并入" in caplog.text
+    assert disp_x.publish_called is True
+    assert disp_x.captured_payload is not None
+    assert disp_x.captured_payload.get("short_text") == "Manual short text without tags"
 
