@@ -726,6 +726,88 @@ def test_publish_over_limit_fallback_to_policy_thread(temp_cookies_dir):
         assert len(created_records) >= 2
 
 
+def test_publish_final_draft_grapheme_interception_after_da_link_replacement(temp_cookies_dir):
+    """
+    终稿字素拦截断言：
+    1. short_text 原本含 DA 主页短链接，在 MAX_GRAPHEMES (300) 预算内；
+    2. 当帖具体 post URL 较长，替换当帖链接后终稿字素超出 300；
+    3. 未指定超限策略 (policy=ask) 时，发送前严格拦截并报错中止；
+    4. 指定 truncate 时，成功截断并在 300 字素内发布；
+    5. 若分段仍超限，发帖门禁强拦截绝不调 createRecord。
+    """
+    disp = BlueskyDispatcher(temp_cookies_dir)
+    disp._save_credentials({
+        "handle": "fox.bsky.social",
+        "app_password": "test-password",
+        "accessJwt": "mock-jwt",
+        "did": "did:plc:test123"
+    })
+
+    homepage_url = "https://www.deviantart.com/foxtontonton"
+    long_post_url = "https://www.deviantart.com/foxtontonton/art/Super-Epic-Mega-Long-Title-Artwork-Post-1234567890"
+
+    # 构造原文本：250 字符 + 36 字符主页链接 = 286 字素 (在 300 内)
+    prefix_text = "A" * 250 + " "
+    raw_short_text = f"{prefix_text}{homepage_url}"
+    assert count_graphemes(raw_short_text) < MAX_GRAPHEMES
+
+    # 替换后长度：250 + 1 + 83 = 334 字素 (> 300)
+    replaced_expected = f"{prefix_text}{long_post_url}"
+    assert count_graphemes(replaced_expected) > MAX_GRAPHEMES
+
+    created_records = []
+
+    def _mock_post(url, json=None, data=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "createRecord" in url:
+            created_records.append(json["record"])
+            resp.json.return_value = {"uri": "at://did:plc:test123/app.bsky.feed.post/rkey1", "cid": "cid1"}
+        return resp
+
+    def _mock_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        if "getPostThread" in url:
+            resp.json.return_value = {"thread": {"post": {"record": created_records[-1]}}}
+        return resp
+
+    # 1. 默认/未指定策略 -> 拦截阻断
+    payload_ask = {
+        "short_text": raw_short_text,
+        "da_post_url": long_post_url,
+        "platform_options": {"bluesky_over_limit_policy": "ask"}
+    }
+    with patch("requests.post", side_effect=_mock_post), patch("requests.get", side_effect=_mock_get):
+        ok, msg = disp.publish(payload_ask)
+        assert ok is False
+        assert "发送前终稿字素超限且未指定处理方式" in msg
+        assert len(created_records) == 0
+
+    # 2. 策略为 truncate -> 成功截断并在 300 字素内发布
+    payload_truncate = {
+        "short_text": raw_short_text,
+        "da_post_url": long_post_url,
+        "platform_options": {"bluesky_over_limit_policy": "truncate"}
+    }
+    with patch("requests.post", side_effect=_mock_post), patch("requests.get", side_effect=_mock_get):
+        ok, msg = disp.publish(payload_truncate)
+        assert ok is True
+        assert len(created_records) == 1
+        rec_text = created_records[-1]["text"]
+        assert count_graphemes(rec_text) <= MAX_GRAPHEMES
+        assert rec_text.endswith("...")
+
+    # 3. 强拦截门禁：若某分段在发送前意外仍超 300 字素，拦截绝不发送
+    created_records.clear()
+    with patch("dispatchers.bluesky.truncate_text", return_value="X" * 350):
+        with patch("requests.post", side_effect=_mock_post), patch("requests.get", side_effect=_mock_get):
+            ok, msg = disp.publish(payload_truncate)
+            assert ok is False
+            assert "发送前终稿字素超限" in msg
+            assert len(created_records) == 0
+
+
 # ==============================================================================
 # 8. 删除帖子 delete_post() 与自检探针测试
 # ==============================================================================

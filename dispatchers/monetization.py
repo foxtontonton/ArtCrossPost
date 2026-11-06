@@ -442,12 +442,18 @@ class PatreonDispatcher(BaseDispatcher):
 
         return 0
 
-    def _attach_files_in_editor(self, page, attachments: list) -> tuple[bool, str]:
+    def _attach_files_in_editor(
+        self,
+        page,
+        attachments: list,
+        timeout: float = 90.0,
+        poll_interval: float = 1.0,
+    ) -> tuple[bool, str]:
         """
         在 Patreon 编辑器中挂载附件 (Insert content → Others → Attachments 通道):
         - 支持 Playwright expect_file_chooser 与 input[type='file'] 注入
-        - 编辑器回读 Attachments 区块，严格断言各母版文件名存在
-        - 失败响亮报错并返回 (False, 错误原因)
+        - 90 秒超时轮询与多路定位器回读断言，严格验证各附件文件名出现在编辑器 DOM 中
+        - 附状态摘要 (已就绪数/总数、耗时、已发现/缺失名单)，失败响亮报错并返回 (False, 错误原因)
         """
         if not attachments:
             return True, ""
@@ -458,12 +464,12 @@ class PatreonDispatcher(BaseDispatcher):
             return False, f"附件源文件不存在: {missing}"
 
         # 检查是否已有 mock 挂载 (供单元测试加速)
-        if hasattr(page, "_mock_attachments"):
+        if isinstance(getattr(page, "_mock_attachments", None), list):
             for vf in valid_files:
                 page._mock_attachments.append(os.path.basename(vf))
             return True, f"成功挂载 {len(valid_files)} 个附件 (Mock 模式)"
 
-        logger.info(f"[Patreon] 开始挂载 {len(valid_files)} 个原图附件至编辑器...")
+        logger.info(f"[Patreon] 开始挂载 {len(valid_files)} 个原图附件至编辑器 (90s 轮询与多路定位)...")
 
         attached_ok = False
         try:
@@ -527,53 +533,112 @@ class PatreonDispatcher(BaseDispatcher):
         except Exception as e_att:
             logger.warning(f"[Patreon] 挂载附件尝试异常: {e_att}")
 
-        # 2. 等待上传完成与编辑器回读断言
-        time.sleep(1.0)
-        max_att_wait = time.time() + 30
-        while time.time() < max_att_wait:
-            progress_indicator = page.query_selector(
-                "div[role='progressbar'], div[data-tag='attachment-uploading'], [class*='uploading' i], [class*='spinner' i]"
-            )
-            if not progress_indicator:
-                break
-            time.sleep(1.0)
-
-        # 3. 编辑器回读断言：验证每个附件的母版文件名出现在编辑器 DOM 中
+        # 2. 90 秒超时轮询与多路定位回读断言
         expected_basenames = [os.path.basename(f) for f in valid_files]
-        readback_dom_text = ""
-        try:
-            val = page.evaluate("""() => {
-                const els = document.querySelectorAll(
-                    "[data-tag*='attachment'], div[class*='attachment' i], div[role='region'], div.ProseMirror"
-                );
-                return Array.from(els).map(e => e.innerText || '').join('\\n');
-            }""")
-            if isinstance(val, str):
-                readback_dom_text = val
-        except Exception:
-            pass
+        start_time = time.time()
+        last_log_time = start_time
 
-        if not readback_dom_text:
+        element_selectors = [
+            "[data-tag='attachment-row']",
+            "a[href*='attachment' i]",
+            "a[download]",
+            "[data-tag*='file-name']",
+            "span[title]",
+            "div[class*='fileName' i]",
+            "span[class*='fileName' i]",
+            "p[class*='fileName' i]",
+            "div:has-text('Attachments') ~ div",
+            "div:has-text('Attachments')",
+        ]
+
+        max_iterations = max(1, int(timeout / poll_interval))
+        iteration = 0
+
+        while True:
+            iteration += 1
+            elapsed = time.time() - start_time
+            readback_texts = []
+
+            # 路径 1: evaluate 深度抓取容器与相关节点文本
             try:
-                rows = page.query_selector_all("[data-tag='attachment-row'], div:has-text('Attachments')")
-                readback_dom_text = "\n".join([(r.inner_text() or "") for r in rows])
+                js_script = """() => {
+                    const sel = "[data-tag*='attachment'], [data-testid*='attachment' i], div[class*='attachment' i], li[class*='attachment' i], div[role='region'], div.ProseMirror, [aria-label*='attachment' i]";
+                    const els = document.querySelectorAll(sel);
+                    return Array.from(els).map(e => e.innerText || e.textContent || '').filter(Boolean).join('\\n');
+                }"""
+                val = page.evaluate(js_script)
+                if isinstance(val, str) and val.strip():
+                    readback_texts.append(val)
             except Exception:
                 pass
 
-        missing_names = []
-        for bn in expected_basenames:
-            if bn not in readback_dom_text:
+            # 路径 2: 多路选择器 query_selector_all 逐项提取文本与属性
+            for sel in element_selectors:
+                try:
+                    elems = page.query_selector_all(sel)
+                    for el in elems:
+                        txt = (el.inner_text() or "").strip()
+                        if txt:
+                            readback_texts.append(txt)
+                        title_attr = (el.get_attribute("title") or "").strip()
+                        if title_attr:
+                            readback_texts.append(title_attr)
+                        aria_attr = (el.get_attribute("aria-label") or "").strip()
+                        if aria_attr:
+                            readback_texts.append(aria_attr)
+                except Exception:
+                    pass
+
+            # 路径 3: 兜底全局文本检索
+            if not readback_texts:
+                try:
+                    body_text = page.inner_text("body") or ""
+                    if body_text:
+                        readback_texts.append(body_text)
+                except Exception:
+                    pass
+
+            combined_dom_text = "\n".join(readback_texts)
+
+            # 逐个核对期望文件名
+            found_names = []
+            missing_names = []
+            for bn in expected_basenames:
                 short_bn = bn[:16] if len(bn) > 16 else bn
-                if short_bn not in readback_dom_text:
+                if bn in combined_dom_text or short_bn in combined_dom_text:
+                    found_names.append(bn)
+                else:
                     missing_names.append(bn)
 
-        if missing_names:
-            err_msg = f"Patreon 附件挂载失败: 编辑器未回读到全部附件 ({missing_names})"
-            logger.error(f"[Patreon] {err_msg}")
-            return False, err_msg
+            status_summary = (
+                f"已就绪: {len(found_names)}/{len(expected_basenames)} "
+                f"(耗时: {elapsed:.1f}s/{timeout:.0f}s)"
+            )
 
-        logger.info(f"[Patreon] 附件回读断言通过: 全部 {len(expected_basenames)} 个母版附件已就绪")
-        return True, ""
+            # 全部附件回读成功
+            if not missing_names:
+                detail_summary = f"{status_summary} | 附件清单: [{', '.join(found_names)}]"
+                logger.info(f"[Patreon] 附件回读断言通过: 全部 {len(expected_basenames)} 个附件已就绪 | 状态摘要: {detail_summary}")
+                return True, f"成功挂载 {len(expected_basenames)} 个附件 ({detail_summary})"
+
+            # 超时断言失败
+            if elapsed >= timeout or iteration >= max_iterations:
+                effective_elapsed = max(elapsed, iteration * poll_interval) if iteration >= max_iterations else elapsed
+                err_msg = (
+                    f"Patreon 附件挂载失败 (超时 {timeout:.0f}s): "
+                    f"仍有 {len(missing_names)}/{len(expected_basenames)} 个附件未回读到 | "
+                    f"耗时: {effective_elapsed:.1f}s | 缺失: {missing_names} | 已找到: {found_names} | "
+                    f"状态摘要: {status_summary}"
+                )
+                logger.error(f"[Patreon] {err_msg}")
+                return False, err_msg
+
+            # 周期性日志输出 (每 10 秒汇报一次进展)
+            if time.time() - last_log_time >= 10.0:
+                logger.info(f"[Patreon] 正在轮询等待附件渲染: {status_summary} | 待就绪: {missing_names}")
+                last_log_time = time.time()
+
+            time.sleep(poll_interval)
 
     def publish(self, payload):
         """
@@ -988,7 +1053,8 @@ class PatreonDispatcher(BaseDispatcher):
                         compliance.append(self.verify_compliance_item("patreon", "attachments", True, False, f"缺附件: {att_err}"))
                         return False, att_err, compliance
 
-                    compliance.append(self.verify_compliance_item("patreon", "attachments", True, True, f"{len(attachments)} 个母版文件已成功挂载"))
+                    summary_msg = att_err or f"{len(attachments)} 个母版文件已成功挂载"
+                    compliance.append(self.verify_compliance_item("patreon", "attachments", True, True, summary_msg))
 
                 # 6. 等待发布按钮激活并提交 (Patreon React 组件在素材加载后异步激活发布按钮)
                 pub_sel = "[data-tag='make-a-post-action-publish'], button:has-text('Publish now'), button:has-text('Publish')"

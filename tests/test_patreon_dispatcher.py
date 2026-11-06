@@ -224,3 +224,121 @@ def test_patreon_gallery_count_mismatch_fails_loudly(tmp_path, monkeypatch):
     assert len(count_comp) == 1
     assert count_comp[0]["verified"] is False
 
+
+def test_patreon_attach_multi_selector_and_status_summary(tmp_path):
+    """
+    测试 Patreon 附件回读多路定位与状态摘要输出：
+    1. 附件分别通过 evaluate 容器和 a[download] 多路定位器命中；
+    2. 返回值包含已就绪数/总数、耗时、附件清单的状态摘要；
+    3. 全部落盘后快速通过，不拖延轮询。
+    """
+    disp = PatreonDispatcher(tmp_path)
+    file_a = tmp_path / "work_01_hd_raw_wm.png"
+    file_b = tmp_path / "work_02_hd_raw_wm.png"
+    file_a.write_bytes(b"dummy1")
+    file_b.write_bytes(b"dummy2")
+
+    mock_page = MagicMock()
+    mock_page.query_selector.return_value = None
+
+    # 路径 1: evaluate 返回包含 file_a
+    def fake_evaluate(script):
+        if "attachment" in str(script):
+            return "work_01_hd_raw_wm.png"
+        return ""
+    mock_page.evaluate.side_effect = fake_evaluate
+
+    # 路径 2: query_selector_all a[download] 返回包含 file_b 的元素
+    def fake_query_selector_all(sel):
+        if "a[download]" in sel:
+            el = MagicMock()
+            el.inner_text.return_value = "Download work_02_hd_raw_wm.png"
+            el.get_attribute.return_value = ""
+            return [el]
+        if "input[type='file']" in sel:
+            fi = MagicMock()
+            return [fi]
+        return []
+    mock_page.query_selector_all.side_effect = fake_query_selector_all
+
+    ok, summary = disp._attach_files_in_editor(
+        mock_page,
+        [file_a, file_b],
+        timeout=5.0,
+        poll_interval=0.01,
+    )
+
+    assert ok is True
+    assert "成功挂载 2 个附件" in summary
+    assert "已就绪: 2/2" in summary
+    assert "work_01_hd_raw_wm.png" in summary
+    assert "work_02_hd_raw_wm.png" in summary
+
+
+def test_patreon_attach_timeout_with_status_summary(tmp_path):
+    """
+    测试 Patreon 附件回读 90 秒超时轮询断言与缺失状态摘要：
+    1. 期望 2 个附件，DOM 中仅出现 1 个；
+    2. 超时退出后报错明确，输出耗时、缺失项、已找到项与状态摘要。
+    """
+    disp = PatreonDispatcher(tmp_path)
+    file_a = tmp_path / "alpha_master_wm.png"
+    file_b = tmp_path / "beta_master_wm.png"
+    file_a.write_bytes(b"dummy_a")
+    file_b.write_bytes(b"dummy_b")
+
+    mock_page = MagicMock()
+    mock_page.query_selector.return_value = None
+
+    # DOM 中仅有 alpha，beta 始终未就绪
+    mock_page.evaluate.return_value = "alpha_master_wm.png uploaded"
+    mock_page.query_selector_all.return_value = []
+    mock_page.inner_text.return_value = "alpha_master_wm.png uploaded"
+
+    ok, err_msg = disp._attach_files_in_editor(
+        mock_page,
+        [file_a, file_b],
+        timeout=0.05,
+        poll_interval=0.01,
+    )
+
+    assert ok is False
+    assert "Patreon 附件挂载失败" in err_msg and "超时" in err_msg
+    assert "仍有 1/2 个附件未回读到" in err_msg
+    assert "缺失: ['beta_master_wm.png']" in err_msg
+    assert "已找到: ['alpha_master_wm.png']" in err_msg
+    assert "状态摘要: 已就绪: 1/2" in err_msg
+
+
+def test_patreon_attach_title_and_aria_label_multi_selector(tmp_path):
+    """
+    测试通过 span[title] 或 [aria-label] 属性定位附件
+    """
+    disp = PatreonDispatcher(tmp_path)
+    file_c = tmp_path / "gamma_render_file.png"
+    file_c.write_bytes(b"dummy_c")
+
+    mock_page = MagicMock()
+    mock_page.query_selector.return_value = None
+    mock_page.evaluate.return_value = ""
+
+    def fake_qsa(sel):
+        if "span[title]" in sel:
+            el = MagicMock()
+            el.inner_text.return_value = ""
+            el.get_attribute.side_effect = lambda attr: "gamma_render_file.png" if attr == "title" else ""
+            return [el]
+        return []
+    mock_page.query_selector_all.side_effect = fake_qsa
+
+    ok, summary = disp._attach_files_in_editor(
+        mock_page,
+        [file_c],
+        timeout=2.0,
+        poll_interval=0.01,
+    )
+
+    assert ok is True
+    assert "成功挂载 1 个附件" in summary
+    assert "gamma_render_file.png" in summary
+

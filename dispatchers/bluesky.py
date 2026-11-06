@@ -1156,6 +1156,30 @@ class BlueskyDispatcher(BaseDispatcher):
         short_text = payload.get("short_text")
         if short_text and str(short_text).strip():
             base_text = str(short_text)
+            # 核心机制: 终稿替换当帖链接 (若 short_text 仍含 DA 主页链接且传入了具体当帖 URL / 引流链接)
+            target_post_url = (
+                payload.get("da_post_url")
+                or payload.get("actual_traffic_link")
+                or payload.get("bluesky_da_link")
+                or da_link
+            )
+            default_homepage = (
+                cfg.get("defaults", {}).get("bluesky_da_link")
+                or cfg.get("defaults", {}).get("x_da_link")
+                or DEFAULT_BLUESKY_DA_LINK
+            )
+            if target_post_url and target_post_url != default_homepage and target_post_url not in base_text:
+                if default_homepage in base_text:
+                    base_text = base_text.replace(default_homepage, target_post_url)
+                elif default_homepage.rstrip('/') in base_text:
+                    base_text = base_text.replace(default_homepage.rstrip('/'), target_post_url)
+                elif re.search(r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])", base_text, flags=re.IGNORECASE):
+                    base_text = re.sub(
+                        r"https?://(?:www\.)?deviantart\.com/[a-zA-Z0-9_-]+/?(?![a-zA-Z0-9_/-])",
+                        target_post_url,
+                        base_text,
+                        flags=re.IGNORECASE
+                    )
         else:
             sig_template = payload.get("sig_template") or payload.get("signature_template")
             base_text = format_bluesky_teaser_post(
@@ -1170,7 +1194,7 @@ class BlueskyDispatcher(BaseDispatcher):
                 sig_template=sig_template,
             )
 
-        # P0-2: 字数上限安全网与字素簇计数 (正常情况下 base_text 已在 MAX_GRAPHEMES 内)
+        # P0-2: 发送前终稿字素核算与强校验拦截 (替换当帖链接后进行核算)
         grapheme_len = count_graphemes(base_text)
         chunks = []
         if grapheme_len <= MAX_GRAPHEMES:
@@ -1178,18 +1202,18 @@ class BlueskyDispatcher(BaseDispatcher):
         else:
             over_limit_action = platform_opts.get("bluesky_over_limit_action")
             if not over_limit_action:
-                policy = platform_opts.get("bluesky_over_limit_policy")
+                policy = platform_opts.get("bluesky_over_limit_policy") or cfg.get("defaults", {}).get("bluesky_over_limit_policy")
                 if policy in ("truncate", "thread"):
                     over_limit_action = policy
                 else:
-                    return False, f"Bluesky 文本字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})"
+                    return False, f"Bluesky 发送前终稿字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})，已中止发布"
 
             if over_limit_action == "thread":
                 chunks = split_into_thread(base_text, MAX_GRAPHEMES)
             elif over_limit_action == "truncate":
                 chunks = [truncate_text(base_text, MAX_GRAPHEMES)]
             else:
-                return False, f"Bluesky 文本字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})"
+                return False, f"Bluesky 发送前终稿字素超限且未指定处理方式 ({grapheme_len}/{MAX_GRAPHEMES})，已中止发布"
 
         if not chunks or not chunks[0]:
             return False, "发布内容为空，已终止"
@@ -1321,6 +1345,11 @@ class BlueskyDispatcher(BaseDispatcher):
         parent_ref = None
 
         for idx, chunk_text in enumerate(chunks):
+            # 终稿发送前字素强校验拦截门禁
+            chunk_graphemes = count_graphemes(chunk_text)
+            if chunk_graphemes > MAX_GRAPHEMES:
+                return False, f"Bluesky 发送前终稿字素超限 (第 {idx + 1} 帖: {chunk_graphemes}/{MAX_GRAPHEMES})，已中止发布"
+
             record = {
                 "$type": "app.bsky.feed.post",
                 "text": chunk_text,
