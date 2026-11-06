@@ -57,13 +57,20 @@ SIGNATURE_HEADER_MARKERS = [
     "Where to find me — same name everywhere:",
     "Where to find me -- same name everywhere:",
     "Where to find me",
+    "Where to find me:",
+    "You can find me on any of these platforms — same name everywhere:",
+    "You can find me on any of these platforms -- same name everywhere:",
+    "You can find me on any of these platforms",
+    "You can find me on any of these platforms:",
+    "Find me on:",
+    "Find me at:",
 ]
 
 
 def normalize_url(url: str) -> str:
     """
     归一化 URL 用于比对:
-    1. 小写协议与域名
+    1. 小写协议与域名 (去除 www. 前缀)
     2. 移除尾随斜杠 (根路径除外)
     3. 保留路径大小写与查询参数
     """
@@ -73,6 +80,8 @@ def normalize_url(url: str) -> str:
         p = urlparse(url.strip())
         scheme = p.scheme.lower()
         netloc = p.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
         path = p.path.rstrip("/") if p.path != "/" else "/"
         query = f"?{p.query}" if p.query else ""
         return f"{scheme}://{netloc}{path}{query}"
@@ -116,7 +125,46 @@ def split_body_and_signature(desc: str, sig_template: Optional[str] = None) -> T
             idx = desc.rfind(first_line)
             return desc[:idx].rstrip(), desc[idx:].strip()
 
-    # 4. 未找到签名标记，全量视为正文
+    # 4. 尝试从系统配置读取 signature_template 匹配 (外部未显式传递 sig_template 时的自动透传)
+    if not sig_template:
+        try:
+            from config import load_config
+            cfg = load_config()
+            cfg_sig = cfg.get("signature_template")
+            if cfg_sig:
+                cfg_st = cfg_sig.strip()
+                if cfg_st and cfg_st in desc:
+                    idx = desc.rfind(cfg_st)
+                    return desc[:idx].rstrip(), desc[idx:].strip()
+                cfg_first_line = next((line.strip() for line in cfg_sig.splitlines() if line.strip()), None)
+                if cfg_first_line and cfg_first_line in desc:
+                    idx = desc.rfind(cfg_first_line)
+                    return desc[:idx].rstrip(), desc[idx:].strip()
+        except Exception:
+            pass
+
+    # 5. 兜底防御：若未匹配到签名头部标记与模板首行，但在文本中检测到规范引流链接或已知平台链接的 Markdown 链接，切分签名段
+    for m in MARKDOWN_LINK_REGEX.finditer(desc):
+        url_lower = m.group(2).lower()
+        if (
+            any(target_url in m.group(2) or _url_path_identity(target_url)[1] == _url_path_identity(m.group(2))[1] for _, target_url in CANONICAL_SIGNATURE_LINKS)
+            or "patreon.com" in url_lower
+            or "deviantart.com" in url_lower
+            or "civitai.red" in url_lower
+            or "ko-fi.com" in url_lower
+            or "bsky.app" in url_lower
+            or "x.com" in url_lower
+        ):
+            idx = m.start()
+            line_start = desc.rfind("\n\n", 0, idx)
+            if line_start != -1:
+                split_pos = line_start + 2
+            else:
+                l_start = desc.rfind("\n", 0, idx)
+                split_pos = 0 if l_start == -1 else l_start + 1
+            return desc[:split_pos].rstrip(), desc[split_pos:].strip()
+
+    # 6. 未找到签名标记，全量视为正文
     return desc.strip(), ""
 
 
@@ -244,22 +292,33 @@ def verify_signature_links_in_html(
     html_content: str,
     expected_links: Optional[List[Tuple[str, str]]] = None,
     da_post_url: Optional[str] = None,
+    sig_template: Optional[str] = None,
 ) -> Tuple[bool, List[str]]:
     """
-    回读富文本编辑器 HTML，严格断言签名中的 6 个真实超链接 <a href="目标URL"> 全部存在。
+    回读富文本编辑器 HTML，严格断言签名中的真实超链接 <a href="目标URL"> 全部存在。
     缺任一返回 (False, [未生效链接清单])。
     禁止纯文本填了就算成功。
     支持按路径比对与 DA 链接查询参数剥除。
 
     :param html_content: 编辑器回读的 innerHTML
-    :param expected_links: 期望的 (平台名, URL) 清单，默认 CANONICAL_SIGNATURE_LINKS
+    :param expected_links: 期望的 (平台名, URL) 清单，默认从 sig_template 提取或 CANONICAL_SIGNATURE_LINKS
     :param da_post_url: 当 DA 透传帖子链接存在时，DeviantArt 链接允许匹配当帖 URL (自动剥除查询串并按路径比对)
+    :param sig_template: 签名模板字符串 (若未传 expected_links，优先从模板提取 Markdown 链接断言)
     :return: (is_all_present, missing_links_info)
     """
     if not html_content:
         return False, ["编辑器 HTML 内容为空"]
 
-    targets = expected_links if expected_links is not None else list(CANONICAL_SIGNATURE_LINKS)
+    if expected_links is not None:
+        targets = list(expected_links)
+    elif sig_template:
+        extracted = extract_markdown_links(sig_template)
+        if extracted:
+            targets = [(name, url) for name, url in extracted]
+        else:
+            targets = list(CANONICAL_SIGNATURE_LINKS)
+    else:
+        targets = list(CANONICAL_SIGNATURE_LINKS)
 
     raw_hrefs = extract_html_hrefs(html_content)
     normalized_dom_urls = [normalize_url(h) for h in raw_hrefs]
@@ -286,7 +345,7 @@ def verify_signature_links_in_html(
                     break
 
         # 3. 若是 DeviantArt 平台且存在 da_post_url 透传，允许匹配当帖链接 (支持路径比对与剥查询串)
-        if not matched and name.lower() in ("deviantart", "da") and clean_da_post:
+        if not matched and (name.lower() in ("deviantart", "da") or "deviantart.com" in expected_url.lower()) and clean_da_post:
             norm_da_post = normalize_url(clean_da_post)
             if norm_da_post in normalized_dom_urls:
                 matched = True

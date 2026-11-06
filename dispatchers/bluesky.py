@@ -218,6 +218,7 @@ def format_bluesky_teaser_post(
     limit: int = MAX_GRAPHEMES,
     is_ai: bool = True,
     add_ai_tags: bool = True,
+    sig_template: Optional[str] = None,
 ) -> str:
     """
     Bluesky 方案 B 预告+引流统一排版引擎 (与 X 共通同构、同优先级):
@@ -275,7 +276,7 @@ def format_bluesky_teaser_post(
     # 清理正文并剔除旧的赞助签名与引流模板 (不带签名，teaser 取代签名)
     if desc:
         from signature_utils import split_body_and_signature
-        body_part, _ = split_body_and_signature(desc)
+        body_part, _ = split_body_and_signature(desc, sig_template=sig_template)
     else:
         body_part = ""
 
@@ -1156,6 +1157,7 @@ class BlueskyDispatcher(BaseDispatcher):
         if short_text and str(short_text).strip():
             base_text = str(short_text)
         else:
+            sig_template = payload.get("sig_template") or payload.get("signature_template")
             base_text = format_bluesky_teaser_post(
                 title=title,
                 desc=desc,
@@ -1164,7 +1166,8 @@ class BlueskyDispatcher(BaseDispatcher):
                 nsfw_notice=nsfw_notice,
                 limit=MAX_GRAPHEMES,
                 is_ai=is_ai,
-                add_ai_tags=add_ai_tags
+                add_ai_tags=add_ai_tags,
+                sig_template=sig_template,
             )
 
         # P0-2: 字数上限安全网与字素簇计数 (正常情况下 base_text 已在 MAX_GRAPHEMES 内)

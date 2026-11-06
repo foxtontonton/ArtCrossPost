@@ -49,7 +49,7 @@ except ImportError:
     except ImportError:
         sip = None
 
-from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR
+from config import load_config, save_config, load_window_state, save_window_state, COOKIES_DIR, CACHE_DIR, DATA_DIR, ARCHIVE_DIR
 from censor_engine import CensorEngine, map_strength_to_mosaic_size, map_strength_to_blur_ksize
 from watermark_engine import WatermarkEngine
 from video_engine import (
@@ -9158,6 +9158,8 @@ class MainWindow(QMainWindow):
         payload = {
             "title": title_val,
             "description": desc_val,
+            "sig_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
+            "signature_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
             "tags": tags,
             "_media_roles": media_roles,
             "images": da_images,               # 默认兼容主图 (DeviantArt 平台)
@@ -9406,8 +9408,8 @@ class MainWindow(QMainWindow):
                 archive_publish_run_outputs(
                     payload=getattr(self, "_last_publish_payload", {}) or {},
                     results={platform_name: val},
-                    archive_root=ARCHIVE_DIR,
-                    data_dir=DATA_DIR,
+                    archive_root=getattr(self, "archive_dir", ARCHIVE_DIR),
+                    data_dir=getattr(self, "data_dir", DATA_DIR),
                 )
             except Exception as arch_err:
                 logger.error(f"[Archive] 单平台重试归档失败 (不影响发布结果): {arch_err}")
@@ -9472,8 +9474,8 @@ class MainWindow(QMainWindow):
             archive_publish_run_outputs(
                 payload=getattr(self, "_last_publish_payload", {}) or {},
                 results=results if isinstance(results, dict) else {},
-                archive_root=ARCHIVE_DIR,
-                data_dir=DATA_DIR,
+                archive_root=getattr(self, "archive_dir", ARCHIVE_DIR),
+                data_dir=getattr(self, "data_dir", DATA_DIR),
             )
         except Exception as arch_err:
             logger.error(f"[Archive] 发布完成归档异常 (不改写发布结果): {arch_err}")
@@ -10442,6 +10444,8 @@ class MainWindow(QMainWindow):
         payload = {
             "title": title,
             "description": desc,
+            "sig_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
+            "signature_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
             "patreon_description": desc,
             "tags": tags,
             "is_nsfw": is_nsfw,
@@ -10482,8 +10486,8 @@ class MainWindow(QMainWindow):
                 archive_publish_run_outputs(
                     payload=payload,
                     results=results if isinstance(results, dict) else {"patreon": pat_res},
-                    archive_root=ARCHIVE_DIR,
-                    data_dir=DATA_DIR,
+                    archive_root=getattr(self, "archive_dir", ARCHIVE_DIR),
+                    data_dir=getattr(self, "data_dir", DATA_DIR),
                 )
             except Exception as arch_err:
                 logger.error(f"[Tab B] Patreon 发布完成归档异常 (不改写发布结果): {arch_err}")
@@ -10505,6 +10509,8 @@ class MainWindow(QMainWindow):
             material_snapshot = {
                 "title": title,
                 "description": desc,
+                "sig_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
+                "signature_template": self.config.get("signature_template") or CANONICAL_SIGNATURE_TEMPLATE,
                 "short_text": "",
                 "tags": tags,
                 "is_nsfw": is_nsfw,
