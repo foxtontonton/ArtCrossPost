@@ -220,6 +220,7 @@ def render_description_to_html(desc: str, sig_template: Optional[str] = None) ->
     1. 正文段纯文本填写，<、>、& 严格转义，方括号不被误解析为链接
     2. 签名段中的 [显示文字](URL) 解析为真超链接 <a href="...">
     3. 段落按双换行切分为 <p>...</p> 块，单换行转为 <br>
+    4. 段落之间补充空段落 (<p><br></p>) 作为间距段 (spacer)，解决富文本编辑器段间无行距问题
     """
     if not desc:
         return "<p></p>"
@@ -253,7 +254,8 @@ def render_description_to_html(desc: str, sig_template: Optional[str] = None) ->
     if not html_blocks:
         return "<p></p>"
 
-    return "".join(html_blocks)
+    # 富文本渲染段间补空段落 (<p><br></p>)，保证编辑器中段间空行可见
+    return "<p><br></p>".join(html_blocks)
 
 
 def render_description_to_plain_text(desc: str) -> str:
@@ -429,11 +431,36 @@ def count_expected_paragraphs(desc: str, sig_template: Optional[str] = None) -> 
     return count
 
 
-def count_html_paragraphs(html_content: str) -> int:
-    """统计回读 HTML 中的 <p> 段落标签总数"""
+def count_html_paragraphs(html_content: str, only_non_empty: bool = True) -> int:
+    """
+    统计回读 HTML 中的 <p> 段落标签数量。
+    按需求改数非空段 (only_non_empty=True，默认)：
+    过滤掉空段落或间距段 (如 <p></p>, <p><br></p>, <p>&nbsp;</p>, <p class="..."><br></p>)，
+    仅统计包含实质文本、图片或链接的非空段落。
+    """
     if not html_content or not isinstance(html_content, str):
         return 0
-    return len(re.findall(r"<p(?:\s[^>]*)?>", html_content, flags=re.IGNORECASE))
+    if not only_non_empty:
+        return len(re.findall(r"<p(?:\s[^>]*)?>", html_content, flags=re.IGNORECASE))
+
+    # 提取所有 <p>...</p> 块 (支持跨行)
+    p_blocks = re.findall(r"<p(?:\s[^>]*)?>(.*?)</p>", html_content, flags=re.IGNORECASE | re.DOTALL)
+    if not p_blocks:
+        # 兼容无闭合 </p> 的情况，按 <p> 开头切分
+        p_blocks = re.split(r"<p(?:\s[^>]*)?>", html_content, flags=re.IGNORECASE)[1:]
+
+    non_empty_count = 0
+    for block in p_blocks:
+        # 去掉 <br> 标签
+        stripped_br = re.sub(r"<\s*br\s*/?\s*>", "", block, flags=re.IGNORECASE)
+        # 去掉其他 HTML 标签获取纯文本
+        text = re.sub(r"<[^>]+>", "", stripped_br)
+        text = html.unescape(text).replace("\xa0", " ").strip()
+        # 包含实质文本，或包含 <img> / <a 标签
+        if text or "<img" in block.lower() or "<a" in block.lower():
+            non_empty_count += 1
+
+    return non_empty_count
 
 
 def verify_paragraphs_in_html(
@@ -444,7 +471,7 @@ def verify_paragraphs_in_html(
     """
     段落回读断言:
     - 期望段落数 = 描述文本按 \\n\\s*\\n 切分后的非空段数（正文+签名整体计算，与 render 的切分口径一致）；
-    - 回读编辑器 innerHTML，统计 <p> 数须 >= 期望段落数（编辑器尾随空 <p> 只会多不会少，故用 >=）。
+    - 回读编辑器 innerHTML，按需求改数非空段：统计非空 <p> 数须 >= 期望段落数（间距空段与尾随空段不计入非空段）。
     :return: (is_ok, actual_p_count, expected_p_count)
     """
     if isinstance(desc_or_expected, int):
@@ -452,7 +479,7 @@ def verify_paragraphs_in_html(
     else:
         expected_p = count_expected_paragraphs(str(desc_or_expected or ""), sig_template=sig_template)
 
-    actual_p = count_html_paragraphs(html_content)
+    actual_p = count_html_paragraphs(html_content, only_non_empty=True)
     if expected_p <= 0:
         return True, actual_p, 0
     return (actual_p >= expected_p, actual_p, expected_p)

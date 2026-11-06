@@ -40,11 +40,27 @@ def _create_mock_page_for_da_submit(preset_text=""):
     mock_page = MagicMock()
     mock_context = MagicMock()
 
+    current_val = [preset_text]
+
     # 描述框 mock
     mock_desc_area = MagicMock()
-    mock_desc_area.evaluate.side_effect = lambda script, *args: preset_text
-    mock_desc_area.inner_text.return_value = preset_text
-    mock_desc_area.get_attribute.return_value = preset_text
+
+    def _eval(script, *args):
+        s = str(script)
+        if "insertHTML" in s or "setContent" in s:
+            if args:
+                current_val[0] = args[0]
+            return True
+        if "el.innerHTML = html" in s or "el.innerHTML =" in s:
+            if args:
+                current_val[0] = args[0]
+            return True
+        return current_val[0]
+
+    mock_desc_area.evaluate.side_effect = _eval
+    mock_desc_area.inner_text.side_effect = lambda: current_val[0]
+    mock_desc_area.inner_html.side_effect = lambda: current_val[0]
+    mock_desc_area.get_attribute.side_effect = lambda attr: current_val[0] if attr == "value" else None
 
     # 文件上传控件
     mock_file_input = MagicMock()
@@ -324,3 +340,151 @@ def test_config_deviantart_keep_preset_description():
     cfg = load_config()
     assert cfg.get("deviantart_keep_preset_description") is True
     assert cfg.get("defaults", {}).get("deviantart_keep_preset_description") is True
+
+
+# =========================================================================
+# 需求 7: DA 预设改 HTML 读回与 HTML 层合并、预设链接保全断言、残留只警告不改预设
+# =========================================================================
+
+def test_da_preset_empty_detection_variants():
+    """测试 _is_empty_preset 对各类纯文本与富文本空段落的精确识别"""
+    disp = DeviantArtDispatcher(Path("dummy"))
+    assert disp._is_empty_preset(None) is True
+    assert disp._is_empty_preset("") is True
+    assert disp._is_empty_preset("   \n\t  ") is True
+    assert disp._is_empty_preset("<p></p>") is True
+    assert disp._is_empty_preset("<p><br></p>") is True
+    assert disp._is_empty_preset("<p class='is-empty'><br class='ProseMirror-trailingBreak'></p>") is True
+    assert disp._is_empty_preset("<p>&nbsp;</p>") is True
+    assert disp._is_empty_preset("<p>   <br>  </p>") is True
+
+    # 非空情形
+    assert disp._is_empty_preset("Hello world") is False
+    assert disp._is_empty_preset("<p>Commission info</p>") is False
+    assert disp._is_empty_preset('<p><a href="https://boosty.to/art">Boosty</a></p>') is False
+    assert disp._is_empty_preset('<p><img src="test.jpg" /></p>') is False
+
+
+def test_da_preset_html_readback_and_merging_preserves_html_links(dummy_da_env):
+    """
+    测试预设从 HTML 读回并在 HTML 层合并:
+    1. 预设原有 <a href="..."> 超链接与排版标签在合并后不被 html.escape 转义为 &lt;a ...&gt;
+    2. 合并后注入的 HTML 中，程序描述在前，预设在后，段间含有 <p><br></p> 间距空段
+    """
+    disp = dummy_da_env["disp"]
+    preset_html = '<p>Support me on <a href="https://boosty.to/myart">Boosty</a> and <a href="https://fanbox.cc/@myart">Fanbox</a>!</p>'
+    program_desc = "Chapter 1: The New Horizon.\n\nEnjoy the artwork!"
+
+    mock_page, mock_context, mock_desc_area, _ = _create_mock_page_for_da_submit(preset_text=preset_html)
+
+    comp_list = []
+    with patch.object(disp, "safe_goto"), \
+         patch.object(disp, "assert_field_value", return_value=(True, "OK")), \
+         patch.object(disp, "check_selector_state", return_value=(True, "OK")), \
+         patch.object(disp, "assert_submitted", return_value=(True, "")), \
+         patch("time.sleep"):
+        ok, msg = disp._submit_deviation(
+            mock_page, mock_context, [dummy_da_env["img"]],
+            title="Artwork Title", desc=program_desc, _tags=["art"],
+            is_mature=False, mature_level="strict", is_ai=False,
+            gallery="", compliance=comp_list, keep_preset_description=True
+        )
+
+    assert ok is True
+    assert getattr(disp, "_last_desc_source", None) == "拼接"
+
+    # 验证最终注入的 HTML 保留了预设的真实超链接标签，而不是被转义成实体
+    injected_html = mock_desc_area.evaluate("el => el.innerHTML || ''")
+    assert '<a href="https://boosty.to/myart">Boosty</a>' in injected_html
+    assert '<a href="https://fanbox.cc/@myart">Fanbox</a>' in injected_html
+    assert "&lt;a href=" not in injected_html
+    # 验证段间包含空段落间距
+    assert "<p><br></p>" in injected_html
+    # 验证合规项记录了预设超链接保全
+    assert any(c.get("item") == "preset_links_preserved" and "2/2 预设超链接已保全" in c.get("detail", "") for c in comp_list)
+
+
+def test_da_preset_link_preservation_assertion_failure_aborts(dummy_da_env, caplog):
+    """
+    测试预设超链接保全断言失败场景:
+    若注入后编辑器 DOM 丢弃了预设中的某个超链接，断言失败阻断发布，草稿保留在 Studio
+    """
+    disp = dummy_da_env["disp"]
+    preset_html = '<p>Follow on <a href="https://boosty.to/important_link">Boosty</a></p>'
+    program_desc = "Standard illustration description"
+
+    mock_page, mock_context, mock_desc_area, _ = _create_mock_page_for_da_submit(preset_text=preset_html)
+
+    # 模拟编辑器在注入后回读时，丢失了 boosty 超链接 (例如变成了纯文本)
+    broken_readback_html = "<p>Standard illustration description</p><p><br></p><p>Follow on Boosty</p>"
+
+    def broken_eval(script, *args):
+        s = str(script)
+        if "insertHTML" in s or "setContent" in s:
+            return True
+        if "innerHTML" in s:
+            return broken_readback_html
+        return preset_html
+
+    mock_desc_area.evaluate.side_effect = broken_eval
+    with patch.object(disp, "read_existing_description", return_value=preset_html):
+        comp_list = []
+        with caplog.at_level(logging.ERROR), \
+             patch.object(disp, "safe_goto"), \
+             patch.object(disp, "assert_field_value", return_value=(True, "OK")), \
+             patch.object(disp, "check_selector_state", return_value=(True, "OK")), \
+             patch.object(disp, "assert_submitted", return_value=(True, "")), \
+             patch("time.sleep"):
+            ok, msg = disp._submit_deviation(
+                mock_page, mock_context, [dummy_da_env["img"]],
+                title="Artwork Title", desc=program_desc, _tags=["art"],
+                is_mature=False, mature_level="strict", is_ai=False,
+                gallery="", compliance=comp_list, keep_preset_description=True
+            )
+
+    assert ok is False
+    assert "DeviantArt 预设描述超链接保全断言失败" in msg
+    assert "https://boosty.to/important_link" in msg
+    assert "草稿保留在 Studio" in msg
+    assert any("预设描述超链接保全断言失败" in record.message for record in caplog.records)
+
+
+def test_da_preset_residue_warning_only_without_mutating_preset(dummy_da_env, caplog):
+    """
+    测试预设残留只警告不改预设:
+    预设中包含历史签名标记或引流链接时，仅记录 WARNING 日志，绝不篡改或截断预设内容
+    """
+    disp = dummy_da_env["disp"]
+    residue_preset_html = (
+        '<p>Old description text</p>'
+        '<p>Where to find me — same name everywhere:</p>'
+        '<p>💜Patreon：<a href="https://patreon.com/foxtontonton">FOXTONTONTON</a></p>'
+    )
+    program_desc = "Brand new exclusive story"
+
+    mock_page, mock_context, mock_desc_area, _ = _create_mock_page_for_da_submit(preset_text=residue_preset_html)
+
+    comp_list = []
+    with caplog.at_level(logging.WARNING), \
+         patch.object(disp, "safe_goto"), \
+         patch.object(disp, "assert_field_value", return_value=(True, "OK")), \
+         patch.object(disp, "check_selector_state", return_value=(True, "OK")), \
+         patch.object(disp, "assert_submitted", return_value=(True, "")), \
+         patch("time.sleep"):
+        ok, msg = disp._submit_deviation(
+            mock_page, mock_context, [dummy_da_env["img"]],
+            title="Artwork Title", desc=program_desc, _tags=["art"],
+            is_mature=False, mature_level="strict", is_ai=False,
+            gallery="", compliance=comp_list, keep_preset_description=True
+        )
+
+    assert ok is True
+    warning_records = [r for r in caplog.records if "疑似历史残留内容" in r.message]
+    assert len(warning_records) >= 1
+    assert "保留原样不作篡改" in warning_records[0].message
+
+    # 验证最终注入的 HTML 中，残留的预设内容完整保留，绝无被擅自删除或截断
+    injected_html = mock_desc_area.evaluate("el => el.innerHTML || ''")
+    assert "Old description text" in injected_html
+    assert "Where to find me — same name everywhere:" in injected_html
+    assert 'href="https://patreon.com/foxtontonton"' in injected_html
