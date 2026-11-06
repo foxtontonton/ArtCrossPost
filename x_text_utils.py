@@ -347,3 +347,97 @@ def split_into_x_threads(full_text: str, limit: int = 280) -> list[str]:
         final_chunks.append(full_c)
 
     return final_chunks
+
+
+def get_missing_hashtags(
+    text: str,
+    tags: list[str],
+    is_ai: bool = False,
+    add_ai_tags: bool = True,
+) -> list[str]:
+    """
+    检查 text 中尚未并入的候选标签 (Hashtags):
+    - 规范化 tags 列表为 #tag (去除前导 # / ＃，空格转下划线)
+    - 若 is_ai 为 True 且 add_ai_tags 为 True，加入 #AIArt, #GenerativeArt
+    - 检查 text 中是否已存在对应 hashtag (不区分大小写)
+    - 返回: 尚未并入的 hashtag 列表
+    """
+    if not text:
+        text = ""
+
+    candidate_hashtags = []
+    seen_lower = set()
+
+    for t in (tags or []):
+        clean = re.sub(r"^[#＃]+", "", str(t).strip())
+        clean = re.sub(r"\s+", "_", clean).strip()
+        if clean and clean.lower() not in seen_lower:
+            seen_lower.add(clean.lower())
+            candidate_hashtags.append(f"#{clean}")
+
+    if is_ai and add_ai_tags:
+        for ai_t in ("AIArt", "GenerativeArt"):
+            if ai_t.lower() not in seen_lower:
+                seen_lower.add(ai_t.lower())
+                candidate_hashtags.append(f"#{ai_t}")
+
+    text_lower = text.lower()
+    missing = [h for h in candidate_hashtags if h.lower() not in text_lower]
+    return missing
+
+
+def append_hashtags_with_dual_budget(
+    base_text: str,
+    hashtags: list[str],
+    x_limit: int = 280,
+    bsky_limit: int = 300,
+) -> tuple[str, list[str]]:
+    """
+    按 X (280) 与 Bluesky (300) 双预算贪心追加 hashtags:
+    - 仅追加能在双预算内放下的标签
+    - 优先保留 AI 标签 (若有)，普通标签按顺序放入
+    - 返回: (appended_full_text, actually_appended_tags)
+    """
+    from dispatchers.bluesky import count_graphemes
+
+    if not hashtags:
+        return base_text, []
+
+    base_trimmed = (base_text or "").rstrip()
+    sep = "\n\n" if base_trimmed else ""
+
+    # 分离普通标签与 AI 标签
+    ai_tag_names = {"#aiart", "#generativeart"}
+    ai_tags = [h for h in hashtags if h.lower() in ai_tag_names]
+    normal_tags = [h for h in hashtags if h.lower() not in ai_tag_names]
+
+    # 首先尝试全量追加
+    all_ordered = normal_tags + ai_tags
+    full_cand = f"{base_trimmed}{sep}{' '.join(all_ordered)}" if base_trimmed else " ".join(all_ordered)
+    if calculate_x_char_count(full_cand) <= x_limit and count_graphemes(full_cand) <= bsky_limit:
+        return full_cand, all_ordered
+
+    # 预算紧凑时：AI 标签优先保全，剩余空间贪心放入普通标签
+    # 1. 尝试保全 AI 标签
+    survived_ai = []
+    for at in ai_tags:
+        test_ai = survived_ai + [at]
+        test_str = f"{base_trimmed}{sep}{' '.join(test_ai)}" if base_trimmed else " ".join(test_ai)
+        if calculate_x_char_count(test_str) <= x_limit and count_graphemes(test_str) <= bsky_limit:
+            survived_ai.append(at)
+
+    # 2. 贪心填入普通标签 (放在 AI 标签之前)
+    survived_normal = []
+    for nt in normal_tags:
+        test_all = survived_normal + [nt] + survived_ai
+        test_str = f"{base_trimmed}{sep}{' '.join(test_all)}" if base_trimmed else " ".join(test_all)
+        if calculate_x_char_count(test_str) <= x_limit and count_graphemes(test_str) <= bsky_limit:
+            survived_normal.append(nt)
+
+    final_appended = survived_normal + survived_ai
+    if not final_appended:
+        return base_text, []
+
+    result_text = f"{base_trimmed}{sep}{' '.join(final_appended)}" if base_trimmed else " ".join(final_appended)
+    return result_text, final_appended
+

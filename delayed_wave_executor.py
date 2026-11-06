@@ -795,6 +795,21 @@ class DelayedWaveExecutor:
             "_media_roles": media_roles,
         }
 
+        # 短文案标签守卫: 公开波只警告不弹窗
+        st = payload.get("short_text")
+        if st and snapshot.get("short_text_dirty") and any(p in target_platforms for p in ("x_twitter", "bluesky")):
+            from x_text_utils import get_missing_hashtags
+            missing_wave = get_missing_hashtags(
+                text=st,
+                tags=snapshot.get("tags", []),
+                is_ai=snapshot.get("is_ai", False),
+                add_ai_tags=platform_opts.get("bluesky_ai_hashtags", True),
+            )
+            if missing_wave:
+                logger.warning(
+                    f"[短文案标签守卫] 公开波检测到短文案为手动编辑且标签未并入 ({len(missing_wave)} 个标签: {missing_wave})，免弹窗保持原样分发"
+                )
+
         # 6. 确定执行顺序: 若包含 DeviantArt，优先执行 DA 以获取当帖引流链接
         has_da = "deviantart" in target_platforms
 
