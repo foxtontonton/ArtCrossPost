@@ -654,7 +654,7 @@ class TestShortTextTagGuard:
         assert res == "Manual text without tags"
 
     def test_guard_manual_unmerged_user_appends(self, mock_main_window):
-        """手动文本且标签未并入时，用户选择一键追加 -> 双预算追加并更新 UI"""
+        """手动文本且标签未并入时，用户选择一键追加 -> 双预算追加并更新 UI (仅追加用户标签)"""
         win = mock_main_window
         win.x_preview_text_edit.setPlainText("Custom manual post copy")
         win.short_text_dirty = True
@@ -670,10 +670,26 @@ class TestShortTextTagGuard:
         )
 
         assert ok is True
-        assert "Custom manual post copy\n\n#latex #catsuit #AIArt #GenerativeArt" == res
+        assert "Custom manual post copy\n\n#latex #catsuit" == res
         assert win.x_preview_text_edit.toPlainText() == res
         # 置脏标记保持为 True
         assert win.short_text_dirty is True
+
+    def test_guard_user_tags_only_ignores_missing_ai_tags(self, mock_main_window):
+        """标签守卫只认用户标签触发：即便 is_ai=True 且短文案未含 AI 标签，只要用户标签已全并入则不拦截"""
+        win = mock_main_window
+        win.short_text_dirty = True
+        selected = [DummyDispatcher("x_twitter", "X", "/")]
+        manual_text = "Check out my new art! #latex #catsuit"
+        ok, res = win._apply_short_text_tag_guard(
+            box_text=manual_text,
+            tags_val=["latex", "catsuit"],
+            is_ai=True,
+            platform_options={"bluesky_ai_hashtags": True},
+            selected=selected,
+        )
+        assert ok is True
+        assert res == manual_text
 
     def test_guard_manual_unmerged_user_ignores(self, mock_main_window):
         """手动文本且标签未并入时，用户选择保持原样 -> 不追加标签，直接发布"""

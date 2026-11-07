@@ -6095,12 +6095,11 @@ class MainWindow(QMainWindow):
         from x_text_utils import get_missing_hashtags, append_hashtags_with_dual_budget
         from dispatchers.bluesky import MAX_GRAPHEMES
 
-        add_ai = platform_options.get("bluesky_ai_hashtags", True) if platform_options else True
         missing = get_missing_hashtags(
             text=box_text,
             tags=tags_val,
-            is_ai=is_ai,
-            add_ai_tags=add_ai,
+            is_ai=False,
+            add_ai_tags=False,
         )
         if not missing:
             return True, box_text

@@ -802,8 +802,8 @@ class DelayedWaveExecutor:
             missing_wave = get_missing_hashtags(
                 text=st,
                 tags=snapshot.get("tags", []),
-                is_ai=snapshot.get("is_ai", False),
-                add_ai_tags=platform_opts.get("bluesky_ai_hashtags", True),
+                is_ai=False,
+                add_ai_tags=False,
             )
             if missing_wave:
                 logger.warning(
